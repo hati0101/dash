@@ -162,7 +162,11 @@ const agentState = a => {
   if (m > stale) return { cls: 'blocked', label: '끊김', icon: 'alert' };
   const hl = a.health;
   if (hl && hl.state && hl.state !== 'ok' && hl.needs_user) return { cls: 'blocked', label: HEALTH[hl.state] || '실행 오류', icon: 'alert' };
-  if ((S.data?.runs || []).some(r => r.agent === a.id && isRunning(r))) return { cls: 'progress', label: '실행 중', icon: 'play' };
+  if ((S.data?.runs || []).some(r => r.agent === a.id && isRunning(r))) return { cls: 'progress', label: '자동 실행 중', icon: 'play' };
+  if (a.current) return { cls: 'done', label: '작업 중', icon: 'play' };
+  const q = a.queue;
+  if (q && (q.runnable || q.answers)) return { cls: 'progress', label: '곧 실행', icon: 'clock' };
+  if (q && q.total) return { cls: 'neutral', label: q.waiting_answer ? '답 기다림' : '변화 기다림', icon: 'clock' };
   if (!a.current) return { cls: 'neutral', label: '쉬는 중', icon: 'pause' };
   return { cls: 'done', label: '작업 중', icon: 'play' };
 };
@@ -976,7 +980,8 @@ function decisionsNeededCard() {
         h('span', { class: `lead-ico ${ans ? 'good' : 'warn'}` }, icon(ans ? 'check' : 'scale')),
         h('div', { class: 'body' }, h('button', { class: 't clamp-3 linkless', onclick: () => openDecisionNeeded(q) }, q.question),
           q.recommendation && !ans ? h('div', { class: 's' }, h('b', null, '권장 '), q.recommendation) : null,
-          ans ? h('div', { class: 's' }, h('b', null, '내 결정: '), ans.choice || '(메모)', ans.note ? ' — ' + ans.note : '', ' · ', ans.pending ? '반영 대기' : '전달됨')
+          ans ? [h('div', { class: 's' }, h('b', null, '내 결정: '), ans.choice || '(메모)', ans.note ? ' — ' + ans.note : ''),
+            (() => { const r = decisionReflect(q, ans); return h('div', { class: `reflect ${r.cls}` }, icon(r.cls === 'done' ? 'check' : r.cls === 'blocked' ? 'alert' : 'clock'), h('span', { class: 'clamp-2' }, r.text)); })()]
             : h('div', { class: 'choice-row' }, h('button', { class: 'btn sm primary', onclick: () => openDecisionNeeded(q) }, icon('scale'), `열어서 결정${(q.options || []).length ? ` (선택지 ${q.options.length}개)` : ''}`)),
           h('div', { class: 'meta' }, h('span', { class: 'wait' }, av(q.owner || 'user', true), (person(q.owner || 'user').name) + ' 결정'),
             h('span', { class: 'tag' }, `${person(q._author || 'claude').name} 제기`), topicTag(q.task_id), histCount(topicById(q.task_id), q.task_id), h('span', { class: 'when' }, fmtRel(q.since)))));
@@ -1086,7 +1091,8 @@ function agentCard(a) {
     cur ? h('div', { class: 'now' }, h('b', null, cur.project), (cur.task || cur.topic) ? h('div', { class: 'muted', style: { 'font-size': '12px' } }, [cur.task, cur.topic].filter(Boolean).join(' · ')) : null,
       cur.note ? h('div', { class: 'muted', style: { 'font-size': '12px' } }, cur.note) : null,
       h('div', { class: 'muted', style: { 'font-size': '12px' } }, `${fmtRel(cur.since)}부터`))
-      : h('div', { class: 'now idle' }, '지금 하는 일을 알리지 않았습니다.'),
+      : null,
+    runnerBox(a) || (cur ? null : h('div', { class: 'now idle' }, '자동 실행 기록도, 대화 세션 작업 알림도 아직 없습니다.')),
     h('div', { class: 'stats' }, h('div', null, h('b', null, s.assigned.length), h('span', null, '맡은 주제')), h('div', null, h('b', null, s.turn.length), h('span', null, '내 차례')),
       h('div', null, h('b', null, s.tasks.length), h('span', null, '관련 작업'))),
     s.assigned.length ? h('div', { class: 'list' }, s.assigned.slice(0, 4).map(t => h('button', { class: 'item', onclick: () => openTopic(t) },
@@ -1095,6 +1101,36 @@ function agentCard(a) {
     (() => { const r = (S.data.runs || []).find(x => x.agent === a.id); return r ? h('div', { class: 'muted', style: { 'font-size': '12px' } }, `마지막 자동 실행 ${fmtRel(r.ended || r.started)} · ${RUN_RESULT[r.result] || r.result}${r.topic ? ' · ' + ((topicById(r.topic) || {}).title || r.topic) : ''}`) : null; })(),
     h('div', { class: 'muted', style: { 'font-size': '12px' } }, `마지막 신호 ${fmtRel(a.last_seen || a.pc_synced)}`));
 }
+// 작업자 카드: 자동 실행기가 지금 무엇을 하는지, 차례인 일이 왜 멈춰 있는지
+function runnerBox(a) {
+  const run = (S.data.runs || []).find(r => r.agent === a.id);
+  const q = a.queue;
+  if (!run && !(q && q.total)) return null;
+  const title = r => ((topicById(r.topic) || {}).title || r.topic || '질문 답 반영');
+  const parts = q ? [['곧 실행', (q.runnable || 0) + (q.answers || 0)], ['아키텍트 답 대기', q.waiting_answer], ['다른 쪽 변화 기다림', q.waiting_change],
+    ['재시도 대기', q.retry], ['오늘 한도', q.limit], ['대화 세션이 잡음', q.held]].filter(([, n]) => n) : [];
+  return h('div', { class: `now runner-now${isRunning(run) ? '' : ' idle'}` },
+    run ? (isRunning(run)
+      ? [h('b', null, `자동 실행 중 · ${title(run)}`), h('div', { class: 'muted', style: { 'font-size': '12px' } }, `${fmtRel(run.started)} 시작 · 이유: ${run.reason || '-'}`)]
+      : [h('b', null, `마지막 자동 실행 · ${title(run)}`), h('div', { class: 'muted', style: { 'font-size': '12px' } }, `${fmtRel(run.ended || run.started)} · ${RUN_RESULT[run.result] || run.result}`),
+        run.summary ? h('div', { class: 'muted clamp-2', style: { 'font-size': '12px' } }, run.summary) : null]) : null,
+    q && q.total ? h('div', { class: 'queue-line' }, `차례 ${q.total}건 — `, parts.map(([l, n]) => `${l} ${n}`).join(' · ') || '정리 중') : null);
+}
+// 아키텍트 결정이 실제로 반영됐는지: 질문한 작업자가 결정 뒤에 남긴 기록·실행 이력을 찾는다
+function decisionReflect(q, ans) {
+  if (ans.pending) return { cls: 'user_test', text: '전달 대기 — 다음 동기화 때 작업자에게 갑니다' };
+  const who = q._author, at = toMs(ans.ts) || 0;
+  const t = topicById(q.task_id);
+  if (!t) return { cls: 'neutral', text: '연결된 주제가 없어 반영 기록을 찾을 수 없습니다' };
+  const run = (S.data.runs || []).find(r => r.agent === who && r.topic === t.id && toMs(r.started) >= at);
+  const note = (t.notes || []).filter(n => n.by === who && toMs(n.ts) > at).at(-1);
+  if (run && isRunning(run)) return { cls: 'progress', text: `${person(who).name}가 지금 반영 중 (${fmtRel(run.started)} 시작)` };
+  if (note) return { cls: 'done', text: `반영됨 · ${fmtAbs(note.ts)} ${person(who).name} ${NOTE_KIND[note.kind] || note.kind}: ${String(note.body || '').slice(0, 90)}` };
+  if (run) return { cls: run.result === 'fail' ? 'blocked' : 'done', text: `${person(who).name} 실행 ${RUN_RESULT[run.result] || run.result} · ${fmtRel(run.ended || run.started)}${run.summary ? ' · ' + run.summary.slice(0, 80) : ''}` };
+  if (t.status === 'done') return { cls: 'done', text: '주제 완료' };
+  return { cls: 'user_test', text: `아직 반영 전 — ${person(who).name} 실행기 차례 대기` };
+}
+
 // 허브 공지: 모든 PC 작업자에게 보낸 작업 방식 변경. 누가 확인했는지(대화 세션 확인 / 실행기 반영) 보인다
 function noticesCard(agents) {
   const list = S.data.notices || [];
@@ -1566,7 +1602,8 @@ function decisionParts(q, redraw) {
         h('span', { class: 'when' }, `${fmtAbs(q.since)} · ${fmtRel(q.since)}`)),
       questionText(q.question),
       q.recommendation ? h('div', { class: 'callout' }, h('b', null, '권장 '), q.recommendation) : null,
-      ans ? h('div', { class: 'callout' }, h('b', null, '내 결정: '), ans.choice || '(메모)', ans.note ? ' — ' + ans.note : '', ' ', ans.pending ? h('span', { class: 'st user_test' }, icon('clock'), '반영 대기') : h('span', { class: 'st done' }, icon('check'), '반영됨')) : null,
+      ans ? h('div', { class: 'callout' }, h('b', null, '내 결정: '), ans.choice || '(메모)', ans.note ? ' — ' + ans.note : '',
+        (() => { const r = decisionReflect(q, ans); return h('div', { class: `reflect ${r.cls}` }, icon(r.cls === 'done' ? 'check' : 'clock'), h('span', null, r.text)); })()) : null,
       (q.options || []).length ? [h('h4', null, '선택지 — 누르면 바로 결정됩니다'), optionList(q, o => decide(q, o, note.value.trim(), redraw))] : null,
       h('h4', null, '직접 적기'),
       h('div', { class: 'composer' }, note, h('div', { class: 'row' }, h('button', { class: 'btn primary', onclick: () => { if (!note.value.trim()) { note.focus(); return; } decide(q, '', note.value.trim(), redraw); } }, icon('send'), '메모로 결정 보내기'))),

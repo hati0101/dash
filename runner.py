@@ -913,6 +913,47 @@ def run_job(j: dict, data: dict, state: dict) -> bool:
     return True
 
 
+def queue_summary(aid: str, data: dict, state: dict) -> dict:
+    """이 작업자 차례인 주제가 지금 왜 돌거나 안 도는지 센다(대시보드 작업자 카드에 '쉬는 중' 대신 보여 준다)."""
+    runnable = {(j.get("topic") or {}).get("id") or j["sig"] for j in find_jobs(data, copy.deepcopy(state), only=aid)}
+    answered = {a["id"] for a in data.get("decisions_answered", [])}
+    asking = {q.get("task_id") for q in data.get("decisions_needed", []) if q.get("_author") == aid and q["id"] not in answered}
+    holds, stamp, today = node.active_holds(CFG), now().isoformat(timespec="seconds"), f"{now():%Y%m%d}"
+    out = {"total": 0, "runnable": 0, "waiting_answer": 0, "waiting_change": 0, "retry": 0, "limit": 0, "held": 0}
+    for t in data.get("topics", []):
+        if t.get("turn") != aid or t.get("status") not in ACTIVE:
+            continue
+        out["total"] += 1
+        st = (state.get("topics") or {}).get(t["id"], {})
+        if t["id"] in holds:
+            out["held"] += 1
+        elif t["id"] in runnable:
+            out["runnable"] += 1
+        elif (st.get("retry_after") or "") > stamp:
+            out["retry"] += 1
+        elif st.get("day") == today and st.get("count", 0) >= MAX_PER_TOPIC_PER_DAY:
+            out["limit"] += 1
+        elif t["id"] in asking:
+            out["waiting_answer"] += 1
+        else:
+            out["waiting_change"] += 1  # 이미 처리함 — 다른 작업자 기록·아키텍트 대화를 기다림
+    out["answers"] = sum(1 for j in find_jobs(data, copy.deepcopy(state), only=aid) if j["kind"] == "answer")
+    return out
+
+
+def publish_queue(aid: str, data: dict, state: dict):
+    q = queue_summary(aid, data, state)
+    cur = ((node.load_records(CFG).get("agents") or {}).get(aid) or {}).get("queue") or {}
+    if {k: v for k, v in cur.items() if k != "at"} == q:
+        return  # 그대로면 기록 파일을 건드리지 않는다
+
+    def fn(rec):
+        slot = rec["agents"][aid]
+        if {k: v for k, v in (slot.get("queue") or {}).items() if k != "at"} != q:  # 숫자가 바뀔 때만(매분 업로드 방지)
+            slot["queue"] = {**q, "at": now().isoformat(timespec="seconds")}
+    node.update_records(CFG, fn)
+
+
 def spawn(agent_id: str):
     """작업자마다 따로 띄운다(한 AI가 오래 걸려도 다른 AI가 줄 서지 않게)."""
     subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--agent", agent_id], cwd=str(ROOT), env=child_env(),
@@ -955,6 +996,10 @@ def main():
     data = load_data(pw)
     waiting = []
     for aid in agents:
+        try:
+            publish_queue(aid, data, load_state(aid))
+        except Exception as exc:  # noqa: BLE001 — 표시용이라 실패해도 실행은 계속
+            log(f"차례 현황 기록 실패 {aid}: {exc}")
         try:
             if now().timestamp() - (node.node_dir(CFG) / f"runner-{aid}.lock").stat().st_mtime < 90 * 60:
                 continue

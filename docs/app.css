@@ -600,6 +600,11 @@ mark { background: color-mix(in srgb, var(--st-user_test) 35%, transparent); col
 .hist-item.k-run.r-fail .hist-body, .hist-item.k-run.r-partial .hist-body { border-color: color-mix(in srgb, var(--st-blocked) 50%, var(--line)); border-style: solid; }
 .hist-item.k-handoff .hist-body { border-color: color-mix(in srgb, var(--st-progress) 45%, var(--line)); }
 
+.reflect { --pc: var(--ink-3); display: flex; gap: 6px; align-items: flex-start; margin-top: 4px; font-size: 12px; color: var(--ink-2); }
+.reflect svg { width: 13px; height: 13px; flex: none; margin-top: 2px; color: var(--pc); }
+.reflect.done { --pc: var(--st-done); } .reflect.user_test { --pc: var(--st-user_test); } .reflect.blocked { --pc: var(--st-blocked); } .reflect.progress { --pc: var(--st-progress); }
+.runner-now { display: grid; gap: 3px; }
+.queue-line { font-size: 12px; color: var(--ink-2); padding-top: 4px; border-top: 1px dashed var(--line); margin-top: 2px; }
 .notice { border-top: 1px solid var(--line); padding: 10px 2px; display: grid; gap: 8px; }
 .notice:first-child { border-top: 0; }
 .notice summary { cursor: pointer; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 13.5px; }
