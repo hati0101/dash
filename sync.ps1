@@ -9,6 +9,8 @@ Set-Location $PSScriptRoot
 $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
 # 예약 작업 환경의 기본 문자표(cp949) 때문에 python 출력이 깨지거나 예외가 나지 않게 UTF-8로 고정
 $env:PYTHONUTF8 = '1'; $env:PYTHONIOENCODING = 'utf-8'
+# python이 UTF-8로 내보내므로 PowerShell도 UTF-8로 읽어야 기록(sync.log)의 한글이 깨지지 않는다
+try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
 New-Item -ItemType Directory -Force (Join-Path $PSScriptRoot '.local') | Out-Null
 $log = Join-Path $PSScriptRoot '.local/sync.log'
 function Log([string]$m) { ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ' ' + $m) | Out-File $log -Append -Encoding utf8 }
