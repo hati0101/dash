@@ -655,7 +655,9 @@ def gate_id(n: int, tid: str, ts) -> str:
 
 def run_gates(t: dict, finishes: list, answered: dict) -> dict:
     """AI의 끝냄 기록과 아키텍트 관문 답을 시간순으로 따라가 지금 단계·관문을 정한다."""
-    stage, since, gate, history, final = "work", None, None, [], None
+    # live: ★4 실게임(격리 서버) 시험이 열린 뒤 통과할 때까지는 개발컴 Claude 대화 세션 단계(아키텍트 결정 2026-10-02).
+    # 이 동안 자동 실행기는 깨우지 않고, '문제 있음'으로 되돌아온 수정도 대화에서 고쳐 끝내면 자체 시험 없이 바로 ★4로 돌아온다.
+    stage, since, gate, history, final, live = "work", None, None, [], None, False
     fin = sorted(finishes, key=lambda f: to_dt(f[0]))
     for _ in range(300):
         if gate is None:
@@ -664,11 +666,12 @@ def run_gates(t: dict, finishes: list, answered: dict) -> dict:
                 break
             ts, by, body = nxt
             since = ts
-            if stage == "work" and not is_research(t, body):
+            if stage == "work" and not live and not is_research(t, body):
                 stage = "test"  # 진행 끝 → AI 자체 시험(관문 없음)
                 continue
-            n = 40 if stage == "work" else STAGE_GATE[stage]
+            n = (4 if live else 40) if stage == "work" else STAGE_GATE[stage]
             gate = {"n": n, "id": gate_id(n, t["id"], ts), "opened_at": ts, "by": by, "summary": body, "from_stage": stage}
+            live = live or n == 4
         ans = answered.get(gate["id"])
         if not ans:
             break
@@ -677,13 +680,17 @@ def run_gates(t: dict, finishes: list, answered: dict) -> dict:
         since = ans.get("ts") or since
         prev, gate = gate, None
         if act in ("park", "done"):
-            final = act
+            final, live = act, False
             break
         if act == "open5":
+            live = False  # 실게임 통과 → 대화 세션 단계 끝, 다시 자동 흐름
             gate = {"n": 5, "id": gate_id(5, t["id"], since), "opened_at": since, "by": prev["by"], "summary": prev["summary"], "from_stage": prev["from_stage"]}
             continue
         stage = act
-    return {"stage": stage, "since": since, "gate": gate, "history": history[-10:], "final": final}
+    return {"stage": stage, "since": since, "gate": gate, "history": history[-10:], "final": final, "live": live}
+
+
+LIVE_AGENT = "dev-claude"  # 실게임(격리 서버) 시험·즉시 수정은 개발컴 Claude 대화 세션에서
 
 
 def stage_owner(stage: str, t: dict, known) -> str | None:
@@ -789,6 +796,11 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
         if finishes:  # 단계·관문: AI 끝냄은 다음 단계·관문으로, 완료는 아키텍트 ★9(조사·분석은 결과 확인)에서만
             g = run_gates(t, finishes, gate_answers)
             t["gate_history"] = g["history"]
+            if g["live"] and not g["final"]:  # 실게임 시험 단계: 담당을 개발컴 Claude로 옮기고 대화 세션에서 진행
+                live_to = LIVE_AGENT if (known is None or LIVE_AGENT in known) else t.get("assignee")
+                if t.get("assignee") != live_to:
+                    t["live_from"] = t.get("assignee")
+                t["assignee"], t["live_session"] = live_to, True
             if g["gate"]:
                 gt = g["gate"]
                 gt.update(label=GATE_LABEL[gt["n"]], options=gate_options(gt["n"], t), step=4 if gt["n"] == 40 else gt["n"])
@@ -852,6 +864,8 @@ def review_partner(a: str | None, known: set | None) -> str | None:
 def whose_turn(t: dict) -> str | None:
     if t["status"] in ("done", "parked", "backlog", "dropped", "review_user"):
         return None
+    if t.get("live_session"):
+        return t.get("assignee")  # 실게임 시험 단계: 개발컴 Claude 대화 세션(자동 실행기는 깨우지 않음)
     req = t.get("open_request")
     if req and req.get("to"):
         return req["to"]  # 요청받은 쪽 차례. 답(reply)하면 담당에게 돌아간다

@@ -280,6 +280,18 @@ button.card-foot:hover { color: var(--ink); }
 .agent .rl { font-size: 12px; color: var(--ink-3); }
 .agent .now { border-left: 2px solid var(--accent); padding-left: 10px; font-size: 13px; }
 .agent .now.idle { border-left-color: var(--line-2); color: var(--ink-3); }
+/* 작업자 카드: 구독 한도 사용량(남은 비율이 핵심, 막대는 사용한 비율) */
+.agent .usage { display: grid; gap: 5px; background: var(--card); border-radius: 10px; padding: 8px 10px; }
+.agent .usage .u-hd { display: flex; align-items: center; gap: 6px; font-size: 12px; min-width: 0; }
+.agent .usage .u-hd .muted { font-size: 11px; white-space: nowrap; }
+.agent .usage .u-row { display: grid; grid-template-columns: 38px minmax(40px, 1fr) auto; align-items: center; gap: 8px; font-size: 12px; }
+.agent .usage .u-row .lbl { color: var(--ink-3); }
+.agent .usage .u-row .n { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.agent .usage .u-row .n small { color: var(--ink-3); font-size: 11px; }
+.agent .usage .u-row i { background: var(--st-done); }
+.agent .usage .u-row.warn i { background: var(--st-user_test); }
+.agent .usage .u-row.bad i { background: var(--st-blocked); }
+.agent .usage .u-row.bad .n b { color: var(--st-blocked); }
 .agent .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
 .agent .stats div { background: var(--card); border-radius: 9px; padding: 6px 8px; }
 .agent .stats b { display: block; font-size: 17px; font-variant-numeric: tabular-nums; }

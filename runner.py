@@ -608,6 +608,77 @@ def neutral_dir() -> Path:
     return d
 
 
+# ---------------------------------------------------------------- 구독 한도 사용률(작업자 화면 '사용량')
+# Claude: `claude -p --output-format stream-json`의 rate_limit_event(계정 전체 5시간·주간 사용률).
+# Codex: ~/.codex/sessions 기록의 마지막 token_count 이벤트 rate_limits(계정 전체). 둘 다 추가 실행·비용 없이 읽는다.
+def _epoch_iso(v) -> str | None:
+    try:
+        return datetime.fromtimestamp(float(v), KST).isoformat(timespec="seconds")
+    except (TypeError, ValueError, OSError, OverflowError):
+        return None
+
+
+def claude_usage(info: dict | None) -> dict | None:
+    if not isinstance(info, dict):
+        return None
+    win = dict(info.get("unifiedWindows") or {})
+    if info.get("rateLimitType") and info.get("rateLimitType") not in win:
+        win[info["rateLimitType"]] = {"utilization": info.get("utilization"), "resetsAt": info.get("resetsAt")}
+    out = {"source": "claude", "status": info.get("status"), "overage": bool(info.get("isUsingOverage")), "seen_at": now().isoformat(timespec="seconds")}
+    for k in ("five_hour", "seven_day"):
+        w = win.get(k) or {}
+        if w.get("utilization") is not None:
+            out[k] = {"pct": round(float(w["utilization"]) * 100), "resets_at": _epoch_iso(w.get("resetsAt"))}
+    return out if ("five_hour" in out or "seven_day" in out) else None
+
+
+def codex_usage(home: Path | None = None) -> dict | None:
+    base = (home or Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")) / "sessions"
+    days = [base / (now() - timedelta(days=i)).strftime("%Y/%m/%d") for i in range(8)]
+    files = sorted((f for d in days if d.is_dir() for f in d.glob("*.jsonl")), key=lambda f: f.stat().st_mtime, reverse=True)
+    for f in files[:6]:
+        try:
+            with open(f, "rb") as fh:
+                fh.seek(max(0, f.stat().st_size - 400_000))
+                lines = fh.read().decode("utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for ln in reversed(lines):
+            if '"rate_limits"' not in ln:
+                continue
+            try:
+                o = json.loads(ln)
+            except ValueError:
+                continue
+            rl = ((o.get("payload") or {}).get("rate_limits")) if isinstance(o, dict) else None
+            if not isinstance(rl, dict):
+                continue
+            out = {"source": "codex", "plan_type": rl.get("plan_type"), "seen_at": o.get("timestamp"),
+                   "status": "limited" if rl.get("rate_limit_reached_type") else "allowed"}
+            for key in ("primary", "secondary"):
+                x = rl.get(key)
+                if isinstance(x, dict) and x.get("used_percent") is not None:
+                    slot = "five_hour" if (x.get("window_minutes") or 0) <= 600 else "seven_day"
+                    out[slot] = {"pct": round(float(x["used_percent"])), "resets_at": _epoch_iso(x.get("resets_at"))}
+            cr = rl.get("credits")
+            if isinstance(cr, dict) and cr.get("has_credits"):
+                try:
+                    out["credits"] = {"balance": round(float(cr.get("balance") or 0)), "unlimited": bool(cr.get("unlimited"))}
+                except (TypeError, ValueError):
+                    pass
+            if "five_hour" in out or "seven_day" in out:
+                return out
+    return None
+
+
+def record_usage(agent_id: str | None, info: dict | None) -> None:
+    if agent_id and info:
+        try:
+            node.set_usage(CFG, agent_id, info)
+        except Exception as exc:  # noqa: BLE001 — 표시용이라 실패해도 실행은 계속
+            log(f"사용량 기록 실패 {agent_id}: {exc}")
+
+
 def run_ai(agent: dict, prompt: str, tag: str, workspace: Path | None = None) -> tuple[str, str, str]:
     """(결과 JSON 텍스트, 오류, 오류 원문 꼬리) — 오류가 있으면 결과는 빈 문자열.
     workspace가 있으면 '작업 모드': 그 폴더 안에서만 파일을 만들고 고칠 수 있다(실제 프로젝트 폴더는 읽기만)."""
@@ -619,7 +690,8 @@ def run_ai(agent: dict, prompt: str, tag: str, workspace: Path | None = None) ->
         if not exe:
             return "", "claude 명령을 찾지 못함", ""
         # 설정은 사용자 설정만 읽는다(작업 공간·프로젝트에 놓인 설정·훅으로 권한이 넓어지지 않게), 권한 방식 고정, MCP 끔
-        base = exe + ["-p", "--output-format", "json", "--setting-sources", "user", "--permission-mode", "default", "--strict-mcp-config"]
+        # stream-json: 마지막 result 줄이 결과, 중간의 rate_limit_event가 구독 한도 사용률(대시보드 사용량 표시)
+        base = exe + ["-p", "--output-format", "stream-json", "--verbose", "--setting-sources", "user", "--permission-mode", "default", "--strict-mcp-config"]
         blocked = [f"{t}(./{n}{'/**' if not n.endswith('.md') and not n.endswith('.json') else ''})" for n in CONTROL_NAMES for t in ("Edit", "Write", "MultiEdit")]
         if workspace:
             args = base + ["--allowedTools", "Read", "Grep", "Glob", "Edit(./**)", "Write(./**)", "MultiEdit(./**)",
@@ -637,10 +709,22 @@ def run_ai(agent: dict, prompt: str, tag: str, workspace: Path | None = None) ->
             return "", "시간 초과", ""
         raw, err = r.stdout.decode("utf-8", errors="replace"), r.stderr.decode("utf-8", errors="replace")
         (out_dir / f"{tag}.claude.json").write_text(raw + "\n--- stderr ---\n" + err, encoding="utf-8")
-        try:
-            obj = json.loads(raw)
-        except ValueError:
-            obj = None
+        obj, limit = None, None
+        for ln in raw.splitlines():
+            try:
+                o = json.loads(ln)
+            except ValueError:
+                continue
+            if isinstance(o, dict) and o.get("type") == "result":
+                obj = o
+            elif isinstance(o, dict) and o.get("type") == "rate_limit_event":
+                limit = o.get("rate_limit_info")
+        if obj is None:  # 예전 형식(json 한 덩어리)도 받는다
+            try:
+                obj = json.loads(raw)
+            except ValueError:
+                obj = None
+        record_usage(agent.get("id"), claude_usage(limit))
         if r.returncode != 0 or (isinstance(obj, dict) and obj.get("is_error")):
             detail = ((obj or {}).get("result") if isinstance(obj, dict) else "") or (raw + "\n" + err)
             return "", f"claude 종료 코드 {r.returncode}", str(detail)[-800:]
@@ -661,6 +745,7 @@ def run_ai(agent: dict, prompt: str, tag: str, workspace: Path | None = None) ->
             return "", "시간 초과", ""
         out, err = r.stdout.decode("utf-8", errors="replace"), r.stderr.decode("utf-8", errors="replace")
         (out_dir / f"{tag}.codex.log").write_text(out[-20000:] + "\n--- stderr ---\n" + err[-20000:], encoding="utf-8")
+        record_usage(agent.get("id"), codex_usage())
         if r.returncode != 0 or not last.exists():
             return "", f"codex 종료 코드 {r.returncode}", err[-800:] or out[-400:]
         return last.read_text(encoding="utf-8", errors="replace"), "", ""
@@ -1115,6 +1200,8 @@ def main():
             publish_queue(aid, data, load_state(aid))
         except Exception as exc:  # noqa: BLE001 — 표시용이라 실패해도 실행은 계속
             log(f"차례 현황 기록 실패 {aid}: {exc}")
+        if (agents[aid].get("runner") or agents[aid].get("ai")) in ("gpt", "codex"):
+            record_usage(aid, codex_usage())  # Codex는 대화 세션 사용분도 기록 파일에 남으므로 실행이 없어도 매번 읽는다
         try:
             if now().timestamp() - (node.node_dir(CFG) / f"runner-{aid}.lock").stat().st_mtime < 90 * 60:
                 continue

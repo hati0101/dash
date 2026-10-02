@@ -542,6 +542,10 @@ def load_nodes(cfg: dict, pw: str | None, log: SourceLog):
                 len(n.get("agents") or {}), last, error=n.get("error"),
                 note=f"주제 기록 {len(n.get('topic_records') or [])}건")
     agents = all_agents(nodes)
+    # 작업자별 구독 요금제(아키텍트 지정 2026-10-02: 서버컴 Astra x5, 나머지 x20). config "agent_plans"로 바꿀 수 있다
+    plans = {"default": "x20", "server-astra": "x5", **(cfg.get("agent_plans") or {})}
+    for a in agents:
+        a["plan"] = plans.get(a.get("id"), plans["default"])
     summary = [{"pc": n["pc"], "label": n.get("label", n["pc"]), "role": n.get("role"), "synced_at": n.get("synced_at") or n.get("updated_at"),
                 "error": n.get("error"), "agents": sorted((n.get("agents") or {}).keys())} for n in nodes]
     records = [r for n in nodes for r in n.get("topic_records") or []]

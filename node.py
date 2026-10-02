@@ -292,6 +292,21 @@ def set_health(cfg, agent: str, state: str, message: str = "", needs_user: bool 
     update_records(cfg, fn)
 
 
+def set_usage(cfg, agent: str, info: dict) -> bool:
+    """AI 구독 한도 사용률(5시간·주간, %)과 초기화 시각을 기록한다. 숫자가 그대로면 쓰지 않는다(쓸데없는 게시 방지).
+    info: {source, five_hour:{pct, resets_at}, seven_day:{pct, resets_at}, status, overage, credits, plan_type, seen_at}"""
+    keys = ("five_hour", "seven_day", "status", "overage", "credits", "plan_type")
+    a = load_records(cfg)["agents"].get(agent)
+    if a is None or all((a.get("usage") or {}).get(k) == info.get(k) for k in keys):
+        return False  # 같으면 기록 파일을 건드리지 않는다
+
+    def fn(rec):
+        if agent in rec["agents"]:
+            rec["agents"][agent]["usage"] = {**info, "at": now_iso()}
+    update_records(cfg, fn)
+    return True
+
+
 def active_holds(cfg) -> dict:
     """지금 유효한 잡기(대화 세션이 처리 중인 주제)."""
     holds = load_records(cfg).get("holds") or {}

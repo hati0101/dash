@@ -675,7 +675,7 @@ function teamStrip() {
       return h('button', { class: `team-row-item pc-${a.pc}`, onclick: () => go('agents') },
         av(a.id), h('div', { class: 'body' }, h('div', { class: 't' }, h('span', { class: 'pc-chip' }, a.pc_label), a.label || a.id), h('div', { class: 's clamp-2' }, now)),
         h('div', { class: 'tr-side' }, h('span', { class: `st ${st.cls}` }, icon(st.icon), st.label),
-          h('span', { class: 'cnt' }, `주제 ${s.assigned.length}${s.turn.length ? ` · 차례 ${s.turn.length}` : ''}`)));
+          h('span', { class: 'cnt' }, `주제 ${s.assigned.length}${s.turn.length ? ` · 차례 ${s.turn.length}` : ''}${a.usage && a.usage.seven_day ? ` · 주간 남음 ${100 - a.usage.seven_day.pct}%` : ''}`)));
     })) : empty('작업자 정보가 없습니다.'));
 }
 const PRI_ORDER = { P0: 0, P1: 1, P2: 2, P3: 3 };
@@ -1071,6 +1071,23 @@ function agentStats(id) {
     tasks: S.d.tasks.filter(t => t.stage !== 'done' && (t.owner === id || LEGACY[t.owner] === id || t.waiting_on === id || LEGACY[t.waiting_on] === id)),
   };
 }
+// 구독 한도 사용률(계정 전체: 대화 세션 + 자동 실행). 실행기가 Claude 실행 출력·Codex 기록에서 읽어 온다
+function usageBox(a) {
+  const u = a.usage || {};
+  const row = (lbl, w) => {
+    if (!w) return h('div', { class: 'u-row' }, h('span', { class: 'lbl' }, lbl), h('span', { class: 'track-bar' }), h('span', { class: 'n muted' }, '정보 없음'));
+    const pct = Math.max(0, Math.min(100, Number(w.pct) || 0)), lv = pct >= 90 ? 'bad' : pct >= 75 ? 'warn' : 'ok';
+    return h('div', { class: `u-row ${lv}`, title: w.resets_at ? `${lbl} 한도 ${pct}% 사용 · ${fmtAbs(w.resets_at)} 초기화` : '' },
+      h('span', { class: 'lbl' }, lbl), h('span', { class: 'track-bar' }, h('i', { style: { width: pct + '%' } })),
+      h('span', { class: 'n' }, h('b', null, `남음 ${100 - pct}%`), w.resets_at ? h('small', null, ` · ${fmtAbs(w.resets_at)} 초기화`) : null));
+  };
+  return h('div', { class: 'usage' },
+    h('div', { class: 'u-hd' }, h('b', null, '사용량'), a.plan ? h('span', { class: 'tag' }, `${a.plan} 요금제`) : null,
+      u.overage ? h('span', { class: 'st blocked' }, '초과 사용 중') : null,
+      u.credits ? h('span', { class: 'tag', title: '주간 한도를 넘으면 쓰는 추가 크레딧 잔액' }, `크레딧 ${Number(u.credits.balance).toLocaleString()}`) : null,
+      h('span', { class: 'muted', style: { 'margin-left': 'auto' } }, u.seen_at ? `${fmtRel(u.seen_at)} 확인` : '다음 자동 실행 때 수집')),
+    row('5시간', u.five_hour), row('주간', u.seven_day));
+}
 function agentCard(a) {
   const st = agentState(a), s = agentStats(a.id), cur = a.current;
   return h('div', { class: `agent pc-${a.pc}` },
@@ -1078,6 +1095,7 @@ function agentCard(a) {
       h('div', { class: 'nm' }, h('span', { class: 'pc-chip' }, a.pc_label), a.label || a.id), h('div', { class: 'rl' }, `${a.ai === 'gpt' ? 'GPT 계열' : 'Claude 계열'} · ${a.id}`)),
       h('span', { class: `st ${st.cls}`, style: { 'margin-left': 'auto' } }, icon(st.icon), st.label)),
     lockControls(a),
+    usageBox(a),
     cur ? h('div', { class: 'now' }, h('b', null, cur.project), (cur.task || cur.topic) ? h('div', { class: 'muted', style: { 'font-size': '12px' } }, [cur.task, cur.topic].filter(Boolean).join(' · ')) : null,
       cur.note ? h('div', { class: 'muted', style: { 'font-size': '12px' } }, cur.note) : null,
       h('div', { class: 'muted', style: { 'font-size': '12px' } }, `${fmtRel(cur.since)}부터`))
