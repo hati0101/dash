@@ -39,7 +39,7 @@ import node  # noqa: E402
 
 KST = timezone(timedelta(hours=9))
 MAX_PER_RUN = 3
-MAX_PER_TOPIC_PER_DAY = 10
+IDLE_ALERT_RUNS = 3  # 같은 주제가 진척 없이 이만큼 연달아 돌면 아키텍트에게 알림(결정이 아니라 알림, 아키텍트 결정 2026-10-03)
 AI_TIMEOUT = 20 * 60
 ACTIVE = ("new", "triage", "ready", "active")
 STATUSES = ("triage", "ready", "active", "done", "parked")
@@ -245,7 +245,8 @@ def find_jobs(data: dict, state: dict, only: str | None = None) -> list[dict]:
             open_asks.setdefault(q["_author"], set()).add(q.get("task_id"))
 
     def limited(st: dict) -> bool:
-        return (st.get("day") == today and st.get("count", 0) >= MAX_PER_TOPIC_PER_DAY) or (st.get("retry_after") or "") > stamp
+        # 하루 횟수 한도는 없다(아키텍트 결정 2026-10-03: 보류하지 않았으면 멈추지 않는다). 헛돌 때만 retry_after로 간격을 둔다
+        return (st.get("retry_after") or "") > stamp
 
     for t in data.get("topics", []):
         who = t.get("turn")
@@ -280,7 +281,7 @@ def find_jobs(data: dict, state: dict, only: str | None = None) -> list[dict]:
                 continue
             reason = f"이 단계를 처리한 뒤 변화 없이 차례가 그대로라 다시 깨움({wait}분 간격)"
         jobs.append({"kind": "topic", "agent": who, "topic": t, "sig": sig, "mode": mode, "parts": parts, "reason": reason})
-    # 내가 물었던 질문에 아키텍트가 답했으면 다시 깨운다(한 답에 한 번, 주제 하루 한도에 포함)
+    # 내가 물었던 질문에 아키텍트가 답했으면 다시 깨운다(한 답에 한 번)
     used = state.setdefault("answers_used", [])
     for q in data.get("decisions_needed", []):
         if q.get("_author") in agents and (not only or q["_author"] == only) and q["id"] in answers and q["id"] not in used:
@@ -1714,6 +1715,7 @@ def run_job(j: dict, data: dict, state: dict) -> bool:
     else:
         ensure_work(j, create=False)
     blocked = sanitize_workspace(ws)
+    grew = False
     text, err, detail = run_ai(agent, build_prompt(j, data, ws, st), tag, ws)
     blocked += sanitize_workspace(ws)  # AI가 만든 설정·지시 파일은 다음 실행 전에 무력화
     result = None
@@ -1749,17 +1751,33 @@ def run_job(j: dict, data: dict, state: dict) -> bool:
         files = [p for p in ws.rglob("*") if p.is_file() and p.name not in ("NOTES.md", "MANIFEST.md")]
         stopped = any(isinstance(a, dict) and (a.get("type") in ("ask", "handoff", "request", "reply") or (a.get("type") == "state" and a.get("status") in ("done", "parked")))
                       for a in result.get("actions", []))
-        if len(files) > st.get("files", 0) and not stopped:
+        grew = len(files) > st.get("files", 0)
+        if grew and not stopped:
             st["cont"] = st.get("cont", 0) + 1  # 진척이 있었으니 다음 동기화 때 이어서 깨운다
         st["files"] = len(files)
-    if j.get("redo"):
-        st["cont"] = st.get("cont", 0) + 1  # 끝냄 요약이 빠졌으니 다음 동기화 때 다시 깨운다
-    # 단계를 끝내지도, 묻지도, 넘기지도 않고 진척 메모만 남겼으면 멈추지 않고 계속 다시 깨운다(계획 모드 포함, 아키텍트에게 묻지 않음).
-    # 두 번까지는 다음 동기화 때 바로, 그 뒤로는 30분 → 2시간 간격으로(하루 한도 안에서) — 아키텍트가 보류하지 않는 한 멈추지 않는다
+    # 진척 없음(메모만·빈 답)이면 멈추지 않고 계속 다시 깨운다(계획 모드 포함, 아키텍트에게 묻지 않음).
+    # 두 번까지는 다음 동기화 때 바로, 그 뒤로는 30분 → 2시간 간격으로. 하루 횟수 한도는 없다(아키텍트 결정 2026-10-03).
+    # 진척 = 상태 변화(착수·끝냄 등)·인계·요청·답·질문·작업 공간 파일 증가·첫 진행 베이스. 3번 연속 진척 없으면 알림(queue_summary idle)
+    # 진척은 실제로 적용되고(done) 실제로 바뀐 것만 센다(2026-10-03 검토 P1: 같은 착수·같은 상태 반복, 거부된 행동은 진척이 아니다 —
+    # 하루 한도가 없으므로 가짜 진척이면 매 동기화마다 즉시 다시 돈다)
     acts = [a for a in result.get("actions", []) if isinstance(a, dict)]
-    settled = any(a.get("type") in ("ask", "handoff", "request", "reply") or (a.get("type") == "state" and a.get("status") in ("done", "parked")) for a in acts)
+    applied = set(done)
+    as_memo = "끝냄→메모(단계 담당 아님)" in applied  # 단계 담당이 아닌 작업자의 끝냄은 메모로 바뀌었다(상태 변화 아님)
+    ended = "state" in applied and not as_memo and any(a.get("type") == "state" and a.get("status") in ("done", "parked") for a in acts)
+    settled = bool(applied & {"ask", "handoff", "request", "reply", "보류→질문"}) or ended
+    notes = t.get("notes") or []
+    first_claim = "claim" in applied and not any(n.get("by") == agent_id and n.get("kind") == "claim" for n in notes)
+    # 상태 진척은 시작 단계(새 주제·분류·준비)에서 바뀔 때만: 관문을 지난 주제는 엔진이 상태를 진행 중으로 덮으므로 같은 상태 반복이 매번 '변화'로 보인다
+    new_state = "state" in applied and not as_memo and t.get("status") in ("new", "triage", "ready") \
+        and any(a.get("type") == "state" and a.get("status") in STATUSES and a.get("status") != t.get("status") for a in acts)
+    # 진행 베이스는 담당이 처음 쓰거나 인계받아 새로 쓸 때만(엔진은 담당의 베이스를 고르므로 검토자 plan은 늘 '다른 작업자'로 보인다)
+    new_plan = "plan" in applied and agent_id == t.get("assignee") and (not t.get("plan") or t.get("plan_by") != agent_id)
+    to_me = ((t.get("open_request") or {}).get("to") == agent_id)
+    reviewed = (t.get("reviewer") == agent_id and agent_id != t.get("assignee") and not to_me   # 교차 검토 차례의 검토만
+                and (("note" in applied and any(a.get("type") == "note" and a.get("kind") == "review" for a in acts)) or as_memo))
+    progressed = settled or grew or first_claim or new_state or new_plan or reviewed
     backoff = None
-    dev_did = any(x in ("dev_edit", "dev_run", "dev_revert") for x in done)
+    dev_did = any(x in ("dev_edit", "dev_revert") for x in done)  # 고치지 않고 빌드만 반복하는 것은 진척이 아니다
     dev_bad = "dev_run(실패)" in done or any(x.startswith(("dev_edit 거부", "dev_run 거부", "dev_revert 거부")) for x in failed)
     if dev_did or dev_bad:
         # 실제로 고치거나 빌드했다: 결과를 보고 이어서 하도록 다음 동기화 때 바로 깨운다.
@@ -1769,14 +1787,22 @@ def run_job(j: dict, data: dict, state: dict) -> bool:
         st["cont"] = st.get("cont", 0) + 1
         if st["dev_fail"] >= 3:
             backoff = 30 if st["dev_fail"] <= 4 else 120
-    elif settled:
+    elif progressed:
         st["idle_runs"] = 0
+        if not settled:
+            st["cont"] = st.get("cont", 0) + 1  # 진척이 있었으니 다음 동기화 때 이어서
     else:
+        # 헛돎(메모만·빈 답·거부된 행동·요약 빠진 끝냄 다시 받기·빌드만 반복): 두 번까지는 다음 동기화 때 바로, 그 뒤로 30분 → 2시간
         st["idle_runs"] = st.get("idle_runs", 0) + 1
-        if not j.get("redo"):
-            st["cont"] = st.get("cont", 0) + 1
-            if st["idle_runs"] > 2:
-                backoff = 30 if st["idle_runs"] <= 4 else 120
+        if "dev_run" in done:
+            st["dev_fail"] = 0
+        if not st.get("idle_since"):
+            st["idle_since"] = now().isoformat(timespec="seconds")  # 이번 헛돎이 시작된 때(알림 번호 고정용)
+        st["cont"] = st.get("cont", 0) + 1
+        if st["idle_runs"] > 2:
+            backoff = 30 if st["idle_runs"] <= 4 else 120
+    if not st.get("idle_runs"):
+        st.pop("idle_since", None)  # 진척이 생기면 헛돎 알림도 지운다
     if j["kind"] == "answer":
         state.setdefault("answers_used", []).extend([j["ask"]["id"], *j.get("older", [])])
     moved = clear_inbox(agent_id, t.get("id"), before=started)
@@ -1800,8 +1826,8 @@ def queue_summary(aid: str, data: dict, state: dict) -> dict:
     asking = {q.get("task_id") for q in data.get("decisions_needed", []) if q.get("_author") == aid and q["id"] not in answered
               and q.get("kind") not in ("gate", "stall")}  # AI가 직접 올린 질문만 '답 대기'로 센다
     holds, stamp, today = node.active_holds(CFG), now().isoformat(timespec="seconds"), f"{now():%Y%m%d}"
-    out = {"total": 0, "runnable": 0, "waiting_answer": 0, "waiting_change": 0, "retry": 0, "limit": 0, "held": 0, "stalled": 0}
-    items, stalled = {}, []  # 주제별 판정(대시보드 '다음' 문구가 실행기 판정과 같게) · 멈춘 주제
+    out = {"total": 0, "runnable": 0, "waiting_answer": 0, "waiting_change": 0, "retry": 0, "held": 0, "stalled": 0}
+    items, stalled, idle = {}, [], []  # 주제별 판정(대시보드 '다음' 문구가 실행기 판정과 같게) · 멈춘 주제 · 헛도는 주제
     for t in data.get("topics", []):
         if t.get("turn") != aid or t.get("status") not in ACTIVE:
             continue
@@ -1816,16 +1842,19 @@ def queue_summary(aid: str, data: dict, state: dict) -> dict:
             code = "runnable"
         elif (st.get("retry_after") or "") > stamp:
             code = "retry"
-        elif st.get("day") == today and st.get("count", 0) >= MAX_PER_TOPIC_PER_DAY:
-            code = "limit"
         elif t["id"] in asking:
             code = "waiting_answer"
         else:
             code = "waiting_change"  # 이미 처리함 — 변화가 없으면 30분(반복 시 2시간) 뒤 실행기가 다시 깨운다(find_jobs)
         items[t["id"]] = code
         out[code] = out.get(code, 0) + 1
+        if (st.get("idle_runs") or 0) >= IDLE_ALERT_RUNS and code != "held" and t["id"] not in asking:
+            # 헛도는 중: 진척 없이 3번 넘게 돌았다 — 멈추지는 않고 간격을 두고 계속 깨운다는 것을 알린다
+            idle.append({"topic": t["id"], "runs": st["idle_runs"], "since": st.get("idle_since") or "",  # 번호 고정(실행 때마다 바뀌지 않게)
+                         "last": ((st.get("last_result") or {}).get("summary") or "")[:200], "next": st.get("retry_after"),
+                         "every": 30 if st["idle_runs"] <= 4 else 120})
     out["answers"] = sum(1 for j in find_jobs(data, copy.deepcopy(state), only=aid) if j["kind"] == "answer")
-    out["items"], out["stalled"] = items, stalled
+    out["items"], out["stalled"], out["idle"] = items, stalled, idle
     return out
 
 

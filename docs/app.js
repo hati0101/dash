@@ -383,8 +383,12 @@ function derive(data) {
   const unprocessed = msgs.filter(m => m.unprocessed && !pendAckMsgs.has(m.id));
   const unanswered = msgs.filter(m => m.box === 'inbox-astra' && m.sender === 'claude' && !m.replies.length && !(m.followups || []).length
     && REQ_RE.test((m.kind || '') + ' ' + m.title) && hoursSince(m.ts) > unansH && hoursSince(m.ts) < 72);
-  const pendAssign = {};
-  for (const p of pend.filter(p => p.type === 'assign')) pendAssign[p.topic] = p.agent;
+  const pendAssign = {}, pendResolve = {};
+  // 같은 주제는 마지막 담당 요청이 이긴다. 해결 요청이 아직 반영 안 됐어도 6시간이 지나면 경고를 다시 보인다(GitHub 창에서 제출 안 한 경우)
+  for (const p of pend.filter(p => p.type === 'assign').sort((a, b) => toMs(a.created_at) - toMs(b.created_at))) {
+    pendAssign[p.topic] = p.agent;
+    if (((p.drop || []).length || p.confirm) && hoursSince(p.created_at) < 6) pendResolve[p.topic] = p; else delete pendResolve[p.topic];
+  }
   const pendActivate = new Set(pend.filter(p => p.type === 'activate').map(p => p.topic));
   // 주제 수정·삭제·되살리기도 PC가 처리하기 전에 화면에 먼저 반영한다(마지막 요청이 이긴다)
   const pendEdit = {}, pendDrop = new Map();
@@ -394,6 +398,7 @@ function derive(data) {
     let x = { ...t, _age: hoursSince(t.created_at),
       ...(t.status === 'backlog' && pendActivate.has(t.id) ? { status: 'new' } : {}),
       ...(pendAssign[t.id] && pendAssign[t.id] !== t.assignee ? { assignee: pendAssign[t.id], assign_by: 'user', dispatch_reason: '사용자 지정(반영 대기)', status: t.status === 'new' ? 'triage' : t.status } : {}) };
+    if (pendResolve[t.id] && (x.conflict || []).length) x = { ...x, conflict: [], _pendingResolve: pendResolve[t.id] };
     const e = pendEdit[t.id];
     if (e) x = { ...x, title: e.title, body: e.body, priority: e.priority || x.priority, kind: e.kind || x.kind, _pendingEdit: true };
     if (pendDrop.get(t.id) === true && x.status !== 'dropped') x = { ...x, status: 'dropped', dropped_at: pend.find(p => p.type === 'topic-drop' && (p.topics || []).includes(t.id))?.created_at, _pendingDrop: true };
@@ -435,6 +440,13 @@ function derive(data) {
     const t = topics.find(x => x.id === s.topic);
     if (t) missed.push({ key: `stall:${s.topic}:${s.since || ''}`, level: 'bad', icon: 'alert', title: `실행기 멈춤: ${t.title}`,
       sub: `${person(a.id).name} · ${s.reason || '원인 미상'}`, go: () => openTopic(t) });
+  }
+  // 헛도는 중: 같은 주제가 진척 없이 3번 넘게 돌았다(멈추지 않고 간격을 두고 계속 깨움) — 결정이 아니라 알림. 진척이 생기면 실행기가 목록에서 빼 사라진다.
+  // 번호는 헛돎이 시작된 시각으로 고정(같은 헛돎이 이어지는 동안 새 알림으로 다시 뜨지 않게, 2026-10-03 아키텍트 결정)
+  for (const a of data.agents || []) for (const s of (a.queue || {}).idle || []) {
+    const t = topics.find(x => x.id === s.topic);
+    if (t) missed.push({ key: `idle:${s.topic}:${s.since || ''}`, level: 'warn', icon: 'clock', title: `헛도는 중: ${t.title}`,
+      sub: `${person(a.id).name} ${s.runs}회 연속 진척 없음${s.last ? ` · 마지막: ${s.last}` : ''} · ${s.every >= 120 ? '2시간' : '30분'}마다 계속 다시 깨우는 중`, go: () => openTopic(t) });
   }
   const staleMin = data.meta.routing?.stale_minutes || 120;
   for (const a of data.agents || []) {
@@ -895,6 +907,9 @@ function mineItems() {
   for (const { topic, note } of q.questions) items.push({ key: `q:${topic.id}:${note.ts}`, type: 'question', title: note.body, who: note.by, when: note.ts, topic, ref: note });
   for (const t of q.tests) items.push({ key: `t:${t.id}`, type: 'test', title: t.title, sub: t.next_action || t.summary || '', who: t.owner, when: t.updated_at, topic: S.d.topics.find(x => x.linked_task_id === t.id) || null, taskId: t.id, ref: t });
   for (const a of q.actions) items.push({ key: `a:${a.id}`, type: 'action', title: a.title, sub: a.detail || '', who: 'user', when: a.since, topic: topicById(a.task_id) || S.d.topics.find(x => a.task_id && x.linked_task_id === a.task_id) || null, taskId: a.task_id, ref: a });
+  for (const t of S.d.topics.filter(t => (t.conflict || []).length && !['done', 'dropped'].includes(t.status)))
+    items.push({ key: `c:${t.id}:${t.conflict.join(',')}`, type: 'action', title: `중복 착수: ${t.title}`, sub: `담당 ${person(t.assignee).name} · 추가 착수 ${t.conflict.map(c => person(c).name).join(', ')} — 누가 계속할지 고르기`,
+      who: t.assignee, when: t.updated_at, topic: t, taskId: null, ref: { kind: 'conflict', id: `conflict:${t.id}` } });
   for (const t of q.backlog) items.push({ key: `b:${t.id}`, type: 'backlog', title: t.title, sub: t.body || '', who: t.proposed_by || 'user', when: t.created_at, topic: t, ref: t });
   return items;
 }
@@ -989,6 +1004,7 @@ function mineDetail(it, redraw) {
   if (it.type === 'decision') return { eyebrow: '결정·승인 요청', ...decisionParts(it.ref, redraw) };
   if (it.type === 'question') return { eyebrow: 'AI 질문', ...questionParts(it.topic, it.ref, redraw) };
   if (it.type === 'test') return { eyebrow: '실게임·확인 대기', ...testParts(it.ref, it.topic, redraw) };
+  if (it.type === 'action' && it.ref.kind === 'conflict') return { eyebrow: '할 일 · 중복 착수', ...conflictParts(it.topic, redraw) };
   if (it.type === 'action') return { eyebrow: '할 일', ...actionParts(it.ref, it.topic, redraw) };
   return { eyebrow: '착수 고르기 · 미처리 주제', ...backlogParts(it.ref, redraw) };
 }
@@ -1223,7 +1239,7 @@ function runnerBox(a) {
   if (!run && !(q && q.total)) return null;
   const title = r => ((topicById(r.topic) || {}).title || r.topic || '질문 답 반영');
   const parts = q ? [['곧 실행', (q.runnable || 0) + (q.answers || 0)], ['아키텍트 답 대기', q.waiting_answer], ['다른 쪽 변화 기다림', q.waiting_change],
-    ['재시도 대기', q.retry], ['오늘 한도', q.limit], ['대화 세션이 잡음', q.held]].filter(([, n]) => n) : [];
+    ['재시도 대기', q.retry], ['대화 세션이 잡음', q.held]].filter(([, n]) => n) : [];
   return h('div', { class: `now runner-now${isRunning(run) ? '' : ' idle'}` },
     run ? (isRunning(run)
       ? [h('b', null, `자동 실행 중 · ${title(run)}`), h('div', { class: 'muted', style: { 'font-size': '12px' } }, `${fmtRel(run.started)} 시작 · 이유: ${run.reason || '-'}`)]
@@ -1397,8 +1413,6 @@ function topicFlow(t, asking) {
   const why = [];
   const run = runsFor(t.id)[0];
   if (run && run.result === 'fail') why.push('실행 실패');
-  const today = new Date().toDateString();
-  if (runsFor(t.id).filter(r => r.agent === t.turn && new Date(toMs(r.started)).toDateString() === today).length >= 10) why.push('오늘 한도');
   if ((t.conflict || []).length) why.push('중복 착수');
   if (t.assignee && lockOf(t.assignee)) why.push('담당 멈춤');
   if (t.status === 'active' && hoursSince(t.updated_at) > 24) why.push('24시간 멈춤');
@@ -1853,13 +1867,57 @@ function assignControl(t) {
   const pend = pending.all().find(p => p.type === 'assign' && p.topic === t.id);
   const sel = h('select', { 'aria-label': '담당 바꾸기' }, agentOptions(pend ? pend.agent : t.assignee, t.assignee ? [] : [h('option', { value: '' }, '담당 고르기')]));
   const btn = h('button', { class: 'btn', onclick: async () => {
-    if (!sel.value || sel.value === t.assignee) { toast('바뀐 담당이 없습니다'); return; }
+    if (!sel.value) { toast('담당을 고르세요'); return; }
+    if (sel.value === t.assignee && (t.conflict || []).length) return resolveConflict(t, sel.value).then(() => openTopic(S.d.topics.find(x => x.id === t.id) || t));
     btn.disabled = true;
-    try { await sendOps('assign', { topic: t.id, agent: sel.value, note: '' }, `주제 담당 → ${person(sel.value).name}`); render(); openTopic(S.d.topics.find(x => x.id === t.id) || t); }
+    // 지금 담당을 다시 고르면 '담당 확정'(새 시각으로 지정 — 그 앞의 다른 작업자 착수는 충돌에서 빠지고 재분배도 하지 않는다)
+    const same = sel.value === t.assignee;
+    try { await sendOps('assign', { topic: t.id, agent: sel.value, note: same ? '담당 확정' : '', ...(same ? { confirm: true } : {}) }, same ? `주제 담당 확정: ${person(sel.value).name}` : `주제 담당 → ${person(sel.value).name}`); render(); openTopic(S.d.topics.find(x => x.id === t.id) || t); }
     catch (e) { toast(e.message); } finally { btn.disabled = false; }
-  } }, icon('agents'), '담당 바꾸기');
+  } }, icon('agents'), '담당 바꾸기 · 같은 담당이면 확정');
   return h('div', { class: 'composer' }, h('div', { class: 'row' }, sel, btn),
     pend ? h('div', { class: 'hint' }, `담당 변경 반영 대기: ${person(pend.agent).full}`) : null);
+}
+// 중복 착수 해결(2026-10-03 아키텍트): 경고가 '한쪽을 멈추거나 담당을 바꿔 달라'고 하면 그 행동 버튼이 같은 자리에 있어야 한다.
+// 고른 작업자를 담당으로 확정(지금 담당과 같아도 새 시각으로 지정)하고 나머지의 착수는 치운다 — 치운 쪽 수신함에 '담당에서 빠짐'.
+// 실게임 시험 단계에는 담당이 개발컴 Claude로 옮겨져 있으므로 원래 담당(live_from)도 고를 수 있게 넣는다
+function conflictWho(t) { return [...new Set([t.assignee, t.live_from, ...(t.conflict || [])].filter(Boolean))]; }
+async function resolveConflict(t, agent) {
+  const drop = conflictWho(t).filter(a => a !== agent);
+  try {
+    await sendOps('assign', { topic: t.id, agent, drop, note: `중복 착수 해결: ${person(agent).full}가 계속, ${drop.map(a => person(a).full).join(', ')} 착수 치움` },
+      `중복 착수 해결: ${person(agent).name} 계속`);
+    toast(`${person(agent).name}가 계속합니다 · 다음 동기화 때 반영`);
+    S._keepScroll = true; render();
+    return true;
+  } catch (e) { toast(e.message); return false; }
+}
+function conflictButtons(t, kb) {
+  const who = conflictWho(t), picked = S.kbPick && S.kbPick.id === `conflict:${t.id}` ? S.kbPick.idx : -1;
+  return h('div', { class: 'choice-row' }, who.map((a, i) => {
+    const others = who.filter(x => x !== a).map(x => person(x).name).join(', ');
+    return h('button', { class: `btn${a === (t.live_from || t.assignee) ? ' primary' : ''}${i === picked ? ' kb-picked' : ''}`, 'data-kb-opt': String(i), onclick: () => resolveConflict(t, a) },
+      kb ? kbd(String(i + 1)) : null, `${person(a).full}가 계속`, h('span', { class: 'hint' }, ` (${others} 착수 치움${a !== t.assignee ? ` · 담당을 ${person(a).name}로` : ''})`));
+  }));
+}
+function conflictBox(t) {
+  if (t._pendingResolve) return h('div', { class: 'callout' }, h('b', null, '중복 착수 해결 반영 대기: '), `${person(t._pendingResolve.agent).full}가 계속 · 다음 동기화 때 반영`);
+  if (!(t.conflict || []).length) return null;
+  return h('div', { class: 'callout warn' }, h('div', null, h('b', null, '중복 착수: '), `담당은 ${person(t.assignee).full}인데 ${t.conflict.map(c => person(c).full).join(', ')}도 착수했습니다. 누가 이어서 할지 고르세요.`),
+    conflictButtons(t, false));
+}
+function conflictParts(t, redraw) {
+  return {
+    main: [
+      h('div', { class: 'when' }, t.updated_at ? `${fmtAbs(t.updated_at)} · ${fmtRel(t.updated_at)}` : ''),
+      h('h3', { class: 'd-title' }, `중복 착수: ${t.title}`),
+      h('div', { class: 'callout warn' }, `담당은 ${person(t.assignee).full}인데 ${t.conflict.map(c => person(c).full).join(', ')}도 착수했습니다. 누가 이어서 할지 고르세요. 고른 작업자가 담당으로 확정되고, 나머지의 착수는 치워지며 그 작업자에게 '담당에서 빠짐'을 알립니다.`),
+      h('h4', null, '누가 계속 — 누르면 바로 반영 · 키보드는 숫자로 고르고 Enter'),
+      conflictButtons(t, true),
+      h('div', { class: 'choice-row' }, h('button', { class: 'btn', onclick: () => openTopic(t) }, icon('topics'), '주제 보기')),
+    ],
+    side: historyPanel(t, null, null),
+  };
 }
 function openDecisionNeeded(q) {
   const p = decisionParts(q, () => openDecisionNeeded(q));
@@ -1965,11 +2023,11 @@ function topicPhase(t) {
   if (who && who !== t.assignee) return { cls: 'validating', icon: 'eye', label: `교차 검토 대기 · ${name(who)}`, detail: partial.slice(3) || null, next: `${name(who)} — 진행 베이스 검토` };
   if (!t.plan) return { cls: 'request', icon: 'file', label: `진행 베이스 작성 · ${name(who)}`, detail: partial.slice(3) || null, next: `${name(who)} — 목표·범위·첫 단계 작성` };
   const qc = queueCode(t);
-  if (qc === 'stalled') { const s = stallOf(t); return { cls: 'blocked', icon: 'alert', label: `실행기 멈춤 · ${name(who)}`, detail: `${s?.reason || '원인 미상'}${s?.since ? ` (${fmtRel(s.since)}부터)` : ''}`, next: '아키텍트 — 개발컴 Claude에게 확인 요청(자동으로 다시 깨우지 않음)' }; }
+  if (qc === 'stalled') { const s = stallOf(t); return { cls: 'blocked', icon: 'alert', label: `실행기 멈춤 · ${name(who)}`, detail: `${s?.reason || '원인 미상'}${s?.since ? ` (${fmtRel(s.since)}부터)` : ''}`, next: '조치 없음 — 같은 사유로 세 번 건너뛴 뒤에는 허브 판정대로 다음 실행에서 다시 깨움' }; }
   return { cls: 'progress', icon: 'play', label: `${t.step ? '2/9 ' : ''}진행 중 · ${name(who)}`, detail: partial.slice(3) || null, next: `${name(who)} — ${QUEUE_NEXT[qc] || '다음 동기화 때 이어서'}` };
 }
 // 실행기가 올린 주제별 판정(작업자 기록 queue.items). '다음' 문구를 실행기 실제 판정과 같게 한다
-const QUEUE_NEXT = { runnable: '다음 동기화 때 이어서', retry: '실패 뒤 재시도 대기(10~30분)', limit: '오늘 실행 한도(10회) 도달 — 내일 이어서',
+const QUEUE_NEXT = { runnable: '다음 동기화 때 이어서', retry: '간격을 두고 다시 깨움(실패 뒤 10~30분 · 진척 없으면 30분~2시간)',
   waiting_answer: '아키텍트 답을 기다림', waiting_change: '이 단계는 처리함 — 변화가 없으면 30분(반복 시 2시간) 뒤 자동으로 다시 깨움', held: '대화 세션이 처리 중' };
 function queueOf(t) { return ((S.data.agents || []).find(a => a.id === t.turn) || {}).queue || null; }
 function queueCode(t) { const q = queueOf(t); return q && q.items ? q.items[t.id] || null : null; }
@@ -2261,7 +2319,7 @@ function openTopic(t) {
       S.editTopic === t.id ? null : topicTools(t, () => { const x = S.d.topics.find(y => y.id === t.id); x ? openTopic(x) : closeDrawer(); })),
     S.editTopic === t.id ? topicEditForm(t, () => { S.editTopic = null; openTopic(S.d.topics.find(y => y.id === t.id) || t); }) : null,
     h('h3', null, t.title),
-    (t.conflict || []).length ? h('div', { class: 'callout warn' }, h('b', null, '중복 착수: '), `담당은 ${person(t.assignee).full}인데 ${t.conflict.map(c => person(c).full).join(', ')}도 착수했습니다. 한쪽을 멈추거나 담당을 바꿔주세요.`) : null,
+    conflictBox(t),
     phaseLine(t),
     gateBox(t),
     liveBox(t),
@@ -2372,6 +2430,11 @@ function kbEnter(sc) {
     if (!pick && !text) return ta?.focus();
     return kbSend(sc, () => decide(q, pick || '', text, null));
   }
+  if (it.type === 'action' && it.ref.kind === 'conflict') {
+    const who = conflictWho(it.topic);
+    if (!S.kbPick || S.kbPick.id !== it.ref.id) return toast('숫자로 누가 계속할지 먼저 고르세요');
+    return kbSend(sc, () => resolveConflict(it.topic, who[S.kbPick.idx]));
+  }
   if (it.type === 'backlog') {
     const b = sc.el.querySelector('[data-kb-assign]');
     if (b && S.kbPick && S.kbPick.id === it.topic.id) return kbSend(sc, () => b._kb({ quiet: true }));
@@ -2395,6 +2458,13 @@ function kbDigit(sc, n) {
     S.kbPick = S.kbPick && S.kbPick.id === it.ref.id && S.kbPick.idx === n ? null : { id: it.ref.id, idx: n };
     sc.el.querySelectorAll('[data-kb-opt]').forEach(b => b.classList.toggle('kb-picked', !!S.kbPick && Number(b.dataset.kbOpt) === S.kbPick.idx));
     return toast(S.kbPick ? `${n + 1}번 고름 · Enter로 보내기(R로 덧붙일 말)` : '선택 해제');
+  }
+  if (it.type === 'action' && it.ref.kind === 'conflict') {
+    const who = conflictWho(it.topic);
+    if (n >= who.length) return toast(`고를 작업자는 ${who.length}명입니다`);
+    S.kbPick = S.kbPick && S.kbPick.id === it.ref.id && S.kbPick.idx === n ? null : { id: it.ref.id, idx: n };
+    sc.el.querySelectorAll('[data-kb-opt]').forEach(b => b.classList.toggle('kb-picked', !!S.kbPick && Number(b.dataset.kbOpt) === S.kbPick.idx));
+    return toast(S.kbPick ? `${person(who[n]).name}가 계속 · Enter로 보내기` : '선택 해제');
   }
   if (it.type === 'backlog') {
     const sel = sc.el.querySelector('[data-kb-agent]'), o = sel?.options[n + 1];

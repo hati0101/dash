@@ -282,7 +282,13 @@ def clean_action(raw: dict) -> dict:
         topic, agent = str(raw.get("topic", "")), norm_agent(str(raw.get("agent", "")))
         if not ID_RE.match(topic) or not AGENT_RE.match(agent or ""):
             raise ValueError("담당 지정 형식 오류")
-        a.update(topic=topic, agent=agent, note=str(raw.get("note", ""))[:1000])
+        drop = raw.get("drop") or []
+        if not isinstance(drop, list) or len(drop) > 5:
+            raise ValueError("담당 지정 형식 오류(치울 작업자)")
+        drop = [norm_agent(str(x)) for x in drop]
+        if not all(AGENT_RE.match(x or "") for x in drop):
+            raise ValueError("담당 지정 형식 오류(치울 작업자)")
+        a.update(topic=topic, agent=agent, note=str(raw.get("note", ""))[:1000], drop=sorted(set(drop) - {agent}))
     elif kind == "activate":
         topic = str(raw.get("topic", ""))
         if not ID_RE.match(topic):
@@ -395,11 +401,20 @@ def apply_action(cfg, a: dict, source: str) -> str:
         result = f"작업 {len(a['ids'])}건 단계 → {a['stage']}"
     elif a["type"] == "assign":
         rec["topic_assign"] = [r for r in rec["topic_assign"] if r.get("topic") != a["topic"]]
-        rec["topic_assign"].append({"topic": a["topic"], "agent": a["agent"], "note": a["note"], "ts": a["created_at"] or ts})
+        rec["topic_assign"].append({"topic": a["topic"], "agent": a["agent"], "note": a["note"], "ts": a["created_at"] or ts,
+                                    **({"drop": a["drop"]} if a.get("drop") else {})})
         write_inbox(bridge / "inbox-claude", f"USR-ASSIGN-{a['id']}", f"[사용자 → Claude] 주제 담당 변경: {a['topic']} → {a['agent']}",
                     {"sender": "user (대시보드)", "recipient": "claude", "kind": "user topic assignment", "task_id": a["topic"]},
                     a["note"] or "대시보드에서 담당을 바꿨습니다.")
-        result = f"주제 담당 지정 {a['topic']} → {a['agent']}"
+        # 중복 착수 해결: 치운 작업자에게 '담당에서 빠짐'을 알린다(이 주제 일은 멈춘다. 검토·요청 차례가 오면 그때만 한다)
+        local = {"dev-claude": "inbox-claude", "dev-astra": "inbox-astra"}
+        for d in a.get("drop") or []:
+            if d in local and d != "dev-claude":
+                write_inbox(bridge / local[d], f"USR-DROP-{a['id']}-{d}", f"[사용자 → {d}] 담당에서 빠짐: {a['topic']}",
+                            {"sender": "user (대시보드)", "recipient": d, "kind": "removed from topic", "task_id": a["topic"]},
+                            f"아키텍트가 이 주제의 중복 착수를 정리했습니다. 담당은 {a['agent']}입니다. 이 주제의 작업은 멈추세요"
+                            "(교차 검토·요청 차례가 오면 그때만 합니다).")
+        result = f"주제 담당 지정 {a['topic']} → {a['agent']}" + (f" (착수 치움: {', '.join(a['drop'])})" if a.get("drop") else "")
     elif a["type"] == "activate":
         rec["topic_activate"] = [r for r in rec["topic_activate"] if r.get("topic") != a["topic"]]
         rec["topic_activate"].append({"topic": a["topic"], "ts": a["created_at"] or ts, "by": "dashboard"})
@@ -943,6 +958,8 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
             t["dispatch_reason"] = f"{handoff['from']}이(가) 넘김: {handoff['reason'] or '-'}"
             t["handoff"] = handoff
             assigned_at = handoff["ts"]
+        elif handoff and handoff["to"] == t.get("assignee") and t.get("assign_by") == "user":
+            t["handoff"] = handoff  # 인계받은 작업자를 아키텍트가 '담당 확정'해도 인계 뒤 새 진행 베이스의 교차 검토 기준은 그대로(whose_turn)
         # 미처리(백로그): 착수 지시·담당 지정·작업 기록이 없으면 배분하지 않고 '미처리'로 둔다
         if base.get("backlog") and not t.get("assignee") and t["status"] == "new" and t["id"] not in activations:
             t["status"] = "backlog"
@@ -1171,11 +1188,15 @@ def rebalance(cfg, topics: list[dict], agents: list[dict], loads: dict, routing:
             continue
         if any(n.get("by") == cur and n.get("kind") not in ("triage",) for n in t.get("notes", [])):
             continue  # 담당이 이미 손댔다
+        if t.get("claims"):
+            continue  # 누군가 착수했다(옮기면 중복 착수가 된다, 2026-10-03 장바구니 주제)
         if norm_agent(t.get("prefer") or "") == cur:
             continue  # 아키텍트가 고른 작업자
         path, rec = author_file(cfg, t["id"], "claude")
         if (now - to_dt(rec.get("assigned_at"))).total_seconds() < 30 * 60:
             continue
+        if (now - to_dt(rec.get("rebalanced_at"))).total_seconds() < 6 * 3600:
+            continue  # 최근 6시간 안에 재분배한 주제는 다시 옮기지 않는다(2.5시간에 세 번 오간 핑퐁 방지, 2026-10-03)
         others = {k: v for k, v in loads.items()}
         others[cur] = max(0, others.get(cur, 0) - 1)  # 이 주제를 뺀 부하로 비교
         rows = score_agents(t, agents, others, routing)
@@ -1193,7 +1214,7 @@ def rebalance(cfg, topics: list[dict], agents: list[dict], loads: dict, routing:
         owner_log_add(rec, cur, t.get("assigned_at"))  # 담당 이력(끝냄 시점 판정): 옮기기 전 담당 → 새 담당
         owner_log_add(rec, best[1], ts)
         rec.update({"assignee": best[1], "dispatch_reason": reason, "dispatch_scores": {r[1]: r[0] for r in rows},
-                    "assigned_at": ts, "status_at": ts, "updated_at": ts})
+                    "assigned_at": ts, "status_at": ts, "updated_at": ts, "rebalanced_at": ts})
         add_note(rec, "triage", reason)
         write_json(path, rec)
         loads[cur] = max(0, loads.get(cur, 0) - 1)
