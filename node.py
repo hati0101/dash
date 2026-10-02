@@ -105,19 +105,28 @@ class records_lock:
                 os.write(fd, str(os.getpid()).encode())
                 os.close(fd)
                 return self
-            except FileExistsError:
+            except (FileExistsError, PermissionError):
+                # Windows: 다른 프로세스가 잠금 파일을 지우는 중이면 '이미 있음' 대신 '접근 거부'가 온다 → 잠긴 것으로 보고 다시 시도
                 try:
                     if time.time() - self.path.stat().st_mtime > 120:
                         self.path.unlink(missing_ok=True)
                         continue
                 except FileNotFoundError:
                     continue
+                except PermissionError:
+                    pass
                 if time.time() > deadline:
                     sys.exit("기록 파일 잠금을 1분 동안 얻지 못했습니다(다른 실행이 붙잡고 있음).")
                 time.sleep(0.2)
 
     def __exit__(self, *exc):
-        self.path.unlink(missing_ok=True)
+        import time
+        for _ in range(50):  # 다른 프로세스가 잠금 파일을 확인하는 순간이면 지우기가 거부된다 → 잠깐 뒤 다시
+            try:
+                self.path.unlink(missing_ok=True)
+                break
+            except PermissionError:
+                time.sleep(0.05)
         return False
 
 

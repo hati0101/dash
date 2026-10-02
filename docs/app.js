@@ -1284,6 +1284,7 @@ const aiOfAgent = id => ((S.data.agents || []).find(a => a.id === id) || {}).ai 
 const pcOfAgent = id => ((S.data.agents || []).find(a => a.id === id) || {}).pc || String(id || '').split('-')[0];
 function topicFlow(t, asking) {
   if (t.status === 'done') return { col: 'done', why: [] };
+  if (t.live_session && t.status !== 'review_user') return { col: 'user_test', why: ['실게임 수정 · 대화 세션'] };
   if (t.status === 'review_user' || (S.data.decisions_needed || []).some(q => q.task_id === t.id && !S.d.answers[q.id]) || asking.has(t.id)) return { col: 'user_test', why: t.gate ? [`★${t.gate.step || t.gate.n}/9 ${t.gate.label}`] : [] };
   const why = [];
   const run = runsFor(t.id)[0];
@@ -1683,6 +1684,7 @@ function decisionParts(q, redraw) {
         h('span', { class: 'wait' }, av(q._author || 'claude', true), `${person(q._author || 'claude').full} 질문`),
         h('span', { class: 'when' }, `${fmtAbs(q.since)} · ${fmtRel(q.since)}`)),
       questionText(q.question),
+      liveBox(topic),
       q.recommendation ? h('div', { class: 'callout' }, h('b', null, '권장 '), q.recommendation) : null,
       ans ? h('div', { class: 'callout' }, h('b', null, '내 결정: '), ans.choice || '(메모)', ans.note ? ' — ' + ans.note : '',
         (() => { const r = decisionReflect(q, ans); return h('div', { class: `reflect ${r.cls}` }, icon(r.cls === 'done' ? 'check' : 'clock'), h('span', null, r.text)); })()) : null,
@@ -1737,9 +1739,11 @@ function topicPhase(t) {
   if (t.status === 'review_user' && t.gate) {
     const open = (S.data.decisions_needed || []).filter(q => !S.d.answers[q.id]);
     const ask = open.find(q => q.id === t.gate.id) || open.find(q => q.task_id === t.id);
-    return { cls: 'user_test', icon: 'scale', label: `★${t.gate.step || t.gate.n}/9 ${t.gate.label}`, detail: (t.gate.summary || '').slice(0, 300) || null,
-      next: `아키텍트 — 내 차례에서 고르기: ${(t.gate.options || []).map(o => o.replace(/\(.*\)/, '')).join(' · ')}`, ask };
+    return { cls: 'user_test', icon: 'scale', label: `★${t.gate.step || t.gate.n}/9 ${t.gate.label}${t.live_session ? ' · 개발컴 Claude 대화' : ''}`, detail: (t.gate.summary || '').slice(0, 300) || null,
+      next: `아키텍트 — ${t.live_session ? '개발컴 Claude 대화를 열어 시험·수정, 그다음 ' : ''}내 차례에서 고르기: ${(t.gate.options || []).map(o => o.replace(/\(.*\)/, '')).join(' · ')}`, ask };
   }
+  if (t.live_session) return { cls: 'user_test', icon: 'user', label: '실게임 시험 수정 · 개발컴 Claude 대화',
+    detail: '실게임 시험에서 나온 문제를 대화 세션에서 고치는 중입니다(자동 실행기는 손대지 않음).', next: '개발컴 Claude 대화 — 고치고 끝냄을 남기면 바로 ★4 실게임 시험으로' };
   if (t.status === 'backlog') return { cls: 'neutral', icon: 'inbox', label: '미처리', next: '아키텍트 — 내 차례 → 착수 고르기에서 착수·담당 정하기' };
   const hold = holdOf(t.id);
   if (hold) return { cls: 'progress', icon: 'user', label: `대화 세션 작업 중 · ${name(hold.agent)}`, detail: `${hold.note || ''} (${fmtAbs(hold.until)}까지 자동 실행 멈춤)` };
@@ -2007,6 +2011,20 @@ function openMemory(m) {
 function openDecision(x) {
   drawer('결정 기록', decisionCard(x), fieldList({ 출처: x.source, 기록자: x._author, ID: x.id }));
 }
+// 실게임(격리 서버) 시험 단계: 개발컴 Claude 대화를 열어 바로 시험·수정한다(자동 실행기는 손대지 않음)
+function liveBox(t) {
+  if (!t || !t.live_session) return null;
+  const text = `주제 ${t.id} "${t.title}"의 실게임(격리 서버) 시험을 이 대화에서 진행합니다.\n` +
+    `먼저 대시보드 도구 폴더(node.py가 있는 곳)에서 python node.py brief ${t.id} 로 내용·작업물·체크리스트를 불러오세요.\n` +
+    `시험 중 나온 문제는 이 대화에서 바로 고치고, 고친 뒤에는 python node.py state ${t.id} --agent dev-claude --status done --note "무엇을 고쳤나·시험 방법" 으로 끝냄을 남겨 주세요(자동으로 ★4 실게임 시험으로 돌아옵니다).\n` +
+    `격리 서버(server-dev)만 씁니다. 운영 서버 반영은 ★7 승인 뒤 서버컴에서만 합니다.`;
+  return h('div', { class: 'callout warn live-box' },
+    h('b', null, '실게임 시험 단계 · 개발컴 Claude 대화에서 진행'),
+    h('div', null, `이 단계는 자동 실행기가 손대지 않습니다${t.live_from ? ` (원래 담당 ${person(t.live_from).name} → 개발컴 Claude로 이관)` : ''}. 개발컴에서 Claude 대화를 열고 아래 문구를 붙여 넣으면 바로 시험·수정할 수 있습니다. 개발컴 Claude 수신함에도 같은 안내가 갑니다.`),
+    h('div', { class: 'row', style: { 'margin-top': '8px' } }, h('button', { class: 'btn primary', onclick: async () => {
+      try { await navigator.clipboard.writeText(text); toast('대화 시작 문구를 복사했습니다. 개발컴 Claude 대화에 붙여 넣으세요.'); } catch { modal('대화 시작 문구', h('pre', { class: 'pre' }, text)); }
+    } }, icon('send'), '대화 시작 문구 복사')));
+}
 function openTopic(t) {
   if (S.editTopic && S.editTopic !== t.id) S.editTopic = null;
   const plan = t.plan || {};
@@ -2020,6 +2038,7 @@ function openTopic(t) {
     h('h3', null, t.title),
     (t.conflict || []).length ? h('div', { class: 'callout warn' }, h('b', null, '중복 착수: '), `담당은 ${person(t.assignee).full}인데 ${t.conflict.map(c => person(c).full).join(', ')}도 착수했습니다. 한쪽을 멈추거나 담당을 바꿔주세요.`) : null,
     phaseLine(t),
+    liveBox(t),
     t.dispatch_reason ? h('div', { class: 'reason' }, h('b', null, t.assign_by === 'user' ? '담당 지정: ' : t.assign_by === 'handoff' ? '인계: ' : '배분 근거: '), t.dispatch_reason) : null,
     workBox(t, true),
     runsFor(t.id).length ? [h('h4', null, `자동 실행 이력 ${runsFor(t.id).length}`), h('div', { class: 'run-list' }, runsFor(t.id).slice(0, 8).map(runRow))] : null,

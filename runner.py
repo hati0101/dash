@@ -259,7 +259,7 @@ def find_jobs(data: dict, state: dict, only: str | None = None) -> list[dict]:
     for q in data.get("decisions_needed", []):
         if q.get("_author") in agents and (not only or q["_author"] == only) and q["id"] in answers and q["id"] not in used:
             t = next((x for x in data.get("topics", []) if x["id"] == q.get("task_id")), None)
-            if t and (t["id"] in holds or t.get("live_session") or t.get("status") in ("done", "parked", "dropped")):
+            if t and (t["id"] in holds or t.get("live_session") or t.get("status") in ("done", "parked", "dropped", "review_user")):
                 continue  # 대화 세션 처리 중·실게임 시험 단계(개발컴 Claude 대화)는 실행기가 깨우지 않는다
             if limited(state.setdefault("topics", {}).setdefault(t["id"] if t else f"ans-{q['id']}", {})):
                 continue
@@ -406,7 +406,8 @@ STAGE_GUIDE = {
             "지금 자동 실행기에는 명령 실행·빌드·서버 기동 권한이 없다. 그래서 정적 검증(실제 파일·데이터·호출부 대조, 근거 경로·줄)과 "
             "시험 절차·확인 체크리스트 작성까지 한다. 문제를 찾으면 스스로 고치고 다시 검증한다. 같은 문제로 세 번 실패하면 ask로 올린다. "
             "통과하면 끝냄(state done)의 body에 '실게임 시험 준비' 요약을 쓴다: 격리 서버에 반영할 빌드·파일, 실행 방법, "
-            "아키텍트가 확인할 항목(체크리스트), 자체 검증 근거. 그러면 ★4 실게임 시험 관문이 열린다. 운영 서버에서는 이 단계를 하지 않는다.",
+            "아키텍트가 확인할 항목(체크리스트), 자체 검증 근거. 그러면 ★4 실게임 시험 관문이 열린다. 운영 서버에서는 이 단계를 하지 않는다. "
+            "★4부터는 담당이 개발컴 Claude로 옮겨지고 아키텍트와 대화 세션에서 바로 시험·수정한다(자동 실행기는 손대지 않음).",
     "pack": "6 배포본 작성: 아키텍트가 ★5에서 배포본 만들기를 골랐다. real-work 작업물에 배포본을 만든다: 적용 파일, 정확한 대상 경로, 적용 절차, "
             "백업 방법, 복구 수단, 각 파일 SHA256, 적용 후 확인 방법. 끝냄(state done)으로 ★7 운영 반영 승인 관문을 연다.",
     "deploy": "8 운영 반영: 아키텍트가 ★7에서 서버컴 반영을 승인했다. 자동 실행기에는 운영 파일을 바꾸는 도구가 없다. "
