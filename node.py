@@ -87,8 +87,9 @@ def load_records(cfg) -> dict:
     pc = pc_info(cfg)
     rec = read_json(records_path(cfg), None) or {}
     rec.update({"pc": pc["id"], "label": pc.get("label", pc["id"]), "role": pc.get("role", "node")})
-    rec.setdefault("agents", {})
     rec.setdefault("topic_records", [])
+    # 설정에서 빠진 작업자는 현황에서도 뺀다(이름을 바꾸거나 정리한 경우)
+    rec["agents"] = {k: v for k, v in (rec.get("agents") or {}).items() if k in my_agents(cfg)}
     for aid, a in my_agents(cfg).items():
         slot = rec["agents"].setdefault(aid, {})
         slot.update({"id": aid, "ai": a.get("ai", ""), "label": a.get("label", aid)})
