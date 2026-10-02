@@ -573,6 +573,37 @@ mark { background: color-mix(in srgb, var(--st-user_test) 35%, transparent); col
 .start-opt b { font-size: 14px; }
 .start-opt .row { display: flex; gap: 8px; flex-wrap: wrap; }
 .start-opt select { flex: 1 1 160px; min-width: 0; }
+/* 주제 수정·삭제 */
+.d-head { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.topic-tools { margin-left: auto; display: inline-flex; gap: 6px; }
+.btn.danger { color: var(--st-blocked); border-color: color-mix(in srgb, var(--st-blocked) 45%, var(--line-2)); }
+.btn.danger:hover { background: color-mix(in srgb, var(--st-blocked) 14%, var(--card-2)); border-color: var(--st-blocked); }
+.btn[disabled]:hover { border-color: var(--line-2); }
+.edit-form { display: grid; gap: 12px; padding: 14px; border-radius: 12px; border: 1px solid var(--accent); background: var(--card-2); }
+.edit-form label { display: grid; gap: 6px; font-size: 12px; font-weight: 700; color: var(--ink-3); min-width: 0; }
+.edit-form .row { display: flex; gap: 10px; flex-wrap: wrap; }
+.edit-form .row label { flex: 1 1 160px; }
+.edit-form input, .edit-form textarea, .edit-form select, .start-opt select {
+  width: 100%; border: 1px solid var(--line-2); background: var(--card); border-radius: 10px; padding: 9px 12px; outline: none; font-size: 13.5px; color: var(--ink);
+}
+.edit-form textarea { min-height: 180px; resize: vertical; line-height: 1.6; }
+.edit-form input:focus, .edit-form textarea:focus, .edit-form select:focus, .start-opt select:focus { border-color: var(--accent); }
+.mine-list-tools {
+  position: sticky; top: -8px; z-index: 2; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; flex: none;
+  margin: -8px -8px 4px; padding: 10px 12px; background: var(--card); border-bottom: 1px solid var(--line);
+}
+.mine-list-tools .hint { flex: 1 1 200px; }
+.mine-list-tools b { margin-right: auto; font-size: 13px; }
+.mine-row .check { width: 30px; height: 30px; flex: none; border-radius: 9px; border: 2px solid var(--line-2); display: grid; place-items: center; color: #062a1f; }
+.mine-row .check.on { background: var(--accent); border-color: var(--accent); }
+.mine-row .check svg { width: 16px; height: 16px; }
+.mine-row.checked { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+.mine-dropped { flex: none; margin-top: 10px; border-top: 1px solid var(--line); padding: 10px 6px 4px; }
+.mine-dropped summary, .dropped-card summary { cursor: pointer; font-size: 12.5px; font-weight: 700; color: var(--ink-3); }
+.dropped-row { display: flex; gap: 10px; align-items: center; padding: 8px 4px; border-bottom: 1px solid var(--line); font-size: 13px; }
+.dropped-row span { flex: 1; min-width: 0; color: var(--ink-2); }
+.dropped-card summary { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
+.dropped-card[open] summary { margin-bottom: 10px; }
 @media (max-width: 1500px) and (min-width: 1101px) {
   .mine-split { grid-template-columns: minmax(340px, 440px) minmax(0, 1fr); }
   .mine-detail-b { grid-template-columns: minmax(0, 1fr); overflow-y: auto; }

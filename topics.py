@@ -50,7 +50,7 @@ ACTION_ID_RE = re.compile(r"^A-\d{8}-[a-z0-9]{3,10}$")
 REF_RE = re.compile(r"^[A-Za-z0-9_.:\-]{1,200}$")
 TARGET_KINDS = ("task", "message", "topic", "decision", "general")
 STAGES = ("request", "progress", "validating", "user_test", "blocked", "done")
-ACTION_TYPES = ("reply", "ack", "task-state", "decide", "assign", "activate")
+ACTION_TYPES = ("reply", "ack", "task-state", "decide", "assign", "activate", "topic-edit", "topic-drop")
 AGENT_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,30}$")
 
 
@@ -288,6 +288,22 @@ def clean_action(raw: dict) -> dict:
         if not ID_RE.match(topic):
             raise ValueError("착수 지시 형식 오류")
         a.update(topic=topic)
+    elif kind == "topic-edit":
+        topic = str(raw.get("topic", ""))
+        if not ID_RE.match(topic):
+            raise ValueError("주제 수정 형식 오류")
+        title = str(raw.get("title", "")).strip()[:200]
+        if not title:
+            raise ValueError("빈 제목")
+        pri = raw.get("priority")
+        kd = raw.get("kind")
+        a.update(topic=topic, title=title, body=str(raw.get("body", "")).strip()[:8000],
+                 priority=pri if pri in ("P0", "P1", "P2", "P3") else None, kind=kd if kd in KINDS else None)
+    elif kind == "topic-drop":
+        ids = raw.get("topics") or []
+        if not isinstance(ids, list) or not ids or len(ids) > 300 or not all(isinstance(x, str) and ID_RE.match(x) for x in ids):
+            raise ValueError("주제 삭제 목록 형식 오류")
+        a.update(topics=ids, restore=bool(raw.get("restore")), note=str(raw.get("note", ""))[:1000])
     return a
 
 
@@ -298,7 +314,7 @@ def data_dir(cfg) -> Path:
 def user_file(cfg) -> tuple[Path, dict]:
     path = data_dir(cfg) / "user.json"
     rec = read_json(path, None) or {"author": "user", "_rule": "이 파일은 topics.py가 사용자 요청을 받아서만 쓴다."}
-    for key in ("processed_actions", "comments", "tasks", "acks", "decisions_answered", "topic_assign", "topic_activate"):
+    for key in ("processed_actions", "comments", "tasks", "acks", "decisions_answered", "topic_assign", "topic_activate", "topic_edit", "topic_drop"):
         rec.setdefault(key, [])
     return path, rec
 
@@ -382,6 +398,19 @@ def apply_action(cfg, a: dict, source: str) -> str:
         rec["topic_activate"] = [r for r in rec["topic_activate"] if r.get("topic") != a["topic"]]
         rec["topic_activate"].append({"topic": a["topic"], "ts": a["created_at"] or ts, "by": "dashboard"})
         result = f"미처리 주제 착수 지시 {a['topic']} — 다음 자동 배분 때 담당 지정"
+    elif a["type"] == "topic-edit":
+        # 원본 topic.json은 그대로 두고, 아키텍트 수정본을 덮어 보이게 한다(되돌릴 수 있게)
+        rec["topic_edit"] = [r for r in rec["topic_edit"] if r.get("topic") != a["topic"]]
+        rec["topic_edit"].append({"topic": a["topic"], "title": a["title"], "body": a["body"], "priority": a["priority"],
+                                  "kind": a["kind"], "ts": a["created_at"] or ts})
+        result = f"주제 수정 {a['topic']}"
+    elif a["type"] == "topic-drop":
+        # 지우기 = 목록에서 빼기. 주제 폴더는 지우지 않으므로 '되살리기'로 복구된다
+        drop = set(a["topics"])
+        rec["topic_drop"] = [r for r in rec["topic_drop"] if r.get("topic") not in drop]
+        if not a["restore"]:
+            rec["topic_drop"] += [{"topic": x, "note": a["note"], "ts": a["created_at"] or ts} for x in a["topics"]]
+        result = f"주제 {len(drop)}건 {'되살림' if a['restore'] else '삭제(목록에서 뺌)'}"
     else:  # decide
         rec["decisions_answered"] = [r for r in rec["decisions_answered"] if r.get("id") != a["target"]]
         rec["decisions_answered"].append({"id": a["target"], "choice": a["choice"], "note": a["note"], "ts": a["created_at"] or ts})
@@ -569,7 +598,10 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
     if not folder.is_dir():
         return out
     assigns = user_assigns(cfg)
-    activations = {r.get("topic") for r in (read_json(data_dir(cfg) / "user.json", None) or {}).get("topic_activate", [])} if cfg else set()
+    urec = (read_json(data_dir(cfg) / "user.json", None) or {}) if cfg else {}
+    activations = {r.get("topic") for r in urec.get("topic_activate", [])}
+    edits = {r.get("topic"): r for r in urec.get("topic_edit", [])}
+    drops = {r.get("topic"): r for r in urec.get("topic_drop", [])}
     by_topic: dict[str, list[dict]] = {}
     for r in node_records or []:
         by_topic.setdefault(r.get("topic"), []).append(r)
@@ -617,6 +649,16 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
             t["status"] = "backlog"
             if t["status"] == "new":
                 t["status"] = "triage"
+        ed = edits.get(t["id"])
+        if ed:  # 아키텍트 수정본이 원본·작업자 기록보다 우선
+            t["title"], t["body"] = ed.get("title") or t.get("title"), ed.get("body", t.get("body"))
+            if ed.get("priority"):
+                t["priority"] = ed["priority"]
+            if ed.get("kind"):
+                t["kind"] = ed["kind"]
+            t["edited_at"] = ed.get("ts")
+        if t["id"] in drops:  # 삭제한 주제: 배분·실행 대상에서 빠지고 화면에서는 '삭제됨'에만 보인다
+            t["status"], t["dropped_at"] = "dropped", drops[t["id"]].get("ts")
         planner = t["assignee"] if t["assignee"] in plans else (next(iter(plans)) if plans else None)
         if planner:
             t["plan"], t["plan_by"] = plans[planner], planner
@@ -630,7 +672,7 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
 
 
 def whose_turn(t: dict) -> str | None:
-    if t["status"] in ("done", "parked", "backlog"):
+    if t["status"] in ("done", "parked", "backlog", "dropped"):
         return None
     a = t.get("assignee")
     if not a:
@@ -744,12 +786,12 @@ def cmd_dispatch(args, cfg):
     topics = merged_topics(topics_dir(cfg), cfg, node_recs)
     loads: dict[str, int] = {}
     for t in topics:
-        if t.get("assignee") and t["status"] not in ("done", "parked"):
+        if t.get("assignee") and t["status"] not in ("done", "parked", "dropped"):
             loads[t["assignee"]] = loads.get(t["assignee"], 0) + 1
     labels = {a["id"]: f"{a['pc_label']} {a.get('label', a['id'])}" for a in agents}
     done = 0
     for t in topics:
-        if t.get("assignee") or t["status"] in ("done", "parked", "backlog"):
+        if t.get("assignee") or t["status"] in ("done", "parked", "backlog", "dropped"):
             continue
         rows = score_agents(t, agents, loads, routing)
         if not rows:

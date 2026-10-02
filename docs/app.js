@@ -164,6 +164,7 @@ const TOPIC_STATES = [
   { id: 'active', label: '진행 중', cls: 'progress', icon: 'play' },
   { id: 'done', label: '완료', cls: 'done', icon: 'done' },
   { id: 'parked', label: '보류', cls: 'neutral', icon: 'pause' },
+  { id: 'dropped', label: '삭제됨', cls: 'blocked', icon: 'x', hidden: true },
 ];
 const TOPIC = Object.fromEntries(TOPIC_STATES.map(s => [s.id, s]));
 function topicChip(state) {
@@ -353,9 +354,21 @@ function derive(data) {
   const pendAssign = {};
   for (const p of pend.filter(p => p.type === 'assign')) pendAssign[p.topic] = p.agent;
   const pendActivate = new Set(pend.filter(p => p.type === 'activate').map(p => p.topic));
-  const topics = (data.topics || []).map(t => ({ ...t, _age: hoursSince(t.created_at),
-    ...(t.status === 'backlog' && pendActivate.has(t.id) ? { status: 'new' } : {}),
-    ...(pendAssign[t.id] && pendAssign[t.id] !== t.assignee ? { assignee: pendAssign[t.id], assign_by: 'user', dispatch_reason: '사용자 지정(반영 대기)', status: t.status === 'new' ? 'triage' : t.status } : {}) }));
+  // 주제 수정·삭제·되살리기도 PC가 처리하기 전에 화면에 먼저 반영한다(마지막 요청이 이긴다)
+  const pendEdit = {}, pendDrop = new Map();
+  for (const p of pend.filter(p => p.type === 'topic-edit')) pendEdit[p.topic] = p;
+  for (const p of pend.filter(p => p.type === 'topic-drop')) for (const id of p.topics || []) pendDrop.set(id, !p.restore);
+  const topics = (data.topics || []).map(t => {
+    let x = { ...t, _age: hoursSince(t.created_at),
+      ...(t.status === 'backlog' && pendActivate.has(t.id) ? { status: 'new' } : {}),
+      ...(pendAssign[t.id] && pendAssign[t.id] !== t.assignee ? { assignee: pendAssign[t.id], assign_by: 'user', dispatch_reason: '사용자 지정(반영 대기)', status: t.status === 'new' ? 'triage' : t.status } : {}) };
+    const e = pendEdit[t.id];
+    if (e) x = { ...x, title: e.title, body: e.body, priority: e.priority || x.priority, kind: e.kind || x.kind, _pendingEdit: true };
+    if (pendDrop.get(t.id) === true && x.status !== 'dropped') x = { ...x, status: 'dropped', dropped_at: pend.find(p => p.type === 'topic-drop' && (p.topics || []).includes(t.id))?.created_at, _pendingDrop: true };
+    if (pendDrop.get(t.id) === false && x.status === 'dropped') x = { ...x, status: t.backlog && !t.assignee ? 'backlog' : 'new', _pendingDrop: true };
+    if (x.status === 'dropped') x.turn = null;
+    return x;
+  });
 
   const missed = [];
   if (unprocessed.length) {
@@ -381,7 +394,7 @@ function derive(data) {
     title: `중복 착수: ${t.title}`, sub: `담당 ${t.assignee} · 추가 착수 ${t.conflict.join(', ')}`, go: () => openTopic(t) });
   const staleMin = data.meta.routing?.stale_minutes || 120;
   for (const a of data.agents || []) {
-    const mine = topics.filter(t => t.assignee === a.id && !['done', 'parked'].includes(t.status));
+    const mine = topics.filter(t => t.assignee === a.id && !['done', 'parked', 'dropped'].includes(t.status));
     const seen = a.last_seen || a.pc_synced;
     if (mine.length && (!seen || (Date.now() - toMs(seen)) / 6e4 > staleMin)) missed.push({ key: `agent-off:${a.id}:${seen || 'none'}`, level: 'bad', icon: 'agents',
       title: `작업자 신호 끊김: ${a.pc_label} · ${a.label || a.id}`, sub: `맡은 주제 ${mine.length}건 · 마지막 신호 ${fmtRel(seen)}`, go: () => go('agents') });
@@ -733,15 +746,20 @@ function vMine() {
   if (!list.some(i => i.key === S.mineSel)) S.mineSel = (f === 'all' ? urgent[0] || list[0] : list[0])?.key || null;
   const sel = list.find(i => i.key === S.mineSel) || null;
   const narrow = matchMedia('(max-width: 1100px)').matches;
-  const pick = it => { if (narrow) return openMineItem(it); S.mineSel = it.key; S._keepScroll = true; render(); };
+  const pick = it => { if (narrow) return openMineItem(it); if (S.mineSel !== it.key) S.editTopic = null; S.mineSel = it.key; S._keepScroll = true; render(); };
   const tabs = h('div', { class: 'mine-tabs', role: 'tablist', 'aria-label': '내 차례 소분류' },
     [['all', '전체', 'user', '', urgent.length], ...MINE_TYPES.map(([v, l, i, c]) => [v, l, i, c, count(v)])].map(([v, l, i, c, n]) =>
-      h('button', { role: 'tab', 'aria-selected': String(f === v), class: `mine-tab${n && c ? ' ' + c : ''}`, onclick: () => { S.f.mine = v; S.mineSel = null; render(); } },
+      h('button', { role: 'tab', 'aria-selected': String(f === v), class: `mine-tab${n && c ? ' ' + c : ''}`, onclick: () => { S.f.mine = v; S.mineSel = null; S.mineSelecting = false; S.editTopic = null; render(); } },
         icon(i), h('span', null, l), h('b', null, n))));
+  // 착수 고르기: 여러 개 골라 한 번에 지우기
+  const checked = S.mineChecked || (S.mineChecked = new Set());
+  const selecting = f === 'backlog' && S.mineSelecting;
+  const toggle = it => { checked.has(it.topic.id) ? checked.delete(it.topic.id) : checked.add(it.topic.id); S._keepScroll = true; render(); };
   const row = it => {
     const ty = MINE_TYPE[it.type];
-    return h('button', { class: 'mine-row', role: 'option', 'aria-selected': String(!narrow && it.key === S.mineSel), onclick: () => pick(it) },
-      h('span', { class: `lead-ico ${ty.cls}` }, icon(ty.icon)),
+    const on = selecting && checked.has(it.topic?.id);
+    return h('button', { class: `mine-row${on ? ' checked' : ''}`, role: 'option', 'aria-selected': String(selecting ? on : !narrow && it.key === S.mineSel), onclick: () => selecting ? toggle(it) : pick(it) },
+      selecting ? h('span', { class: `check${on ? ' on' : ''}`, 'aria-hidden': 'true' }, on ? icon('check') : null) : h('span', { class: `lead-ico ${ty.cls}` }, icon(ty.icon)),
       h('span', { class: 'body' },
         h('span', { class: 'kind' }, h('b', null, ty.label), it.topic && it.type !== 'backlog' ? h('span', { class: 'topic' }, it.topic.title) : null),
         h('span', { class: 't clamp-2' }, it.title),
@@ -751,12 +769,24 @@ function vMine() {
   const group = (title, items) => items.length ? [h('div', { class: 'mine-group' }, title, h('b', null, items.length)), items.map(row)] : null;
   const listBody = !list.length ? empty(f === 'all' ? '지금 대응할 것이 없습니다.' : `${MINE_TYPE[f].label} 항목이 없습니다.`)
     : f === 'all' ? [group('대응할 것', urgent), group('착수 고르기 · 미처리 주제', all.filter(i => i.type === 'backlog'))] : list.map(row);
+  const ids = list.filter(i => checked.has(i.topic?.id)).map(i => i.topic.id);
+  const dropped = S.d.topics.filter(t => t.status === 'dropped');
+  const listTools = f !== 'backlog' ? null : h('div', { class: 'mine-list-tools' }, selecting
+    ? [h('b', null, `${ids.length}건 선택`),
+      h('button', { class: 'btn sm', onclick: () => { ids.length === list.length ? checked.clear() : list.forEach(i => checked.add(i.topic.id)); render(); } }, ids.length === list.length ? '모두 해제' : '모두 선택'),
+      h('button', { class: 'btn sm danger', disabled: ids.length ? null : true, onclick: () => dropTopics(ids, false).then(() => { S.mineSelecting = false; render(); }) }, icon('x'), `${ids.length}건 삭제`),
+      h('button', { class: 'btn sm', onclick: () => { S.mineSelecting = false; checked.clear(); render(); } }, '취소')]
+    : [h('span', { class: 'hint' }, '누르면 오른쪽에서 내용을 보고 착수·담당·수정·삭제를 정합니다.'),
+      list.length ? h('button', { class: 'btn sm', onclick: () => { S.mineSelecting = true; checked.clear(); render(); } }, icon('check'), '여러 개 골라 지우기') : null]);
+  const droppedBox = f === 'backlog' && dropped.length ? h('details', { class: 'mine-dropped' },
+    h('summary', null, `삭제한 주제 ${dropped.length}건 · 되살리기`),
+    dropped.map(t => h('div', { class: 'dropped-row' }, h('span', { class: 'clamp-1' }, t.title), h('button', { class: 'btn sm', onclick: () => dropTopics(t.id, true) }, icon('refresh'), '되살리기')))) : null;
   const detail = sel ? mineDetail(sel, null) : null;
   return [
     head('MY TURN', '내 차례', urgent.length ? `대응할 것 ${urgent.length}건 · 미처리 주제 ${count('backlog')}건` : `지금 대응할 것 없음 · 미처리 주제 ${count('backlog')}건`),
     tabs,
     h('div', { class: `mine-split${narrow ? ' narrow' : ''}` },
-      h('div', { class: 'card mine-list', role: 'listbox', 'aria-label': '내 차례 목록' }, listBody),
+      h('div', { class: 'card mine-list', role: 'listbox', 'aria-label': '내 차례 목록', 'aria-multiselectable': selecting ? 'true' : null }, listTools, listBody, droppedBox),
       narrow ? null : h('section', { class: 'card mine-detail', 'aria-label': '선택한 항목' },
         detail ? [h('div', { class: 'mine-detail-h' }, h('span', { class: 'eyebrow' }, detail.eyebrow),
             h('button', { class: 'btn sm', title: '크게 보기', onclick: () => openMineItem(sel) }, icon('arrow'), '크게 보기')),
@@ -812,6 +842,57 @@ function actionParts(a, topic, redraw) {
     side: historyPanel(topic, task, null),
   };
 }
+// ------------------------------------------------------------ 주제 수정·삭제(목록에서 빼기)·되살리기
+// 원본은 PC에 그대로 남고, 삭제한 주제는 '삭제한 주제'에서 언제든 되살릴 수 있다
+async function dropTopics(ids, restore) {
+  ids = [].concat(ids);
+  if (!ids.length) return;
+  try {
+    await sendOps('topic-drop', { topics: ids, restore: !!restore, note: '' }, restore ? `주제 ${ids.length}건 되살리기` : `주제 ${ids.length}건 삭제`);
+    S.mineChecked?.clear();
+    toast(restore ? `${ids.length}건을 되살렸습니다` : `${ids.length}건을 목록에서 뺐습니다 · 주제 화면 아래 "삭제한 주제"에서 되살릴 수 있습니다`);
+    S._keepScroll = true; render();
+  } catch (e) { toast(e.message); }
+}
+function topicEditForm(t, done) {
+  const title = h('input', { value: t.title || '', maxlength: '200', 'aria-label': '제목' });
+  const body = h('textarea', { rows: '10', 'aria-label': '내용' }, t.body || '');
+  const kind = h('select', { 'aria-label': '유형' }, ['기능·개선', '버그', '조사·분석', '디자인', '운영·도구', '기타'].map(k => h('option', { selected: k === t.kind ? true : null }, k)));
+  const pri = h('select', { 'aria-label': '우선순위' }, [['P0', 'P0 긴급'], ['P1', 'P1 높음'], ['P2', 'P2 보통'], ['P3', 'P3 낮음']].map(([v, l]) => h('option', { value: v, selected: v === (t.priority || 'P2') ? true : null }, l)));
+  const save = h('button', { class: 'btn primary', onclick: async () => {
+    if (!title.value.trim()) { title.focus(); toast('제목을 적어주세요'); return; }
+    save.disabled = true;
+    try {
+      await sendOps('topic-edit', { topic: t.id, title: title.value.trim(), body: body.value.trim(), kind: kind.value, priority: pri.value }, `주제 수정: ${title.value.trim()}`);
+      toast('수정했습니다'); done(true);
+    } catch (e) { toast(e.message); } finally { save.disabled = false; }
+  } }, icon('check'), '저장');
+  return h('div', { class: 'edit-form' },
+    h('label', null, h('span', null, '제목'), title),
+    h('div', { class: 'row' }, h('label', null, h('span', null, '유형'), kind), h('label', null, h('span', null, '우선순위'), pri)),
+    h('label', null, h('span', null, '내용'), body),
+    h('div', { class: 'choice-row' }, save, h('button', { class: 'btn', onclick: () => done(false) }, '취소')),
+    h('div', { class: 'hint' }, '원래 메모는 PC에 그대로 남고, 수정본이 화면과 AI 작업 지시에 쓰입니다.'));
+}
+// 주제 머리 줄의 수정·삭제 버튼. 수정 중에는 그 자리에 입력칸이 열린다
+function topicTools(t, again) {
+  const dropped = t.status === 'dropped';
+  return h('div', { class: 'topic-tools' },
+    dropped ? null : h('button', { class: 'btn sm', onclick: () => { S.editTopic = t.id; again(); } }, icon('file'), '수정'),
+    dropped ? h('button', { class: 'btn sm primary', onclick: () => dropTopics(t.id, true).then(again) }, icon('refresh'), '되살리기')
+      : h('button', { class: 'btn sm danger', onclick: () => dropTopics(t.id, false).then(again) }, icon('x'), '삭제'));
+}
+function droppedCard() {
+  const list = S.d.topics.filter(t => t.status === 'dropped').sort((a, b) => toMs(b.dropped_at) - toMs(a.dropped_at));
+  if (!list.length) return null;
+  return h('details', { class: 'card section-gap dropped-card' },
+    h('summary', null, h('b', null, `삭제한 주제 ${list.length}건`), h('span', { class: 'hint' }, ' · 되살리면 원래 자리(미처리·새 주제)로 돌아갑니다')),
+    h('div', { class: 'list' }, list.map(t => h('div', { class: 'item' },
+      h('span', { class: 'lead-ico' }, icon('x')),
+      h('div', { class: 'body' }, h('div', { class: 't' }, t.title), h('div', { class: 's' }, `${t.id} · 삭제 ${fmtRel(t.dropped_at)}${t._pendingDrop ? ' · 반영 대기' : ''}`)),
+      h('button', { class: 'btn sm', onclick: () => dropTopics(t.id, true) }, icon('refresh'), '되살리기')))));
+}
+
 // 미처리 주제: 내용·히스토리를 보고 자동 배분 또는 담당을 골라 착수, 착수 전에 전할 말
 function backlogParts(t, redraw) {
   const pendAct = pending.all().find(p => p.type === 'activate' && p.topic === t.id);
@@ -831,11 +912,16 @@ function backlogParts(t, redraw) {
       render(); if (redraw) redraw();
     } catch (e) { toast(e.message); } finally { done(); }
   } }, icon('agents'), '이 담당으로 착수');
+  const again = () => { if (redraw) redraw(); else { S._keepScroll = true; render(); } };
+  const editing = S.editTopic === t.id;
   return {
     main: [
-      h('div', { style: { display: 'flex', gap: '6px', 'flex-wrap': 'wrap', 'align-items': 'center' } }, topicChip(t.status), priChip(t.priority), t.kind ? h('span', { class: 'tag' }, t.kind) : null, h('span', { class: 'when' }, `등록 ${fmtAbs(t.created_at)}`)),
-      h('h3', { class: 'd-title' }, t.title),
-      t.body ? [h('h4', null, '원래 메모'), longText(t.body)] : null,
+      h('div', { class: 'd-head' }, topicChip(t.status), priChip(t.priority), t.kind ? h('span', { class: 'tag' }, t.kind) : null,
+        t._pendingEdit || t.edited_at ? h('span', { class: 'tag' }, t._pendingEdit ? '수정 반영 대기' : '수정됨') : null,
+        h('span', { class: 'when' }, `등록 ${fmtAbs(t.created_at)}`), editing ? null : topicTools(t, again)),
+      editing ? topicEditForm(t, () => { S.editTopic = null; again(); }) : [
+        h('h3', { class: 'd-title' }, t.title),
+        t.body ? [h('h4', null, t.edited_at || t._pendingEdit ? '내용' : '원래 메모'), longText(t.body)] : null],
       h('h4', null, '착수 정하기'),
       pendAct || pendAsg ? h('div', { class: 'callout' }, h('span', { class: 'st user_test' }, icon('clock'), '반영 대기'),
         ' ', pendAsg ? `${person(pendAsg.agent).full}에게 배정했습니다. ` : '', pendAct ? '착수 지시를 보냈습니다. 다음 동기화 때 진행됩니다.' : '') : null,
@@ -953,7 +1039,7 @@ function timeline(n) {
 
 // ------------------------------------------------------------ 작업자 (PC별 AI 현황)
 function agentStats(id) {
-  const topics = S.d.topics.filter(t => t.status !== 'done' && t.status !== 'parked');
+  const topics = S.d.topics.filter(t => !['done', 'parked', 'dropped'].includes(t.status));
   return {
     assigned: topics.filter(t => t.assignee === id),
     turn: topics.filter(t => t.turn === id),
@@ -1021,11 +1107,12 @@ function vTopics() {
         h('span', { class: 'lead-ico' }, icon('send')),
         h('div', { class: 'body' }, h('div', { class: 't' }, p.title), h('div', { class: 's' }, `${p.id} · ${fmtRel(p.created_at)} · PC에서 topics.py pull 후 반영`)),
         h('button', { class: 'icon-btn', title: '목록에서 지우기', 'aria-label': '목록에서 지우기', onclick: () => { store.set('pendingTopics', pending.filter(x => x.id !== p.id)); render(); } }, icon('x'))))))) : null,
-    h('div', { class: 'section-gap board topics' }, TOPIC_STATES.map(s => {
+    h('div', { class: 'section-gap board topics' }, TOPIC_STATES.filter(s => !s.hidden).map(s => {
       const list = d.topics.filter(t => (t.status || 'new') === s.id).sort((a, b) => toMs(b.updated_at || b.created_at) - toMs(a.updated_at || a.created_at));
       return h('div', { class: 'col' }, h('div', { class: 'col-h' }, topicChip(s.id), h('span', { class: 'badge' }, list.length)),
         list.length ? list.map(topicCard) : h('div', { class: 'empty' }, '없음'));
     })),
+    droppedCard(),
   ];
 }
 function composerCard(repo) {
@@ -1662,12 +1749,15 @@ function openDecision(x) {
   drawer('결정 기록', decisionCard(x), fieldList({ 출처: x.source, 기록자: x._author, ID: x.id }));
 }
 function openTopic(t) {
+  if (S.editTopic && S.editTopic !== t.id) S.editTopic = null;
   const plan = t.plan || {};
   const planRows = [['goal', '목표'], ['scope', '범위'], ['inputs', '필요한 입력'], ['first_steps', '첫 단계'], ['risks', '위험·확인'], ['done_when', '완료 기준']]
     .filter(([k]) => plan[k] && (!Array.isArray(plan[k]) || plan[k].length));
   drawer('주제',
     h('div', { style: { display: 'flex', gap: '6px', 'flex-wrap': 'wrap' } }, topicChip(t.status), priChip(t.priority), t.kind ? h('span', { class: 'tag' }, t.kind) : null,
-      h('span', { class: 'tag' }, t.id), t.linked_task_id ? h('button', { class: 'tag', style: { cursor: 'pointer' }, onclick: () => openTaskById(t.linked_task_id) }, '작업 ' + t.linked_task_id) : null),
+      h('span', { class: 'tag' }, t.id), t.linked_task_id ? h('button', { class: 'tag', style: { cursor: 'pointer' }, onclick: () => openTaskById(t.linked_task_id) }, '작업 ' + t.linked_task_id) : null,
+      S.editTopic === t.id ? null : topicTools(t, () => { const x = S.d.topics.find(y => y.id === t.id); x ? openTopic(x) : closeDrawer(); })),
+    S.editTopic === t.id ? topicEditForm(t, () => { S.editTopic = null; openTopic(S.d.topics.find(y => y.id === t.id) || t); }) : null,
     h('h3', null, t.title),
     (t.conflict || []).length ? h('div', { class: 'callout warn' }, h('b', null, '중복 착수: '), `담당은 ${person(t.assignee).full}인데 ${t.conflict.map(c => person(c).full).join(', ')}도 착수했습니다. 한쪽을 멈추거나 담당을 바꿔주세요.`) : null,
     t.dispatch_reason ? h('div', { class: 'reason' }, h('b', null, t.assign_by === 'user' ? '담당 지정: ' : '배분 근거: '), t.dispatch_reason) : null,

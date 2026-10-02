@@ -281,7 +281,7 @@ def cmd_state(args, cfg):
 
 def assigned_to_me(cfg, data: dict) -> list[dict]:
     mine = set(my_agents(cfg))
-    return [t for t in data.get("topics", []) if t.get("assignee") in mine and t.get("status") not in ("done", "parked")]
+    return [t for t in data.get("topics", []) if t.get("assignee") in mine and t.get("status") not in ("done", "parked", "dropped")]
 
 
 def cmd_mine(args, cfg):
