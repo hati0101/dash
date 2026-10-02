@@ -872,13 +872,22 @@ function mineItems() {
   for (const t of q.backlog) items.push({ key: `b:${t.id}`, type: 'backlog', title: t.title, sub: t.body || '', who: t.proposed_by || 'user', when: t.created_at, topic: t, ref: t });
   return items;
 }
+// 화면에 보이는 순서 그대로(전체 탭: 관문 → 대응할 것 → 착수 고르기). 키보드 이동도 이 순서를 쓴다
+function mineList(f = S.f.mine || 'all', all = mineItems()) {
+  return f === 'all' ? [...all.filter(i => i.type === 'gate'), ...all.filter(i => !['gate', 'backlog'].includes(i.type)), ...all.filter(i => i.type === 'backlog')]
+    : all.filter(i => i.type === f);
+}
 function vMine() {
   const all = mineItems();
   const f = S.f.mine || 'all';
   const count = v => all.filter(i => i.type === v).length;
   const urgent = all.filter(i => i.type !== 'backlog');
-  const list = f === 'all' ? all : all.filter(i => i.type === f);
-  if (!list.some(i => i.key === S.mineSel)) S.mineSel = (f === 'all' ? urgent[0] || list[0] : list[0])?.key || null;
+  const list = mineList(f, all);
+  if (!list.some(i => i.key === S.mineSel)) {
+    // 키보드로 보낸 뒤에는 같은 자리(=다음 항목)로, 아니면 맨 위
+    S.mineSel = (S.kbNextIdx != null && list.length ? list[Math.min(S.kbNextIdx, list.length - 1)] : f === 'all' ? urgent[0] || list[0] : list[0])?.key || null;
+  }
+  S.kbNextIdx = null;
   const sel = list.find(i => i.key === S.mineSel) || null;
   const narrow = matchMedia('(max-width: 1100px)').matches;
   const pick = it => { if (narrow) return openMineItem(it); if (S.mineSel !== it.key) S.editTopic = null; S.mineSel = it.key; S._keepScroll = true; render(); };
@@ -893,7 +902,7 @@ function vMine() {
   const row = it => {
     const ty = MINE_TYPE[it.type];
     const on = selecting && checked.has(it.topic?.id);
-    return h('button', { class: `mine-row${on ? ' checked' : ''}${it.late ? ' late' : ''}`, role: 'option', 'aria-selected': String(selecting ? on : !narrow && it.key === S.mineSel), onclick: () => selecting ? toggle(it) : pick(it) },
+    return h('button', { class: `mine-row${on ? ' checked' : ''}${it.late ? ' late' : ''}`, role: 'option', 'data-key': it.key, 'aria-selected': String(selecting ? on : !narrow && it.key === S.mineSel), onclick: () => selecting ? toggle(it) : pick(it) },
       selecting ? h('span', { class: `check${on ? ' on' : ''}`, 'aria-hidden': 'true' }, on ? icon('check') : null) : h('span', { class: `lead-ico ${ty.cls}` }, icon(ty.icon)),
       h('span', { class: 'body' },
         h('span', { class: 'kind' }, h('b', null, ty.label), it.topic && !['backlog', 'gate'].includes(it.type) ? h('span', { class: 'topic' }, it.topic.title) : null,
@@ -931,14 +940,17 @@ function vMine() {
       narrow ? null : h('section', { class: 'card mine-detail', 'aria-label': '선택한 항목' },
         detail ? [h('div', { class: 'mine-detail-h' }, h('span', { class: 'eyebrow' }, detail.eyebrow),
             h('button', { class: 'btn sm', title: '크게 보기', onclick: () => openMineItem(sel) }, icon('arrow'), '크게 보기')),
-          h('div', { class: 'mine-detail-b' }, h('div', { class: 'ms-main' }, detail.main), h('div', { class: 'ms-side' }, detail.side))]
+          h('div', { class: 'mine-detail-b' }, h('div', { class: 'ms-main' }, detail.main), h('div', { class: 'ms-side' }, detail.side)),
+          kbHint()]
           : h('div', { class: 'mine-detail-empty' }, empty('왼쪽에서 항목을 고르면 내용과 히스토리가 여기에 보입니다.')))),
   ];
 }
 // 좁은 화면·"크게 보기": 같은 내용을 가운데 모달로
 function openMineItem(it) {
   const d = mineDetail(it, () => { const again = mineItems().find(x => x.key === it.key); again ? openMineItem(again) : closeDrawer(); });
-  modalSplit(d.eyebrow, d.main, d.side);
+  modalSplit(d.eyebrow, [d.main, kbHint()], d.side);
+  const panel = [...document.querySelectorAll('.drawer.modal.split')].pop();
+  if (panel) { panel.dataset.kb = 'mine'; panel.dataset.key = it.key; }
 }
 function mineDetail(it, redraw) {
   if (it.type === 'gate') return { eyebrow: `★ 관문 · ${it.sub}`, ...decisionParts(it.ref, redraw) };
@@ -960,9 +972,9 @@ function testParts(t, topic, redraw) {
       (t.evidence || []).length ? [h('h4', null, '근거'), h('ul', { class: 'd-list' }, [].concat(t.evidence).map(e => h('li', { class: 'mono' }, e)))] : null,
       h('h4', null, '확인 결과'),
       h('div', { class: 'choice-row' },
-        h('button', { class: 'btn primary', onclick: () => setStages([t.id], 'done', after) }, icon('check'), '확인 완료'),
-        h('button', { class: 'btn', onclick: () => setStages([t.id], 'blocked', after) }, icon('alert'), '문제 있음'),
-        h('button', { class: 'btn', onclick: () => { ack(`mine-test:${t.id}:${t.updated_at}`); after(); } }, icon('clock'), '나중에'),
+        h('button', { class: 'btn primary', 'data-kb-key': 'y', onclick: () => setStages([t.id], 'done', after) }, icon('check'), '확인 완료', kbd('Y')),
+        h('button', { class: 'btn', 'data-kb-key': 'n', 'data-kb-problem': '1', onclick: () => setStages([t.id], 'blocked', after) }, icon('alert'), '문제 있음', kbd('N')),
+        h('button', { class: 'btn', 'data-kb-key': 'l', onclick: () => { ack(`mine-test:${t.id}:${t.updated_at}`); after(); } }, icon('clock'), '나중에', kbd('L')),
         h('button', { class: 'btn', onclick: () => openTask(t) }, icon('tasks'), '작업 전체 보기')),
       thread({ kind: 'task', id: t.id, title: t.title }, redraw, { compose: true, title: '담당에게 전할 말', placeholder: '문제가 있었다면 어떤 화면·상황이었는지 적어 보내세요', to: t.owner === 'astra' ? 'dev-astra' : 'dev-claude' }),
     ],
@@ -977,7 +989,7 @@ function actionParts(a, topic, redraw) {
       h('h3', { class: 'd-title' }, a.title),
       a.detail ? h('div', { class: 'callout' }, a.detail) : null,
       h('div', { class: 'choice-row' },
-        h('button', { class: 'btn primary', onclick: () => { ack(`ua:${a.id}`); if (redraw) redraw(); } }, icon('check'), '했음'),
+        h('button', { class: 'btn primary', 'data-kb-key': 'x', onclick: () => { ack(`ua:${a.id}`); if (redraw) redraw(); } }, icon('check'), '했음', kbd('X')),
         task ? h('button', { class: 'btn', onclick: () => openTask(task) }, icon('tasks'), '관련 작업 보기') : null),
       task ? thread({ kind: 'task', id: task.id, title: task.title }, redraw, { compose: true, title: '담당에게 전할 말', placeholder: '해 본 결과나 막힌 점을 적어 보내세요', to: task.owner === 'astra' ? 'dev-astra' : 'dev-claude' }) : null,
     ],
@@ -1039,21 +1051,28 @@ function droppedCard() {
 function backlogParts(t, redraw) {
   const pendAct = pending.all().find(p => p.type === 'activate' && p.topic === t.id);
   const pendAsg = pending.all().find(p => p.type === 'assign' && p.topic === t.id);
-  const sel = h('select', { 'aria-label': '담당 고르기' }, agentOptions(pendAsg ? pendAsg.agent : '', [h('option', { value: '' }, '담당 고르기')]));
+  const kbAgent = S.kbPick && S.kbPick.id === t.id ? S.kbPick.agent : '';
+  const sel = h('select', { 'aria-label': '담당 고르기', 'data-kb-agent': '1', class: kbAgent ? 'kb-picked' : '' },
+    agentOptions(kbAgent || (pendAsg ? pendAsg.agent : ''), [h('option', { value: '' }, '담당 고르기')]).map((o, i) => { if (i > 0 && i < 10) o.textContent = `${i}. ${o.textContent}`; return o; }));
   const busy = b => { b.disabled = true; return () => { b.disabled = false; }; };
-  const auto = h('button', { class: 'btn primary', onclick: async () => {
+  const auto = h('button', { class: 'btn primary', 'data-kb-key': 'a' }, icon('play'), '자동 배분으로 착수', kbd('A'));
+  auto._kb = async (opt = {}) => {
     const done = busy(auto);
-    try { await sendOps('activate', { topic: t.id }, `착수 지시: ${t.title}`); render(); if (redraw) redraw(); } catch (e) { toast(e.message); } finally { done(); }
-  } }, icon('play'), '자동 배분으로 착수');
-  const mine = h('button', { class: 'btn', onclick: async () => {
-    if (!sel.value) { toast('담당을 먼저 고르세요'); sel.focus(); return; }
+    try { await sendOps('activate', { topic: t.id }, `착수 지시: ${t.title}`); if (!opt.quiet) { render(); if (redraw) redraw(); } return true; } catch (e) { toast(e.message); return false; } finally { done(); }
+  };
+  auto.onclick = () => auto._kb();
+  const mine = h('button', { class: 'btn', 'data-kb-assign': '1' }, icon('agents'), '이 담당으로 착수', kbd('Enter'));
+  mine._kb = async (opt = {}) => {
+    if (!sel.value) { toast('담당을 먼저 고르세요(1~9)'); sel.focus(); return false; }
     const done = busy(mine);
     try {
       await sendOps('assign', { topic: t.id, agent: sel.value, note: '' }, `주제 담당 → ${person(sel.value).name}`);
       await sendOps('activate', { topic: t.id }, `착수 지시: ${t.title}`);
-      render(); if (redraw) redraw();
-    } catch (e) { toast(e.message); } finally { done(); }
-  } }, icon('agents'), '이 담당으로 착수');
+      if (!opt.quiet) { render(); if (redraw) redraw(); }
+      return true;
+    } catch (e) { toast(e.message); return false; } finally { done(); }
+  };
+  mine.onclick = () => mine._kb();
   const again = () => { if (redraw) redraw(); else { S._keepScroll = true; render(); } };
   const editing = S.editTopic === t.id;
   return {
@@ -1642,21 +1661,24 @@ function sendHint() {
 }
 function thread(target, redraw, opts = {}) {
   const items = commentsFor(target);
-  const ta = h('textarea', { placeholder: opts.placeholder || '여기에 답을 적으면 Claude에게 전달됩니다', rows: '3', 'aria-label': '답 입력', 'data-draft': `reply:${target.kind}:${target.id}` });
+  const ta = h('textarea', { placeholder: opts.placeholder || '여기에 답을 적으면 Claude에게 전달됩니다', rows: '3', 'aria-label': '답 입력', 'data-draft': `reply:${target.kind}:${target.id}`, 'data-kb-reply': '1' });
   const to = h('select', { 'aria-label': '받는 사람' }, (S.data.agents || []).length
     ? agentOptions(LEGACY[opts.to] || opts.to || 'dev-claude').map(o => { o.textContent += '에게'; return o; })
     : [h('option', { value: 'dev-claude' }, 'Claude에게'), h('option', { value: 'dev-astra' }, 'Astra에게')]);
   if (opts.to) to.value = LEGACY[opts.to] || opts.to;
-  const send = h('button', { class: 'btn primary', onclick: async () => {
+  // 키보드(내 차례)에서도 같은 보내기를 쓴다: 성공하면 true
+  ta._send = async (opt = {}) => {
     const body = ta.value.trim();
-    if (!body) { ta.focus(); return; }
+    if (!body) { ta.focus(); return false; }
     send.disabled = true;
     try {
       await sendOps('reply', { target: { kind: target.kind, id: target.id, title: (target.title || '').slice(0, 200) }, to: to.value, body }, `답 → ${person(to.value).name}`);
       ta.value = ''; clearDraft(`reply:${target.kind}:${target.id}`);
-      render(); if (redraw) redraw();
-    } catch (e) { toast(e.message); } finally { send.disabled = false; }
-  } }, icon('send'), '보내기');
+      if (!opt.quiet) { render(); if (redraw) redraw(); }
+      return true;
+    } catch (e) { toast(e.message); return false; } finally { send.disabled = false; }
+  };
+  const send = h('button', { class: 'btn primary', 'data-kb-send': '1', onclick: () => ta._send() }, icon('send'), '보내기', kbd('Ctrl+Enter'));
   // compose: 지난 대화는 옆 히스토리에 있으므로 입력칸만 보인다
   if (opts.compose) return h('div', { class: 'reply-box' }, h('h4', null, opts.title || '답 보내기'), h('div', { class: 'composer' }, ta, h('div', { class: 'row' }, to, send)), sendHint());
   return h('div', { class: 'reply-box' },
@@ -1733,7 +1755,7 @@ function openDecisionNeeded(q) {
 // 결정 화면 내용: 오른쪽 칸(내 차례)과 가운데 모달이 같이 쓴다
 function decisionParts(q, redraw) {
   const ans = S.d.answers[q.id];
-  const note = h('textarea', { placeholder: '선택지 말고 직접 적거나, 고른 선택지에 덧붙일 말 (선택)', rows: '3', 'aria-label': '결정 메모', 'data-draft': `decide:${q.id}` });
+  const note = h('textarea', { placeholder: '선택지 말고 직접 적거나, 고른 선택지에 덧붙일 말 (선택)', rows: '3', 'aria-label': '결정 메모', 'data-draft': `decide:${q.id}`, 'data-kb-reply': '1' });
   const topic = topicById(q.task_id);
   const task = !topic && q.task_id ? S.d.tasks.find(t => t.id === q.task_id) : null;
   return {
@@ -1746,9 +1768,9 @@ function decisionParts(q, redraw) {
       q.recommendation ? h('div', { class: 'callout' }, h('b', null, '권장 '), q.recommendation) : null,
       ans ? h('div', { class: 'callout' }, h('b', null, '내 결정: '), ans.choice || '(메모)', ans.note ? ' — ' + ans.note : '',
         (() => { const r = decisionReflect(q, ans); return h('div', { class: `reflect ${r.cls}` }, icon(r.cls === 'done' ? 'check' : 'clock'), h('span', null, r.text)); })()) : null,
-      (q.options || []).length ? [h('h4', null, '선택지 — 누르면 바로 결정됩니다'), optionList(q, o => decide(q, o, note.value.trim(), redraw))] : null,
+      (q.options || []).length ? [h('h4', null, '선택지 — 누르면 바로 결정 · 키보드는 숫자로 고르고 Enter'), optionList(q, o => decide(q, o, note.value.trim(), redraw))] : null,
       h('h4', null, '직접 적기'),
-      h('div', { class: 'composer' }, note, h('div', { class: 'row' }, h('button', { class: 'btn primary', onclick: () => { if (!note.value.trim()) { note.focus(); return; } decide(q, '', note.value.trim(), redraw); } }, icon('send'), '메모로 결정 보내기'))),
+      h('div', { class: 'composer' }, note, h('div', { class: 'row' }, h('button', { class: 'btn primary', onclick: () => { if (!note.value.trim()) { note.focus(); return; } decide(q, '', note.value.trim(), redraw); } }, icon('send'), '메모로 결정 보내기', kbd('Ctrl+Enter')))),
       sendHint(),
     ],
     side: historyPanel(topic, task, `ask:${q.id}`),
@@ -1776,7 +1798,7 @@ function questionParts(topic, n, redraw) {
       thread({ kind: 'topic', id: t.id, title: t.title }, redraw,
         { compose: true, title: `${person(n.by).name}에게 답하기`, placeholder: '여기에 답을 적으면 질문한 AI에게 전달되고, 다음 동기화 때 그 답으로 이어서 진행합니다', to: n.by }),
       answered || acked ? null : h('div', { class: 'choice-row' },
-        h('button', { class: 'btn', onclick: () => { ack(key); closeDrawer(); } }, icon('check'), '답 없이 확인함으로 처리')),
+        h('button', { class: 'btn', 'data-kb-key': 'x', onclick: () => { ack(key); closeDrawer(); } }, icon('check'), '답 없이 확인함으로 처리', kbd('X'))),
     ],
     side: historyPanel(t, null, `note:${n.ts}`),
   };
@@ -1957,9 +1979,14 @@ function questionText(s) {
   const text = String(s || '').replace(/\s*\((\d{1,2})\)\s*/g, '\n\n($1) ').replace(/^\s+/, '');
   return h('div', { class: 'q-text' }, text);
 }
+// 선택지: 마우스로 누르면 바로 결정, 키보드 1~9는 고른 표시만(Enter로 보냄)
 function optionList(q, pick) {
-  return h('div', { class: 'opt-list' }, (q.options || []).map(o => h('button', { class: 'opt', onclick: () => pick(o) }, o)));
+  const picked = S.kbPick && S.kbPick.id === q.id ? S.kbPick.idx : -1;
+  return h('div', { class: 'opt-list' }, (q.options || []).map((o, i) => h('button', { class: `opt${i === picked ? ' kb-picked' : ''}`, 'data-kb-opt': String(i), onclick: () => pick(o) },
+    i < 9 ? h('span', { class: 'kb-num', 'aria-hidden': 'true' }, i + 1) : null, o)));
 }
+// 버튼 옆 작은 키 표시(휴대폰에서는 숨김)
+function kbd(k) { return h('span', { class: 'kb', 'aria-hidden': 'true' }, k); }
 
 function tokenCard() {
   const has = !!store.get('ghtoken'), repo = S.data.meta.repo || '';
