@@ -248,6 +248,7 @@ def cmd_inbox(args, cfg):
     done = set(read_json(done_path, []))
     sent = 0
     me = Path(__file__).resolve()
+    pc_note = ((data.get("meta", {}).get("routing", {}).get("pcs") or {}).get(pc["id"]) or {}).get("note")
     for t in assigned_to_me(cfg, data):
         a = agents[t["assignee"]]
         key = f"assign:{t['id']}:{t['assignee']}"
@@ -260,7 +261,8 @@ def cmd_inbox(args, cfg):
                 f"2. 진행 베이스: python \"{me}\" plan {t['id']} --agent {a['id']} --goal \"..\" --scope \"..\" --first-step \"..\" --done-when \"..\"\n"
                 f"3. 지금 하는 일 알리기: python \"{me}\" status --agent {a['id']} --project \"..\" --topic {t['id']}\n"
                 f"4. 끝나면: python \"{me}\" state {t['id']} --agent {a['id']} --status done\n\n"
-                "구현·설치·DB 변경·운영 영향 작업은 이 PC의 기존 승인 규칙을 따른다. 배정은 승인이 아니다.")
+                "구현·설치·DB 변경·운영 영향 작업은 이 PC의 기존 승인 규칙을 따른다. 배정은 승인이 아니다."
+                + (f"\n\n[이 PC 규칙] {pc_note}" if pc_note else ""))
         p = write_message(Path(a["inbox"]), f"DASH-ASSIGN-{t['id']}-{a['id']}", f"[대시보드 → {a['label']}] 주제 배정: {t['title']}",
                           {"sender": "dashboard (허브 배분)", "recipient": a["id"], "kind": "topic assignment", "task_id": t["id"]}, body)
         done.add(key)

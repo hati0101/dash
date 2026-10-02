@@ -614,9 +614,16 @@ def score_agents(topic: dict, agents: list[dict], loads: dict, routing: dict) ->
     now = datetime.now(KST)
     stale = routing.get("stale_minutes", 120)
     rows = []
+    pcs = routing.get("pcs") or {}
     for a in agents:
         if a.get("accept_topics") is False:
             continue
+        # 운영 서버처럼 '명시적으로 걸린 일만 받는' PC: 그 PC를 가리키는 규칙이 맞았거나 사용자가 직접 고른 경우만 후보
+        if (pcs.get(a["pc"]) or {}).get("only_when_matched"):
+            pointed = any(r.get("prefer_pc") == a["pc"] and any(w.lower() in text for w in r.get("match", []))
+                          for r in routing.get("rules", []))
+            if not pointed and norm_agent(topic.get("prefer") or "") != a["id"]:
+                continue
         s, why = 0.0, []
         for rule in routing.get("rules", []):
             hits = [w for w in rule.get("match", []) if w.lower() in text]
