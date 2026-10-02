@@ -2,6 +2,8 @@
 #   허브(개발컴, role=hub): 받기 → 대시보드 요청·주제 가져오기 → 자동 배분 → 알림 → 바뀐 내용만 암호화 → 검증 → 올리기
 #   노드(서버컴 등, role=node): 받기 → 배정·답을 이 PC 작업자 수신 폴더로 → 이 PC 기록을 암호화 → 자기 파일만 올리기
 # 비밀번호는 Windows DPAPI로 보호된 .local/pw.dpapi에서 읽는다. 각 PC는 자기 파일만 올리므로 서로 덮어쓰지 않는다.
+# -FromRunner: 자동 실행기가 결과를 바로 올릴 때 부른다(실행기를 다시 띄우지 않는다).
+param([switch]$FromRunner)
 $ErrorActionPreference = 'Continue'
 Set-Location $PSScriptRoot
 $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
@@ -18,7 +20,7 @@ Set-Content $lock $PID
 # 자동 실행기: 이 PC 작업자 차례인 일이 있으면 그 AI를 화면 없이 깨운다. 따로 돌게 띄워 동기화는 바로 끝난다.
 # (비밀번호 환경 변수는 실행기에만 이어지고, 실행기는 AI 프로세스에 넘기지 않는다)
 function Start-Runner {
-  if (-not (Test-Path (Join-Path $PSScriptRoot 'runner.py'))) { return }
+  if ($FromRunner -or -not (Test-Path (Join-Path $PSScriptRoot 'runner.py'))) { return }
   try {
     Start-Process -FilePath 'python' -ArgumentList 'runner.py' -WorkingDirectory $PSScriptRoot -WindowStyle Hidden
   } catch { Log ('자동 실행기 시작 실패: ' + $_.Exception.Message) }
@@ -43,6 +45,9 @@ try {
   $cfg = Get-Content 'config.local.json' -Raw -Encoding UTF8 | ConvertFrom-Json
   $role = if ($cfg.pc -and $cfg.pc.role) { $cfg.pc.role } else { 'hub' }
 
+  # 한 번 동기화. 예약 작업은 10분마다 시작하지만, 그 안에서 1분 간격으로 여러 번 돌려
+  # AI 결과·다른 PC 기록이 들어오면 1~2분 안에 대시보드에 반영되게 한다(바뀐 게 없으면 아무것도 올리지 않는다).
+  function Sync-Once {
   $out = (git pull -q --rebase --autostash origin main 2>&1 | Out-String).Trim()
   if ($LASTEXITCODE) { Log "받기 실패: $out" }
 
@@ -89,6 +94,16 @@ try {
   if ($bad) { git reset -q; Log "평문 파일이 스테이징됨 — 중단: $($bad -join ', ')"; return }
   if ($staged.Count) { git commit -q -m ('sync ' + (Get-Date -Format 'yyyy-MM-dd HH:mm')) | Out-Null }
   if (Push-Safely $staged) { if ($staged.Count) { Log ('게시: ' + ($staged -join ', ')) } } else { Log '올리기 실패' }
+  }
+
+  Sync-Once
+  if (-not $FromRunner) {
+    foreach ($i in 1..8) {
+      Start-Sleep -Seconds 60
+      Set-Content $lock $PID  # 잠금 시각 갱신(다른 동기화가 겹치지 않게)
+      Sync-Once
+    }
+  }
 } catch {
   Log ('오류: ' + $_.Exception.Message)
 } finally {

@@ -270,7 +270,8 @@ async function syncAcks(keys) {
 }
 
 async function fetchEnvelope() {
-  const r = await fetch('data.enc.json?t=' + Date.now(), { cache: 'no-store' });
+  // 조건부 요청: 바뀌지 않았으면 서버가 304로 답해 데이터를 다시 받지 않는다(1분마다 확인해도 가볍다)
+  const r = await fetch('data.enc.json', { cache: 'no-cache' });
   if (!r.ok) throw new Error('데이터 파일을 받지 못했습니다 (' + r.status + ')');
   return r.json();
 }
@@ -424,7 +425,7 @@ function enterApp() {
   $('#app').hidden = false;
   readHash();
   render();
-  if (!S.timer) S.timer = setInterval(refresh, 5 * 60 * 1000);
+  if (!S.timer) S.timer = setInterval(() => { if (!document.hidden) refresh(); }, 60 * 1000);
 }
 async function refresh(manual) {
   try {

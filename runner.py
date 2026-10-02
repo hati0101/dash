@@ -397,6 +397,13 @@ def main():
     finally:
         node.write_json(state_path, state)
         lock.unlink(missing_ok=True)
+    # 결과가 생겼으면 다음 정기 동기화를 기다리지 않고 바로 올린다(대시보드에 빨리 반영)
+    if any((state.get("topics", {}).get((j.get("topic") or {}).get("id") or j["sig"], {}).get("last_result") or {}).get("actions") for j in jobs):
+        sync = ROOT / "sync.ps1"
+        if sync.exists():
+            log("결과 바로 올리기: sync.ps1 -FromRunner")
+            subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(sync), "-FromRunner"],
+                           cwd=str(ROOT), capture_output=True, timeout=15 * 60)
 
 
 CFG: dict = {}
