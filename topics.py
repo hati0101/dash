@@ -673,6 +673,9 @@ def run_gates(t: dict, finishes: list, answered: dict) -> dict:
             gate = {"n": n, "id": gate_id(n, t["id"], ts), "opened_at": ts, "by": by, "summary": body, "from_stage": stage}
             live = live or n == 4
         ans = answered.get(gate["id"])
+        if not ans and gate.get("legacy_id") and answered.get(gate["legacy_id"]):
+            ans = answered[gate["legacy_id"]]
+            gate["id"] = gate["legacy_id"]  # 예전 번호로 받은 답: 기록도 그 번호로(답한 것으로 보이게)
         if not ans:
             break
         act = gate_action(gate["n"], ans)
@@ -684,7 +687,10 @@ def run_gates(t: dict, finishes: list, answered: dict) -> dict:
             break
         if act == "open5":
             live = False  # 실게임 통과 → 대화 세션 단계 끝, 다시 자동 흐름
-            gate = {"n": 5, "id": gate_id(5, t["id"], since), "opened_at": since, "by": prev["by"], "summary": prev["summary"], "from_stage": prev["from_stage"]}
+            # ★5 번호는 ★4 번호에서 정한다(G4-… → G5-…). 대시보드가 ★4 통과 직후 ★5를 바로 띄워 이어서 답할 수 있게.
+            # 예전 방식(답한 시각) 번호로 이미 받은 답도 인정한다
+            gate = {"n": 5, "id": "G5-" + prev["id"][3:], "legacy_id": gate_id(5, t["id"], since), "opened_at": since, "by": prev["by"],
+                    "summary": prev["summary"], "from_stage": prev["from_stage"]}
             continue
         stage = act
     return {"stage": stage, "since": since, "gate": gate, "history": history[-10:], "final": final, "live": live}
