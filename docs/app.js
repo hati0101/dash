@@ -1112,6 +1112,7 @@ function vSources() {
         h('dt', null, '작업표 기록자'), h('dd', null, m.coordination?.writer || '—'),
         h('dt', null, '가린 정보'), h('dd', null, Object.entries(m.masked || {}).map(([k, v]) => `${({ ip: '공인 IP', email: '이메일', secret: '비밀값', token: '토큰' })[k] || k} ${v}`).join(' · ')),
         h('dt', null, '기록 충돌'), h('dd', null, (m.conflicts || []).length ? m.conflicts.map(c => c.id).join(', ') : '없음'),
+        h('dt', null, '보드에서 뺀 작업'), h('dd', null, (m.hidden_tasks || []).length ? m.hidden_tasks.map(t => `${t.title || t.id}`).join(', ') : '없음'),
         h('dt', null, '저장소'), h('dd', null, m.repo || '미연결'))),
       card('갱신과 협업', null, h('div', { class: 'hint', style: { display: 'grid', gap: '8px' } },
         h('div', null, h('b', null, '갱신: '), '자동 동기화를 켜두면 PC가 10분마다 보낸 요청을 가져와 처리하고 바뀐 내용만 게시합니다(수동: ', h('span', { class: 'mono' }, 'publish.ps1'), '). 이 화면은 5분마다 새 게시본을 확인합니다.'),

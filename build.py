@@ -514,7 +514,7 @@ def merge_tasks(base: list[dict], curated: list[dict]):
         if author == "user":
             t["user_set"] = {"stage": row.get("stage"), "note": row.get("user_note"), "at": row.get("updated_at")}
         for key in ("title", "area", "owner", "state", "priority", "next_action", "due",
-                    "waiting_on", "live_test", "summary", "evidence", "progress"):
+                    "waiting_on", "live_test", "summary", "evidence", "progress", "hidden", "hidden_reason"):
             if row.get(key) not in (None, ""):
                 t[key] = row[key]
         if row.get("stage") in STAGES:
@@ -633,6 +633,9 @@ def build_payload(cfg: dict, pw: str | None = None) -> dict:
     load_ai_runs(Path(cfg["ai_runs_dir"]), log)
     curated = load_curated(cfg.get("curated_files", []), log)
     tasks, conflicts = merge_tasks(tasks, curated["tasks"])
+    # 아키텍트가 업무 보드에서 빼라고 한 작업(hidden)은 화면 목록에서 제외하고, 무엇을 뺐는지만 남긴다
+    hidden_tasks = [{"id": t["id"], "title": t.get("title"), "reason": t.get("hidden_reason")} for t in tasks if t.get("hidden")]
+    tasks = [t for t in tasks if not t.get("hidden")]
     nodes, agents, node_records = load_nodes(cfg, pw, log)
     topics = load_topics(cfg, log, node_records)
     from topics import load_routing
@@ -653,6 +656,7 @@ def build_payload(cfg: dict, pw: str | None = None) -> dict:
             "limits": limits,
             "coordination": coord_meta,
             "conflicts": conflicts,
+            "hidden_tasks": hidden_tasks,
             "ack_pending": sorted(ack_pending),
             "repo": cfg.get("github_repo") or None,
             "hub": (cfg.get("pc") or {}).get("id"),
