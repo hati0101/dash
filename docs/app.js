@@ -1240,35 +1240,76 @@ function topicCard(t) {
 }
 
 // ------------------------------------------------------------ 업무
+// 업무 보드 = 주제 진행 흐름(아키텍트 결정 2026-10-02). 칸 판정은 위에서 먼저 걸리는 칸 하나에만 넣는다.
+const FLOW = [
+  { id: 'user_test', label: '아키텍트 대기', icon: 'user' },
+  { id: 'blocked', label: '막힘', icon: 'alert' },
+  { id: 'validating', label: '검증', icon: 'eye' },
+  { id: 'progress', label: '진행', icon: 'play' },
+  { id: 'request', label: '요청', icon: 'inbox' },
+  { id: 'done', label: '완료', icon: 'done' },
+];
+const aiOfAgent = id => ((S.data.agents || []).find(a => a.id === id) || {}).ai || (/claude/.test(id || '') ? 'claude' : /astra|gpt/.test(id || '') ? 'gpt' : '');
+const pcOfAgent = id => ((S.data.agents || []).find(a => a.id === id) || {}).pc || String(id || '').split('-')[0];
+function topicFlow(t, asking) {
+  if (t.status === 'done') return { col: 'done', why: [] };
+  if ((S.data.decisions_needed || []).some(q => q.task_id === t.id && !S.d.answers[q.id]) || asking.has(t.id)) return { col: 'user_test', why: [] };
+  const why = [];
+  const run = runsFor(t.id)[0];
+  if (run && run.result === 'fail') why.push('실행 실패');
+  const today = new Date().toDateString();
+  if (runsFor(t.id).filter(r => r.agent === t.turn && new Date(toMs(r.started)).toDateString() === today).length >= 10) why.push('오늘 한도');
+  if ((t.conflict || []).length) why.push('중복 착수');
+  if (t.assignee && lockOf(t.assignee)) why.push('담당 멈춤');
+  if (t.status === 'active' && hoursSince(t.updated_at) > 24) why.push('24시간 멈춤');
+  if (why.length) return { col: 'blocked', why };
+  if (t.turn && t.assignee && t.turn !== t.assignee) return { col: 'validating', why: [] };
+  if (t.plan && t.turn === t.assignee && ['ready', 'active'].includes(t.status)) return { col: 'progress', why: [] };
+  return { col: 'request', why: [] };
+}
 function vTasks() {
-  const stageFocus = S.f.stage;
-  S.sel = S.sel || new Set();
-  const tasks = filterTasks(S.d.tasks, S.f.taskOwner);
-  for (const id of [...S.sel]) if (!tasks.some(t => t.id === id)) S.sel.delete(id);
+  const f = S.f.taskOwner || 'all', pcF = S.f.taskPc || 'all';
+  // 아키텍트에게 물은 AI 질문(내 차례와 같은 기준)이 걸린 주제
+  const asking = new Set(myQueue().questions.map(x => x.topic.id));
+  const passOwner = (ai, pc, isUser) => (f === 'all' || f === 'user' || (f === 'claude' && ai === 'claude') || (f === 'astra' && ai === 'gpt')) && (pcF === 'all' || pc === pcF) && (f !== 'user' || true);
+  const items = [];
+  for (const t of S.d.topics) {
+    if (['backlog', 'parked', 'dropped'].includes(t.status)) continue;
+    if (!passOwner(aiOfAgent(t.assignee), pcOfAgent(t.assignee))) continue;
+    const fl = topicFlow(t, asking);
+    items.push({ kind: 'topic', t, col: fl.col, why: fl.why, ts: t.updated_at || t.created_at });
+  }
+  for (const t of S.d.tasks) {  // 옛 작업표(업무 보드 시절 기록)
+    const owner = LEGACY[t.owner] || t.owner;
+    if (!passOwner(aiOfAgent(owner) || (t.owner === 'astra' ? 'gpt' : t.owner === 'claude' ? 'claude' : ''), pcOfAgent(owner) || 'dev')) continue;
+    const col = t.stage === 'done' ? 'done' : t.stage === 'user_test' || t.waiting_on === 'user' ? 'user_test' : (t.stage === 'blocked' || t._stale) ? 'blocked' : t.stage;
+    items.push({ kind: 'task', t, col: FLOW.some(x => x.id === col) ? col : 'progress', why: col === 'blocked' ? [t._stale ? `${Math.round(t._age)}시간 멈춤` : '막힘'] : [], ts: t.updated_at });
+  }
   const staleKeys = S.d.missed.filter(i => i.key.startsWith('stale:') && !S.acks.has(i.key) && !S.serverAcks.has(i.key)).map(i => i.key);
-  const pick = (id, on) => { on ? S.sel.add(id) : S.sel.delete(id); S._keepScroll = true; render(); };
-  const selCard = t => h('div', { class: `sel-wrap${S.sel.has(t.id) ? ' on' : ''}` },
-    h('label', { class: 'sel-box', title: '선택' }, h('input', { type: 'checkbox', checked: S.sel.has(t.id), 'aria-label': `${t.title} 선택`, onchange: e => pick(t.id, e.target.checked) })),
-    projCard(t), t._pendingStage ? h('span', { class: 'st user_test pend-tag' }, icon('clock'), '단계 반영 대기') : null);
-  const ids = [...S.sel];
+  const card = it => {
+    const t = it.t, who = it.kind === 'topic' ? t.assignee : (LEGACY[t.owner] || t.owner);
+    const ag = (S.data.agents || []).find(a => a.id === who);
+    return h('button', { class: `proj flow-card${ag ? ' pc-' + ag.pc : ''}`, onclick: () => it.kind === 'topic' ? openTopic(t) : openTask(t) },
+      h('div', { class: 'row' }, priChip(t.priority), it.kind === 'task' ? h('span', { class: 'tag' }, '옛 작업표') : null,
+        it.why.map(w => h('span', { class: 'st blocked' }, w))),
+      h('div', { class: 'ttl clamp-2' }, t.title),
+      h('div', { class: 'foot' }, ag ? h('span', { class: 'pc-chip' }, ag.pc_label) : null, h('span', { class: 'wait' }, av(who || 'user', true), person(who || 'user').name),
+        it.kind === 'topic' && t.turn && t.turn !== t.assignee ? h('span', { class: 'tag' }, `차례: ${person(t.turn).name}`) : null,
+        h('span', { style: { 'margin-left': 'auto' } }, fmtRel(it.ts))));
+  };
+  const total = items.filter(i => i.col !== 'done').length;
   return [
-    head('TASKS', '업무 보드', null,
-      chips([['all', '전체'], ['claude', 'Claude'], ['astra', 'Astra'], ['cli', 'CLI'], ['user', '나 대기']], S.f.taskOwner, v => { S.f.taskOwner = v; render(); }, '담당 필터'),
-      staleKeys.length ? h('button', { class: 'btn', onclick: () => ack(staleKeys) }, icon('check'), `멈춤 알림 ${staleKeys.length}건 모두 끄기`) : null,
-      h('button', { class: 'btn', onclick: () => { const all = tasks.filter(t => t.stage !== 'done').map(t => t.id); const every = all.every(id => S.sel.has(id)); all.forEach(id => every ? S.sel.delete(id) : S.sel.add(id)); render(); } }, icon('check'), '진행 중 전체 선택'),
-      stageFocus ? h('button', { class: 'btn', onclick: () => { S.f.stage = null; render(); } }, icon('x'), STAGE[stageFocus].label + ' 강조 해제') : null),
-    h('div', { class: 'board fit-page' }, STAGES.map(s => {
-      const list = tasks.filter(t => t.stage === s.id).sort(taskSort);
-      return h('div', { class: 'col', style: stageFocus && stageFocus !== s.id ? { opacity: '.45' } : null },
-        h('div', { class: 'col-h' }, h('span', { style: { color: `var(--st-${s.id})`, display: 'grid' } }, icon(s.icon)), s.label, h('span', { class: 'badge' }, list.length)),
-        list.length ? list.map(selCard) : h('div', { class: 'empty' }, '없음'));
+    head('TASKS', '업무 보드', `진행 흐름 · 진행 중 ${total}건`,
+      chips([['all', '전체'], ['claude', 'Claude'], ['astra', 'Astra'], ['user', '나 대기']], f, v => { S.f.taskOwner = v; render(); }, '담당 필터'),
+      chips([['all', '모든 PC'], ['dev', '개발컴'], ['server', '서버컴']], pcF, v => { S.f.taskPc = v; render(); }, 'PC 필터'),
+      staleKeys.length ? h('button', { class: 'btn', onclick: () => ack(staleKeys) }, icon('check'), `멈춤 알림 ${staleKeys.length}건 끄기`) : null),
+    h('div', { class: 'board fit-page' }, FLOW.map(c => {
+      const list = items.filter(i => i.col === c.id).sort((x, y) => toMs(y.ts) - toMs(x.ts));
+      return h('div', { class: 'col', style: f === 'user' && c.id !== 'user_test' ? { opacity: '.45' } : null },
+        h('div', { class: 'col-h' }, h('span', { style: { color: `var(--st-${c.id})`, display: 'grid' } }, icon(c.icon)), c.label, h('span', { class: 'badge' }, list.length)),
+        list.length ? list.map(card) : h('div', { class: 'empty' }, '없음'));
     })),
-    h('p', { class: 'hint fit-hint' }, '카드 오른쪽 위 칸을 눌러 여러 개를 고르면 한꺼번에 단계를 바꿀 수 있습니다. 24시간 넘게 갱신이 없으면 "멈춤"으로 표시합니다.'),
-    ids.length ? h('div', { class: 'bulkbar', role: 'region', 'aria-label': '선택한 작업 일괄 처리' },
-      h('b', null, `${ids.length}건 선택`),
-      STAGES.map(s => h('button', { class: 'btn', onclick: () => setStages(ids, s.id) }, h('span', { style: { color: `var(--st-${s.id})`, display: 'grid' } }, icon(s.icon)), s.label)),
-      h('button', { class: 'btn', onclick: () => { const keys = S.d.missed.filter(i => ids.some(id => i.key.startsWith(`stale:${id}:`) || i.key.startsWith(`usertest:${id}:`))).map(i => i.key); if (keys.length) ack(keys); else toast('선택한 작업에 켜진 알림이 없습니다'); } }, icon('bell'), '알림 끄기'),
-      h('button', { class: 'btn', onclick: () => { S.sel.clear(); render(); } }, icon('x'), '선택 해제')) : null,
+    h('p', { class: 'hint fit-hint' }, '주제 진행 흐름입니다(미처리·보류·삭제는 주제 화면에서). 누르면 상세가 열립니다. "옛 작업표"는 예전 업무 기록입니다.'),
   ];
 }
 
