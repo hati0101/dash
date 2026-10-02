@@ -665,18 +665,78 @@ def is_research(t: dict, body: str = "", ts=None) -> bool:
     return old_rule and bool(NO_TEST_RE.search(t.get("title") or ""))
 
 
+OWNER_GRACE = timedelta(minutes=10)  # 담당이 바뀐 직후 이전 담당의 끝냄(이미 돌던 작업·PC 간 시계 차이)도 인정
+
+
+def parse_dt(v) -> datetime | None:
+    """시각 문자열 → 값. 형식이 틀리면 None(to_dt처럼 1970년으로 바꾸지 않는다: 깨진 이력이 '처음부터의 담당'이 되지 않게)."""
+    try:
+        d = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+        return d if d.tzinfo else d.replace(tzinfo=KST)
+    except ValueError:
+        return None
+
+
+def owner_log_of(t: dict) -> list[tuple]:
+    """담당 변경 이력(허브 기록 owner_log + 지금 담당이 정해진 시각)을 시간순으로. 같은 담당이 이어지면 처음 시각 하나로 합친다
+    (허브가 지금 담당을 이미 적어 둔 뒤에도 '바로 전 담당'이 지금 담당 자신이 되지 않게)."""
+    rows = [(parse_dt(e.get("from")), e.get("agent")) for e in t.get("_owner_log") or () if isinstance(e, dict) and e.get("agent")]
+    if t.get("_base_assignee"):
+        rows.append((parse_dt(t.get("_assigned_at")), t["_base_assignee"]))
+    out = []
+    for at, a in sorted((r for r in rows if r[0]), key=lambda r: r[0]):
+        if not out or out[-1][1] != a:
+            out.append((at, a))
+    return out
+
+
+def assignee_at(t: dict, ts) -> str | None:
+    """끝냄 시각의 담당(2026-10-03 검토 P1: 끝냄은 '그 시점 담당'으로 판정한다).
+    지금 담당이 정해진 시각 이후면 지금 담당, 그 전이면 허브가 남긴 담당 변경 이력(owner_log)에서 찾는다. 모르면 None."""
+    at = to_dt(ts)
+    past = [e for e in owner_log_of(t) if e[0] <= at]
+    return past[-1][1] if past else None
+
+
+def legacy_owners(t: dict) -> set:
+    """이력이 없던 때의 예전 판정: 지금 담당 + 이 주제를 맡았던 작업자(착수·인계·자동 이관 전 담당) + 답한 관문을 연 작업자."""
+    return {t.get("assignee"), t.get("live_from"), *(t.get("_owners") or ()), *(t.get("_anchor_by") or ())} - {None}
+
+
+def owners_at(t: dict, ts) -> set:
+    """끝낸 시각에 인정하는 작업자: 그 시각 담당 + 바뀐 지 10분 안이면 바로 전 담당(이력에 없으면 예전 판정의 작업자).
+    이력이 없던 때면 예전 판정 그대로."""
+    at = to_dt(ts)
+    log = owner_log_of(t)
+    past = [e for e in log if e[0] <= at]
+    if not past:
+        return legacy_owners(t)
+    out = {past[-1][1]}
+    if at - past[-1][0] < OWNER_GRACE:
+        if len(past) > 1:
+            out.add(past[-2][1])
+        else:  # 바로 전 담당이 이력에 없다: 예전 판정의 작업자 중 그 시각 뒤에 담당이 된 작업자는 빼고
+            first = {}
+            for e_at, a in log:
+                first.setdefault(a, e_at)
+            out |= {a for a in legacy_owners(t) if a not in first or first[a] <= at}
+    return out
+
+
 def finish_counts(by: str, stage: str, live: bool, t: dict, known, ts) -> bool:
     """그 단계 담당의 끝냄만 다음 단계로 넘긴다(새 규칙). 교차 검토자·요청받은 작업자·남은 답 처리 작업의 done은 세지 않는다."""
     if to_dt(ts) < RULES_V2_FROM:
         return True  # 옛 기록은 그때 판정 그대로
-    # 담당이 나중에 바뀌어도(자동 이관·인계) 그때 담당이 남긴 끝냄은 그대로 인정한다: 지금 담당 + 이 주제를 맡았던 작업자(착수·인계 기록)
-    owners = {t.get("assignee"), t.get("live_from"), *(t.get("_owners") or ())} - {None}
+    # 끝낸 시각의 담당으로 판정한다: 담당이 나중에 바뀌어도(자동 이관·인계·아키텍트 지정) 그때 담당의 끝냄은 그대로 인정되고,
+    # 나중에 담당이 된 작업자가 그 전에 남긴 끝냄이 뒤늦게 인정되지도 않는다(관문 번호가 바뀌지 않게).
+    a = assignee_at(t, ts)
+    owners = owners_at(t, ts)
     if live:
         return by in (LIVE_AGENT, *owners)
     if stage == "work":
         return by in owners
     if stage in ("test", "pack"):
-        return by == stage_owner(stage, t, known) or (by in owners and (str(by).startswith("dev-") or by == LEAD))
+        return by == stage_owner(stage, t, known, a) or (by in owners and (str(by).startswith("dev-") or by == LEAD))
     if stage == "deploy":
         return str(by).startswith("server-")
     return False
@@ -727,13 +787,23 @@ def run_gates(t: dict, finishes: list, answered: dict, known=None) -> dict:
     # 이 동안 자동 실행기는 깨우지 않고, '문제 있음'으로 되돌아온 수정도 대화에서 고쳐 끝내면 자체 시험 없이 바로 ★4로 돌아온다.
     stage, since, gate, history, final, live = "work", None, None, [], None, False
     fin = sorted(finishes, key=lambda f: to_dt(f[0]))
+    # 아키텍트가 이미 답한 관문을 연 끝냄은 그때 인정된 것이다: 담당 정보가 나중에 바뀌어도 다시 판정하지 않는다(답한 관문이 떨어져 나가지 않게)
+    gid_re = re.compile(r"^G(\d+)-" + re.escape(t["id"][2:]) + r"-(\d{14})$")
+    gids = [m.groups() for aid in answered if (m := gid_re.match(str(aid)))]
+    anchored = {st for _, st in gids}
+    stamp = lambda v: f"{to_dt(v).astimezone(KST):%Y%m%d%H%M%S}"
+    # 답한 관문을 연 작업자는 이력이 없던 때의 판정(legacy_owners)에서 그 주제를 맡았던 작업자로 본다:
+    # 관문 없이 넘어간 앞 단계 끝냄(진행 → 자체 시험)도 같이 인정되어, 담당이 바뀐 뒤에도 답한 관문까지 같은 길로 간다
+    # (★4·★5·결과 확인만: ★7·★9를 연 배포본·운영 반영 작업자는 진행 단계를 맡은 작업자가 아니다)
+    early = {st for n, st in gids if n in ("4", "5", "40")}
+    t["_anchor_by"] = {f[1] for f in fin if stamp(f[0]) in early}
     for _ in range(300):
         if gate is None:
             nxt = next((f for f in fin if since is None or to_dt(f[0]) > to_dt(since)), None)
             if not nxt:
                 break
             ts, by, body = nxt
-            if not finish_counts(by, stage, live, t, known, ts):
+            if stamp(ts) not in anchored and not finish_counts(by, stage, live, t, known, ts):
                 fin = [f for f in fin if f is not nxt]  # 그 단계 담당이 아닌 작업자의 끝냄: 단계를 넘기지 않는다
                 continue
             since = ts
@@ -774,10 +844,10 @@ def run_gates(t: dict, finishes: list, answered: dict, known=None) -> dict:
 LIVE_AGENT = "dev-claude"  # 실게임(격리 서버) 시험·즉시 수정은 개발컴 Claude 대화 세션에서
 
 
-def stage_owner(stage: str, t: dict, known) -> str | None:
-    """단계별로 움직일 작업자: 격리 시험·배포본은 개발컴, 운영 반영은 서버컴(메인 Astra)."""
+def stage_owner(stage: str, t: dict, known, assignee: str | None = None) -> str | None:
+    """단계별로 움직일 작업자: 격리 시험·배포본은 개발컴, 운영 반영은 서버컴(메인 Astra). assignee를 주면 그 담당 기준(끝냄 시점 판정)."""
     peers = sorted(known or [])
-    a = t.get("assignee") or LEAD
+    a = assignee or t.get("assignee") or LEAD
     if stage in ("test", "pack"):
         return a if a.startswith("dev-") else LEAD
     if stage == "deploy":
@@ -881,8 +951,11 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
         if finishes:  # 단계·관문: AI 끝냄은 다음 단계·관문으로, 완료는 아키텍트 ★9(조사·분석은 결과 확인)에서만
             t["_owners"] = ({a for a, _ in claims} | ({handoff["from"], handoff["to"]} if handoff else set())
                             | set((recs.get(LEAD) or {}).get("prev_assignees") or []))  # 이 주제를 맡았던 작업자(착수·인계·자동 이관 전 담당)
+            # 끝냄 시점 담당 판정용: 허브가 남긴 담당 변경 이력 + 지금 담당이 정해진 시각
+            t["_owner_log"], t["_assigned_at"], t["_base_assignee"] = lead.get("owner_log"), assigned_at, t.get("assignee")
             g = run_gates(t, finishes, gate_answers, known or peers)
-            t.pop("_owners", None)
+            for k in ("_owners", "_owner_log", "_assigned_at", "_base_assignee", "_anchor_by"):
+                t.pop(k, None)
             t["gate_history"] = g["history"]
             if g["live"] and not g["final"]:  # 실게임 시험 단계: 담당을 개발컴 Claude로 옮기고 대화 세션에서 진행
                 live_to = LIVE_AGENT if (known is None or LIVE_AGENT in known) else t.get("assignee")
@@ -937,6 +1010,7 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
         # 관문 대기·완료·보류에서는 아무도 작업하지 않으므로 경보하지 않는다. 실게임 시험 이관 전 원래 담당의 착수도 충돌이 아니다
         t["conflict"] = [] if t["status"] not in ("new", "triage", "ready", "active") else \
             sorted({a for a, ts in claims if t.get("assignee") and a not in (t["assignee"], t.get("live_from")) and to_dt(ts) > since})
+        t["assigned_at"] = assigned_at if t.get("assignee") else None  # 지금 담당(실게임 이관 전)이 정해진 시각 — 허브가 담당 변경 이력에 남긴다
         t["updated_at"] = max([base.get("received_at", "")] + [e[0] or "" for e in events])
         t["authors"] = sorted(set(list(recs) + [r.get("agent") for r in by_topic.get(t["id"], [])]))
         t["turn"] = whose_turn(t)
@@ -1116,6 +1190,8 @@ def rebalance(cfg, topics: list[dict], agents: list[dict], loads: dict, routing:
         reason = (f"부하 재분배: {labels.get(cur, cur)}(맡은 주제 {loads.get(cur, 0)}건) → {labels.get(best[1], best[1])}"
                   f"(맡은 주제 {loads.get(best[1], 0)}건) · 점수 {best[0]:g} vs " + (f"{cur_score:g}" if cur_score is not None else "담당 불가(잠금·대상 아님)")
                   + f" ({', '.join(best[2])})")
+        owner_log_add(rec, cur, t.get("assigned_at"))  # 담당 이력(끝냄 시점 판정): 옮기기 전 담당 → 새 담당
+        owner_log_add(rec, best[1], ts)
         rec.update({"assignee": best[1], "dispatch_reason": reason, "dispatch_scores": {r[1]: r[0] for r in rows},
                     "assigned_at": ts, "status_at": ts, "updated_at": ts})
         add_note(rec, "triage", reason)
@@ -1178,6 +1254,8 @@ def rescue(cfg, topics: list[dict], all_list: list[dict], agents_ok: list[dict],
         ts = now_iso()
         reason = f"자동 이관({why}): {labels.get(cur, cur)} → {labels.get(best, best)}"
         rec["prev_assignees"] = sorted({*rec.get("prev_assignees", []), cur})  # 옛 담당이 남긴 끝냄·관문은 그대로 인정(엔진 _owners)
+        owner_log_add(rec, cur, t.get("assigned_at"))  # 담당 이력(끝냄 시점 판정): 이관 전 담당 → 새 담당
+        owner_log_add(rec, best, ts)
         rec.update({"assignee": best, "dispatch_reason": reason, "assigned_at": ts, "updated_at": ts})
         add_note(rec, "triage", reason)
         write_json(path, rec)
@@ -1186,6 +1264,33 @@ def rescue(cfg, topics: list[dict], all_list: list[dict], agents_ok: list[dict],
         moved += 1
         print(f"{t['id']} {reason}")
     return moved
+
+
+def log_owners(cfg, topics: list[dict]) -> int:
+    """담당 변경 이력(사령탑 기록 owner_log)을 남긴다: 끝냄을 '그 시점 담당'으로 판정하기 위해(엔진 assignee_at).
+    담당은 사령탑 기록·아키텍트 지정·인계로 바뀌고 바뀐 시각이 남으므로, 허브가 동기화 때마다 지금 담당과 그 시각을 이어 적는다."""
+    n = 0
+    for t in topics:
+        a = t.get("live_from") or t.get("assignee")  # 실게임 시험 이관 전 담당
+        since = t.get("assigned_at")
+        if not a or not since or t["status"] in ("done", "dropped"):
+            continue
+        path, rec = author_file(cfg, t["id"], "claude")
+        if owner_log_add(rec, a, since):
+            write_json(path, rec)
+            n += 1
+    return n
+
+
+def owner_log_add(rec: dict, agent: str | None, since) -> bool:
+    """사령탑 기록에 담당 이력 한 줄(그 담당이 정해진 시각). 마지막 줄과 담당·시각이 같으면 적지 않는다."""
+    if not agent or not since or not parse_dt(since):
+        return False
+    log = rec.get("owner_log") or []
+    if log and log[-1].get("agent") == agent and parse_dt(log[-1].get("from")) == parse_dt(since):
+        return False
+    rec["owner_log"] = (log + [{"agent": agent, "from": since, "seen": now_iso()}])[-50:]
+    return True
 
 
 def agent_locks(cfg) -> dict:
@@ -1199,9 +1304,6 @@ def cmd_dispatch(args, cfg):
     if (cfg.get("pc") or {}).get("role") != "hub":
         sys.exit("자동 배분은 허브 PC(role=hub)에서만 실행합니다. 중복 배분을 막기 위한 규칙입니다.")
     routing = load_routing(cfg)
-    if routing.get("auto") is False:
-        print("자동 배분 꺼짐(routing.json auto=false)")
-        return
     pw = os.environ.get("REAL_OPS_PASSWORD") or (Path(args.password_file).read_text(encoding="utf-8").strip() if args.password_file else None)
     nodes = collect_nodes(cfg, pw)
     all_list = all_agents(nodes)
@@ -1216,6 +1318,12 @@ def cmd_dispatch(args, cfg):
         if t.get("assignee") and t["status"] not in ("done", "parked", "dropped", "review_user"):
             loads[t["assignee"]] = loads.get(t["assignee"], 0) + 1
     labels = {a["id"]: f"{a['pc_label']} {a.get('label', a['id'])}" for a in all_list}
+    logged = log_owners(cfg, topics)  # 자동 배분을 꺼도 담당 이력은 남긴다(끝냄 시점 판정)
+    if logged:
+        print(f"담당 변경 이력 기록 {logged}건")
+    if routing.get("auto") is False:
+        print("자동 배분 꺼짐(routing.json auto=false)")
+        return
     if not agents:
         print("모든 작업자가 배정 잠금 상태 — 자동 배분 0건")
         return
@@ -1233,6 +1341,7 @@ def cmd_dispatch(args, cfg):
             reason += f" · 차점 {labels[runner[1]]} {runner[0]:g}"
         path, rec = author_file(cfg, t["id"], "claude")
         ts = now_iso()
+        owner_log_add(rec, best[1], ts)
         rec.update({"assignee": best[1], "status": rec.get("status") if rec.get("status") not in (None, "new") else "triage",
                     "dispatch_reason": reason, "dispatch_scores": {r[1]: r[0] for r in rows}, "assigned_at": ts, "status_at": ts, "updated_at": ts})
         add_note(rec, "triage", f"자동 배분: {reason}")
