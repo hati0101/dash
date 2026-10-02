@@ -22,7 +22,28 @@ function h(tag, attrs, ...kids) {
     }
   }
   append(el, kids);
+  if (attrs && attrs['data-draft']) attachDraft(el, attrs['data-draft']);
   return el;
+}
+// ------------------------------------------------------------ 쓰던 글 보존(자동 갱신·다시 그리기·앱 재시작에도 남게)
+function saveDraft(key, v) { if (v && v.trim()) store.set('draft:' + key, v); else store.del('draft:' + key); }
+function clearDraft(...keys) { for (const k of keys) store.del('draft:' + k); }
+function attachDraft(el, key) {
+  const v = store.get('draft:' + key);
+  if (typeof v === 'string' && v) el.value = v;
+  el.addEventListener('input', () => { clearTimeout(el._draftT); el._draftT = setTimeout(() => saveDraft(key, el.value), 300); });
+}
+function snapshotDrafts(root) {
+  root.querySelectorAll('[data-draft]').forEach(el => saveDraft(el.dataset.draft, el.value));
+  const a = document.activeElement;
+  return a && root.contains(a) && a.dataset && a.dataset.draft ? { key: a.dataset.draft, s: a.selectionStart, e: a.selectionEnd } : null;
+}
+function restoreFocus(root, f) {
+  if (!f) return;
+  const el = [...root.querySelectorAll('[data-draft]')].find(x => x.dataset.draft === f.key);
+  if (!el) return;
+  el.focus({ preventScroll: true });
+  try { el.setSelectionRange(f.s, f.e); } catch { /* 선택 범위를 못 쓰는 칸 */ }
 }
 function append(el, kids) {
   for (const k of kids.flat(Infinity)) {
@@ -447,10 +468,11 @@ function enterApp() {
 async function refresh(manual) {
   try {
     const env = await fetchEnvelope();
-    if (env.published_at === S.env?.published_at) { if (manual) toast('이미 최신입니다 · 게시 ' + fmtRel(env.published_at)); render(); return; }
+    // 바뀐 게 없으면 다시 그리지 않는다(쓰던 글·스크롤이 흔들리지 않게)
+    if (env.published_at === S.env?.published_at) { if (manual) toast('이미 최신입니다 · 게시 ' + fmtRel(env.published_at)); return; }
     if (env.salt !== S.env.salt) { S.env = env; toast('비밀번호가 바뀌었습니다. 다시 열어주세요.'); return lockNow(); }
     S.env = env; S.data = await openEnvelope(env, S.key); S.d = derive(S.data);
-    render(); toast('새 데이터를 반영했습니다');
+    S._keepScroll = true; render(); toast('새 데이터를 반영했습니다');
   } catch (e) { if (manual) toast('갱신 실패: ' + e.message); }
 }
 function readHash() {
@@ -473,8 +495,14 @@ function render() {
   if (!S.data) return;
   const app = $('#app');
   const keepScroll = window.scrollY;
+  const focus = snapshotDrafts(app);
+  const inner = [...app.querySelectorAll('.mine-list, .mine-detail .ms-main, .mine-detail .ms-side, .msg-list, .reader')].map(e => e.scrollTop);
   app.replaceChildren(sidebar(), h('div', { class: 'main' }, topbar(), page()));
-  if (S._keepScroll) window.scrollTo({ top: keepScroll });
+  if (S._keepScroll) {
+    window.scrollTo({ top: keepScroll });
+    [...app.querySelectorAll('.mine-list, .mine-detail .ms-main, .mine-detail .ms-side, .msg-list, .reader')].forEach((e, i) => { if (inner[i] != null) e.scrollTop = inner[i]; });
+  }
+  restoreFocus(app, focus);
   S._keepScroll = false;
 }
 
@@ -859,8 +887,8 @@ async function dropTopics(ids, restore) {
   } catch (e) { toast(e.message); }
 }
 function topicEditForm(t, done) {
-  const title = h('input', { value: t.title || '', maxlength: '200', 'aria-label': '제목' });
-  const body = h('textarea', { rows: '10', 'aria-label': '내용' }, t.body || '');
+  const title = h('input', { value: t.title || '', maxlength: '200', 'aria-label': '제목', 'data-draft': `edit:${t.id}:title` });
+  const body = h('textarea', { rows: '10', 'aria-label': '내용', 'data-draft': `edit:${t.id}:body` }, t.body || '');
   const kind = h('select', { 'aria-label': '유형' }, ['기능·개선', '버그', '조사·분석', '디자인', '운영·도구', '기타'].map(k => h('option', { selected: k === t.kind ? true : null }, k)));
   const pri = h('select', { 'aria-label': '우선순위' }, [['P0', 'P0 긴급'], ['P1', 'P1 높음'], ['P2', 'P2 보통'], ['P3', 'P3 낮음']].map(([v, l]) => h('option', { value: v, selected: v === (t.priority || 'P2') ? true : null }, l)));
   const save = h('button', { class: 'btn primary', onclick: async () => {
@@ -868,14 +896,14 @@ function topicEditForm(t, done) {
     save.disabled = true;
     try {
       await sendOps('topic-edit', { topic: t.id, title: title.value.trim(), body: body.value.trim(), kind: kind.value, priority: pri.value }, `주제 수정: ${title.value.trim()}`);
-      toast('수정했습니다'); done(true);
+      clearDraft(`edit:${t.id}:title`, `edit:${t.id}:body`); toast('수정했습니다'); done(true);
     } catch (e) { toast(e.message); } finally { save.disabled = false; }
   } }, icon('check'), '저장');
   return h('div', { class: 'edit-form' },
     h('label', null, h('span', null, '제목'), title),
     h('div', { class: 'row' }, h('label', null, h('span', null, '유형'), kind), h('label', null, h('span', null, '우선순위'), pri)),
     h('label', null, h('span', null, '내용'), body),
-    h('div', { class: 'choice-row' }, save, h('button', { class: 'btn', onclick: () => done(false) }, '취소')),
+    h('div', { class: 'choice-row' }, save, h('button', { class: 'btn', onclick: () => { clearDraft(`edit:${t.id}:title`, `edit:${t.id}:body`); done(false); } }, '취소')),
     h('div', { class: 'hint' }, '원래 메모는 PC에 그대로 남고, 수정본이 화면과 AI 작업 지시에 쓰입니다.'));
 }
 // 주제 머리 줄의 수정·삭제 버튼. 수정 중에는 그 자리에 입력칸이 열린다
@@ -1145,8 +1173,8 @@ function vTopics() {
   ];
 }
 function composerCard(repo) {
-  const title = h('input', { id: 'tp-title', placeholder: '주제 (예: 거래소 검색 속도 개선)', maxlength: '120', required: true });
-  const body = h('textarea', { id: 'tp-body', placeholder: '대략적인 내용·배경·원하는 결과. 정리 안 된 메모여도 됩니다.' });
+  const title = h('input', { id: 'tp-title', placeholder: '주제 (예: 거래소 검색 속도 개선)', maxlength: '120', required: true, 'data-draft': 'new-topic:title' });
+  const body = h('textarea', { id: 'tp-body', placeholder: '대략적인 내용·배경·원하는 결과. 정리 안 된 메모여도 됩니다.', 'data-draft': 'new-topic:body' });
   const kind = h('select', { id: 'tp-kind', 'aria-label': '유형' }, ['기능·개선', '버그', '조사·분석', '디자인', '운영·도구', '기타'].map(k => h('option', null, k)));
   const pri = h('select', { id: 'tp-pri', 'aria-label': '우선순위' }, ['P2 보통', 'P1 높음', 'P0 긴급', 'P3 낮음'].map(k => h('option', { value: k.slice(0, 2) }, k)));
   const prefer = h('select', { id: 'tp-prefer', 'aria-label': '담당 선호' }, (S.data.agents || []).length
@@ -1162,7 +1190,7 @@ function composerCard(repo) {
     const list = store.get('pendingTopics', []) || [];
     list.push({ id: topic.id, title: topic.title, created_at: topic.created_at });
     store.set('pendingTopics', list);
-    title.value = ''; body.value = '';
+    title.value = ''; body.value = ''; clearDraft('new-topic:title', 'new-topic:body');
   }
   const send = h('button', { class: 'btn primary', disabled: !repo, onclick: async () => {
     const r = make(); if (!r) return;
@@ -1461,7 +1489,7 @@ function sendHint() {
 }
 function thread(target, redraw, opts = {}) {
   const items = commentsFor(target);
-  const ta = h('textarea', { placeholder: opts.placeholder || '여기에 답을 적으면 Claude에게 전달됩니다', rows: '3', 'aria-label': '답 입력' });
+  const ta = h('textarea', { placeholder: opts.placeholder || '여기에 답을 적으면 Claude에게 전달됩니다', rows: '3', 'aria-label': '답 입력', 'data-draft': `reply:${target.kind}:${target.id}` });
   const to = h('select', { 'aria-label': '받는 사람' }, (S.data.agents || []).length
     ? agentOptions(LEGACY[opts.to] || opts.to || 'dev-claude').map(o => { o.textContent += '에게'; return o; })
     : [h('option', { value: 'dev-claude' }, 'Claude에게'), h('option', { value: 'dev-astra' }, 'Astra에게')]);
@@ -1472,7 +1500,7 @@ function thread(target, redraw, opts = {}) {
     send.disabled = true;
     try {
       await sendOps('reply', { target: { kind: target.kind, id: target.id, title: (target.title || '').slice(0, 200) }, to: to.value, body }, `답 → ${person(to.value).name}`);
-      ta.value = '';
+      ta.value = ''; clearDraft(`reply:${target.kind}:${target.id}`);
       render(); if (redraw) redraw();
     } catch (e) { toast(e.message); } finally { send.disabled = false; }
   } }, icon('send'), '보내기');
@@ -1490,6 +1518,7 @@ function thread(target, redraw, opts = {}) {
 async function decide(q, choice, note, redraw) {
   try {
     await sendOps('decide', { decision_id: q.id, choice, note: note || '' }, `결정: ${choice || '메모'}`);
+    clearDraft(`decide:${q.id}`);
     render(); if (redraw) redraw();
   } catch (e) { toast(e.message); }
 }
@@ -1527,7 +1556,7 @@ function openDecisionNeeded(q) {
 // 결정 화면 내용: 오른쪽 칸(내 차례)과 가운데 모달이 같이 쓴다
 function decisionParts(q, redraw) {
   const ans = S.d.answers[q.id];
-  const note = h('textarea', { placeholder: '선택지 말고 직접 적거나, 고른 선택지에 덧붙일 말 (선택)', rows: '3', 'aria-label': '결정 메모' });
+  const note = h('textarea', { placeholder: '선택지 말고 직접 적거나, 고른 선택지에 덧붙일 말 (선택)', rows: '3', 'aria-label': '결정 메모', 'data-draft': `decide:${q.id}` });
   const topic = topicById(q.task_id);
   const task = !topic && q.task_id ? S.d.tasks.find(t => t.id === q.task_id) : null;
   return {
