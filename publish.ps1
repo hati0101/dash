@@ -35,9 +35,13 @@ try {
   $staged = git diff --cached --name-only
   $bad = $staged | Where-Object { $_ -match '^(data/(?!example\.json)|topics/|out/|config\.local\.json)' }
   if ($bad) { throw "평문 파일이 스테이징됨: $($bad -join ', ')" }
-  if (-not $staged) { Write-Host '바뀐 내용 없음'; return }
-  git commit -m ("dashboard " + (Get-Date -Format 'yyyy-MM-dd HH:mm')) | Out-Null
-  git push
+  if ($staged) {
+    git commit -m ("dashboard " + (Get-Date -Format 'yyyy-MM-dd HH:mm')) | Out-Null
+    if ($LASTEXITCODE) { throw '커밋 실패' }
+  } else { Write-Host '바뀐 내용 없음 — 올라가지 않은 커밋만 확인합니다' }
+  # 처음이거나 이전 push가 실패했어도 원격 연결과 업로드를 함께 처리한다
+  git push -u origin HEAD
+  if ($LASTEXITCODE) { throw 'push 실패 — 게시되지 않았습니다. 위 git 메시지를 확인하세요.' }
   Write-Host '게시 완료 — 1~2분 뒤 GitHub Pages에 반영됩니다.'
 } finally {
   if (-not $hadEnv) { Remove-Item Env:REAL_OPS_PASSWORD -ErrorAction SilentlyContinue }
