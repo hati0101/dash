@@ -13,8 +13,12 @@
   python node.py plan <주제ID> --agent server-claude --goal ".." --scope ".." --first-step ".." --done-when ".."
   python node.py note <주제ID> --agent server-claude --kind memo|review|question|answer --body ".."
   python node.py state <주제ID> --agent server-claude --status active|done|parked [--task 작업ID]
+  python node.py handoff <주제ID> --agent server-claude --to dev-claude --note "격리 검증 요청" [--work FT-…]   다른 작업자(다른 PC)에게 차례 넘기기
+  python node.py hold <주제ID> --agent server-claude [--minutes 120] --note "대화 세션에서 직접 처리"     자동 실행기가 이 주제를 건드리지 않게
+  python node.py release <주제ID> --agent server-claude
   python node.py inbox      배정·답을 각 작업자 수신 폴더에 메시지로 넣기(한 번씩만)
   python node.py pack       기록을 암호화해 docs/nodes/<pc>.enc.json으로 쓰기
+  긴 글은 --body-file <파일>로 넘긴다(PowerShell이 따옴표 든 인자를 자르는 문제 방지).
 """
 from __future__ import annotations
 
@@ -34,7 +38,8 @@ AGENT_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,30}$")
 TOPIC_RE = re.compile(r"^T-\d{8}-[a-z0-9]{3,8}$")
 REF_RE = re.compile(r"^[A-Za-z0-9_.:\-]{1,200}$")
 STATUSES = ("triage", "ready", "active", "done", "parked")
-KINDS = ("claim", "plan", "memo", "review", "question", "answer", "status")
+KINDS = ("claim", "plan", "memo", "review", "question", "answer", "status", "work", "handoff")
+WORK_ID_RE = re.compile(r"^[A-Z]{2,6}-\d{8}-[A-Za-z0-9]{1,12}$")
 
 
 def now_iso() -> str:
@@ -51,16 +56,28 @@ def load_cfg() -> dict:
 
 
 def read_json(path: Path, default):
-    try:
-        return json.loads(path.read_text(encoding="utf-8-sig"))
-    except FileNotFoundError:
-        return default
+    import time
+    for i in range(20):
+        try:
+            return json.loads(path.read_text(encoding="utf-8-sig"))
+        except FileNotFoundError:
+            return default
+        except PermissionError:  # 교체 중인 순간
+            time.sleep(0.1)
+    return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
 def write_json(path: Path, data) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    import time
+    for i in range(40):  # Windows: 다른 프로세스가 읽는 순간에는 교체가 거부된다(WinError 5/32) → 최대 약 8초 재시도
+        try:
+            tmp.replace(path)
+            return
+        except PermissionError:
+            time.sleep(0.2)
     tmp.replace(path)
 
 
@@ -70,6 +87,56 @@ def node_dir(cfg) -> Path:
 
 def records_path(cfg) -> Path:
     return node_dir(cfg) / "records.json"
+
+
+class records_lock:
+    """기록 파일을 고치는 동안 다른 프로세스(작업자별 실행기·대화 세션)가 동시에 고치지 못하게 잠근다.
+    읽고-고치고-쓰는 사이에 다른 쪽 기록이 사라지는 것을 막는다. 2분 넘은 잠금은 죽은 것으로 보고 치운다."""
+    def __init__(self, cfg):
+        self.path = node_dir(cfg) / "records.lock"
+
+    def __enter__(self):
+        import time
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        deadline = time.time() + 60
+        while True:
+            try:
+                fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(fd, str(os.getpid()).encode())
+                os.close(fd)
+                return self
+            except FileExistsError:
+                try:
+                    if time.time() - self.path.stat().st_mtime > 120:
+                        self.path.unlink(missing_ok=True)
+                        continue
+                except FileNotFoundError:
+                    continue
+                if time.time() > deadline:
+                    sys.exit("기록 파일 잠금을 1분 동안 얻지 못했습니다(다른 실행이 붙잡고 있음).")
+                time.sleep(0.2)
+
+    def __exit__(self, *exc):
+        self.path.unlink(missing_ok=True)
+        return False
+
+
+def update_records(cfg, fn):
+    """잠근 채로 기록을 읽어 fn(rec)으로 고치고 저장한다. fn의 반환값을 돌려준다."""
+    with records_lock(cfg):
+        rec = load_records(cfg)
+        out = fn(rec)
+        rec["updated_at"] = now_iso()
+        write_json(records_path(cfg), rec)
+        return out
+
+
+def body_arg(args) -> str:
+    """--body 또는 --body-file(UTF-8)에서 본문을 읽는다."""
+    f = getattr(args, "body_file", None)
+    if f:
+        return Path(f).read_text(encoding="utf-8-sig").strip()
+    return (getattr(args, "body", None) or "").strip()
 
 
 def pc_info(cfg) -> dict:
@@ -89,6 +156,9 @@ def load_records(cfg) -> dict:
     rec.update({"pc": pc["id"], "label": pc.get("label", pc["id"]), "role": pc.get("role", "node")})
     rec.setdefault("topic_records", [])
     rec.setdefault("proposals", [])
+    rec.setdefault("runs", [])     # 자동 실행기 실행 이력(시각·결과·실패 사유)
+    rec.setdefault("holds", {})    # 대화 세션이 잡은 주제(실행기가 건드리지 않음)
+    rec.setdefault("notice_acks", {})  # 허브 공지 확인: {공지ID: {작업자: {ts, via}}}
     # 설정에서 빠진 작업자는 현황에서도 뺀다(이름을 바꾸거나 정리한 경우)
     rec["agents"] = {k: v for k, v in (rec.get("agents") or {}).items() if k in my_agents(cfg)}
     for aid, a in my_agents(cfg).items():
@@ -153,21 +223,21 @@ def cmd_init(args, cfg):
 
 def cmd_status(args, cfg):
     check_agent(cfg, args.agent)
-    rec = load_records(cfg)
-    slot = rec["agents"][args.agent]
-    ts = now_iso()
-    if args.idle:
-        slot["current"] = None
-    else:
-        if not args.project:
-            sys.exit("--project(지금 하는 일) 또는 --idle 중 하나는 필요합니다.")
-        prev = slot.get("current") or {}
-        same = prev.get("project") == args.project
-        slot["current"] = {"project": args.project[:200], "task": args.task, "topic": args.topic,
-                           "note": (args.note or "")[:500], "since": prev.get("since") if same else ts}
-    slot["last_seen"] = ts
-    rec["updated_at"] = ts
-    write_json(records_path(cfg), rec)
+    if not args.idle and not args.project:
+        sys.exit("--project(지금 하는 일) 또는 --idle 중 하나는 필요합니다.")
+
+    def fn(rec):
+        slot = rec["agents"][args.agent]
+        ts = now_iso()
+        if args.idle:
+            slot["current"] = None
+        else:
+            prev = slot.get("current") or {}
+            same = prev.get("project") == args.project
+            slot["current"] = {"project": args.project[:200], "task": args.task, "topic": args.topic,
+                               "note": (args.note or "")[:500], "since": prev.get("since") if same else ts}
+        slot["last_seen"] = ts
+    update_records(cfg, fn)
     print(f"{args.agent}: " + ("쉬는 중" if args.idle else f"{args.project}"))
 
 
@@ -175,14 +245,116 @@ def add_topic_record(cfg, topic: str, agent: str, kind: str, **fields):
     if not TOPIC_RE.match(topic):
         sys.exit(f"주제 ID 형식이 아닙니다: {topic}")
     check_agent(cfg, agent)
-    rec = load_records(cfg)
-    ts = now_iso()
-    rec["topic_records"].append({"topic": topic, "agent": agent, "kind": kind, "ts": ts,
-                                 **{k: v for k, v in fields.items() if v not in (None, "", [])}})
-    rec["topic_records"] = rec["topic_records"][-3000:]
-    rec["agents"][agent]["last_seen"] = ts
-    rec["updated_at"] = ts
-    write_json(records_path(cfg), rec)
+
+    def fn(rec):
+        ts = now_iso()
+        rec["topic_records"].append({"topic": topic, "agent": agent, "kind": kind, "ts": ts,
+                                     **{k: v for k, v in fields.items() if v not in (None, "", [])}})
+        rec["topic_records"] = rec["topic_records"][-3000:]
+        rec["agents"][agent]["last_seen"] = ts
+    update_records(cfg, fn)
+
+
+# ---------------------------------------------------------------- 실행 이력·상태(자동 실행기가 쓴다)
+
+def start_run(cfg, agent: str, topic: str | None, kind: str, mode: str, reason: str) -> str:
+    """실행 시작을 남긴다(대시보드에 '실행 중'으로 보인다). 실행 ID를 돌려준다."""
+    import secrets
+    rid = f"R-{datetime.now(KST):%Y%m%d%H%M%S}-{secrets.token_hex(2)}"
+
+    def fn(rec):
+        rec["runs"].append({"id": rid, "agent": agent, "topic": topic, "kind": kind, "mode": mode,
+                            "reason": reason[:300], "started": now_iso(), "result": "running"})
+        rec["runs"] = rec["runs"][-300:]
+        rec["agents"][agent]["last_seen"] = now_iso()
+    update_records(cfg, fn)
+    return rid
+
+
+def end_run(cfg, rid: str, **fields):
+    """실행 결과: result=ok|partial|fail|skipped, error, error_class, needs_user, summary, actions, work_id, failed."""
+    def fn(rec):
+        for r in reversed(rec["runs"]):
+            if r.get("id") == rid:
+                r.update({k: v for k, v in fields.items() if v is not None})
+                r["ended"] = now_iso()
+                break
+    update_records(cfg, fn)
+
+
+def set_health(cfg, agent: str, state: str, message: str = "", needs_user: bool = False, fix: str = ""):
+    """작업자 실행 상태: ok | auth | tool | timeout | error. needs_user면 대시보드 '할 일'에 올라간다."""
+    def fn(rec):
+        prev = rec["agents"][agent].get("health") or {}
+        same = prev.get("state") == state
+        rec["agents"][agent]["health"] = {"state": state, "message": message[:400], "needs_user": needs_user, "fix": fix[:400],
+                                          "at": now_iso(), "since": prev.get("since") if same and prev.get("since") else now_iso()}
+    update_records(cfg, fn)
+
+
+def active_holds(cfg) -> dict:
+    """지금 유효한 잡기(대화 세션이 처리 중인 주제)."""
+    holds = load_records(cfg).get("holds") or {}
+    now = datetime.now(KST)
+    return {k: v for k, v in holds.items() if v.get("until") and datetime.fromisoformat(v["until"]) > now}
+
+
+def cmd_hold(args, cfg):
+    check_agent(cfg, args.agent)
+    if not TOPIC_RE.match(args.id):
+        sys.exit(f"주제 ID 형식이 아닙니다: {args.id}")
+    minutes = max(5, min(int(args.minutes or 120), 24 * 60))
+    until = (datetime.now(KST) + timedelta(minutes=minutes)).isoformat(timespec="seconds")
+
+    def fn(rec):
+        rec["holds"][args.id] = {"agent": args.agent, "ts": now_iso(), "until": until, "note": (args.note or "대화 세션에서 직접 처리")[:300]}
+    update_records(cfg, fn)
+    print(f"{args.id}: {args.agent} 대화 세션이 잡음 — {until}까지 자동 실행기가 건드리지 않습니다(끝나면 release)")
+
+
+def cmd_release(args, cfg):
+    def fn(rec):
+        return rec["holds"].pop(args.id, None)
+    print(f"{args.id}: 잡기 풀림" if update_records(cfg, fn) else f"{args.id}: 잡은 기록 없음")
+
+
+def cmd_handoff(args, cfg):
+    if not re.match(r"^[a-z0-9]+-[a-z0-9-]+$", args.to or "") or args.to == args.agent:
+        sys.exit("--to는 작업자 ID (예: dev-claude)")
+    if args.work and not WORK_ID_RE.match(args.work):
+        sys.exit("--work 형식 오류 (예: FT-20261002-abc123)")
+    add_topic_record(cfg, args.id, args.agent, "handoff", to=args.to, work_id=args.work, body=body_arg(args) or f"{args.to}에게 넘김")
+    print(f"{args.id}: {args.agent} → {args.to} 차례 넘김")
+
+
+def notice_for(n: dict, agent: str) -> bool:
+    to = n.get("to") or ["all"]
+    return "all" in to or agent in to
+
+
+def ack_notice(cfg, nid: str, agent: str, via: str):
+    """허브 공지를 확인했다고 남긴다. via=session(대화 세션이 읽음) | runner(실행기가 지시문에 넣어 반영). 세션 확인이 더 강하다."""
+    def fn(rec):
+        slot = rec["notice_acks"].setdefault(nid, {})
+        if slot.get(agent, {}).get("via") == "session" and via != "session":
+            return
+        slot[agent] = {"ts": now_iso(), "via": via}
+    update_records(cfg, fn)
+
+
+def cmd_notice_ack(args, cfg):
+    check_agent(cfg, args.agent)
+    if not re.match(r"^N-[A-Za-z0-9-]{3,40}$", args.id):
+        sys.exit("공지 ID 형식 오류 (예: N-20261002-automation)")
+    ack_notice(cfg, args.id, args.agent, "session")
+    print(f"{args.id}: {args.agent} 확인 — 다음 동기화 때 대시보드에 표시됩니다")
+
+
+def cmd_link_work(args, cfg):
+    if not WORK_ID_RE.match(args.work):
+        sys.exit("--work 형식 오류 (예: FT-20261002-abc123)")
+    add_topic_record(cfg, args.id, args.agent, "work", work_id=args.work, body=f"작업물 연결: {args.work}")
+    print(f"{args.id}: 작업물 {args.work} 연결")
 
 
 def cmd_propose(args, cfg):
@@ -192,35 +364,26 @@ def cmd_propose(args, cfg):
     title = args.title.strip()[:200]
     if not title:
         sys.exit("--title이 비어 있습니다.")
-    rec = load_records(cfg)
-    if any(p.get("title") == title and p.get("agent") == args.agent for p in rec["proposals"]):
-        print(f"이미 올린 메모입니다: {title}")
-        return
-    pid = f"P-{pc_info(cfg)['id']}-{datetime.now(KST):%Y%m%d}-{secrets.token_hex(3)}"
-    rec["proposals"].append({"id": pid, "agent": args.agent, "title": title, "body": (args.body or "").strip()[:8000],
-                             "kind": args.kind, "priority": args.priority, "origin": (args.origin or "")[:300], "ts": now_iso()})
-    rec["proposals"] = rec["proposals"][-2000:]
-    rec["updated_at"] = now_iso()
-    write_json(records_path(cfg), rec)
-    print(f"메모 올림 {pid}: {title} — 다음 동기화 때 허브가 미처리 주제로 가져갑니다")
+    pid = add_proposal(cfg, args.agent, title, body_arg(args), args.kind, args.priority, args.origin or "")
+    print(f"메모 올림 {pid}: {title} — 다음 동기화 때 허브가 미처리 주제로 가져갑니다" if pid else f"이미 올린 메모입니다: {title}")
 
 
 def add_ask(cfg, agent: str, topic: str | None, question: str, options: list[str]) -> str:
     """아키텍트 승인·결정이 필요할 때 질문을 남긴다. 허브가 대시보드 '결정이 필요한 문제'에 올린다."""
     import secrets
     check_agent(cfg, agent)
-    q = question.strip()[:1000]
+    q = question.strip()[:1500]
     if not q:
         sys.exit("질문이 비어 있습니다.")
-    rec = load_records(cfg)
-    rec.setdefault("asks", [])
     aid = f"DN-{agent}-{datetime.now(KST):%Y%m%d}-{secrets.token_hex(3)}"
-    rec["asks"].append({"id": aid, "agent": agent, "topic": topic if topic and TOPIC_RE.match(topic) else None,
-                        "question": q, "options": [str(o)[:200] for o in (options or [])][:6], "ts": now_iso()})
-    rec["asks"] = rec["asks"][-500:]
-    rec["agents"][agent]["last_seen"] = now_iso()
-    rec["updated_at"] = now_iso()
-    write_json(records_path(cfg), rec)
+
+    def fn(rec):
+        rec.setdefault("asks", [])
+        rec["asks"].append({"id": aid, "agent": agent, "topic": topic if topic and TOPIC_RE.match(topic) else None,
+                            "question": q, "options": [str(o)[:200] for o in (options or [])][:6], "ts": now_iso()})
+        rec["asks"] = rec["asks"][-500:]
+        rec["agents"][agent]["last_seen"] = now_iso()
+    update_records(cfg, fn)
     return aid
 
 
@@ -230,22 +393,23 @@ def add_proposal(cfg, agent: str, title: str, body: str, kind: str = "기타", p
     title = (title or "").strip()[:200]
     if not title:
         return None
-    rec = load_records(cfg)
-    if any(p.get("title") == title and p.get("agent") == agent for p in rec["proposals"]):
-        return None
     pid = f"P-{pc_info(cfg)['id']}-{datetime.now(KST):%Y%m%d}-{secrets.token_hex(3)}"
-    rec["proposals"].append({"id": pid, "agent": agent, "title": title, "body": (body or "").strip()[:8000],
-                             "kind": kind if kind in ("기능·개선", "버그", "조사·분석", "디자인", "운영·도구", "기타") else "기타",
-                             "priority": priority if priority in ("P0", "P1", "P2", "P3") else "P2",
-                             "origin": (origin or "")[:300], "ts": now_iso()})
-    rec["proposals"] = rec["proposals"][-2000:]
-    rec["updated_at"] = now_iso()
-    write_json(records_path(cfg), rec)
-    return pid
+
+    def fn(rec):
+        if any(p.get("title") == title and p.get("agent") == agent for p in rec["proposals"]):
+            return None
+        rec["proposals"].append({"id": pid, "agent": agent, "title": title, "body": (body or "").strip()[:8000],
+                                 "kind": kind if kind in ("기능·개선", "버그", "조사·분석", "디자인", "운영·도구", "기타") else "기타",
+                                 "priority": priority if priority in ("P0", "P1", "P2", "P3") else "P2",
+                                 "origin": (origin or "")[:300], "ts": now_iso()})
+        rec["proposals"] = rec["proposals"][-2000:]
+        return pid
+    return update_records(cfg, fn)
 
 
 def cmd_ask(args, cfg):
-    aid = add_ask(cfg, args.agent, args.topic, args.question, [o for o in (args.option or []) if o])
+    q = Path(args.question_file).read_text(encoding="utf-8-sig") if args.question_file else (args.question or "")
+    aid = add_ask(cfg, args.agent, args.topic, q, [o for o in (args.option or []) if o])
     print(f"질문 남김 {aid} — 다음 동기화 때 대시보드 '결정이 필요한 문제'에 올라갑니다")
 
 
@@ -265,7 +429,10 @@ def cmd_plan(args, cfg):
 
 
 def cmd_note(args, cfg):
-    add_topic_record(cfg, args.id, args.agent, args.kind, body=args.body.strip()[:6000])
+    body = body_arg(args)
+    if not body:
+        sys.exit("--body 또는 --body-file이 필요합니다.")
+    add_topic_record(cfg, args.id, args.agent, args.kind, body=body[:6000])
     print(f"{args.id}: {args.agent} {args.kind} 기록")
 
 
@@ -345,6 +512,19 @@ def cmd_inbox(args, cfg):
             done.add(key)
             sent += 1
             print(f"답 전달: {p}")
+    # 허브 공지: 이 PC 작업자 수신 폴더에 한 번씩 넣는다(확인 명령 포함)
+    for n in data.get("notices", []):
+        for aid, a in agents.items():
+            key = f"notice:{n.get('id')}:{aid}"
+            if key in done or not a.get("inbox") or not notice_for(n, aid):
+                continue
+            body = (n.get("body") or "") + (f"\n\n읽었으면 확인을 남긴다: python \"{me}\" notice-ack {n['id']} --agent {aid}"
+                                            "\n(대시보드 작업자 화면의 '허브 공지'에 누가 확인했는지 보인다)")
+            p = write_message(Path(a["inbox"]), f"DASH-NOTICE-{n['id']}-{aid}", f"[허브 공지 → {a['label']}] {n.get('title')}",
+                              {"sender": "dashboard (허브 공지)", "recipient": aid, "kind": "hub notice"}, body)
+            done.add(key)
+            sent += 1
+            print(f"공지 전달: {p}")
     write_json(done_path, sorted(done))
     print(f"{pc['label']}: 새 전달 {sent}건")
 
@@ -422,6 +602,10 @@ def collect_nodes(cfg: dict, pw: str | None) -> list[dict]:
         rec["topic_records"] = [r for r in rec.get("topic_records") or [] if str(r.get("agent", "")).startswith(pcid + "-")]
         rec["proposals"] = [p for p in rec.get("proposals") or [] if str(p.get("agent", "")).startswith(pcid + "-")]
         rec["asks"] = [q for q in rec.get("asks") or [] if str(q.get("agent", "")).startswith(pcid + "-")]
+        rec["runs"] = [r for r in rec.get("runs") or [] if str(r.get("agent", "")).startswith(pcid + "-")]
+        rec["holds"] = {k: v for k, v in (rec.get("holds") or {}).items() if str((v or {}).get("agent", "")).startswith(pcid + "-")}
+        rec["notice_acks"] = {nid: {a: v for a, v in (by or {}).items() if str(a).startswith(pcid + "-")}
+                              for nid, by in (rec.get("notice_acks") or {}).items() if isinstance(by, dict)}
         rec["pc"] = pcid
         rec["source"] = f.name
         out.append(rec)
@@ -457,21 +641,35 @@ def main():
     p.add_argument("--agent", required=True); p.add_argument("--title", required=True); p.add_argument("--body")
     p.add_argument("--kind", default="기타", choices=["기능·개선", "버그", "조사·분석", "디자인", "운영·도구", "기타"])
     p.add_argument("--priority", default="P2", choices=["P0", "P1", "P2", "P3"]); p.add_argument("--origin", help="원래 메모 위치(예: 스티커 메모, 파일 경로)")
+    p.add_argument("--body-file")
     p = sub.add_parser("ask", help="아키텍트 결정·승인이 필요한 질문 남기기(대시보드 '결정이 필요한 문제')")
-    p.add_argument("--agent", required=True); p.add_argument("--topic"); p.add_argument("--question", required=True); p.add_argument("--option", action="append")
+    p.add_argument("--agent", required=True); p.add_argument("--topic"); p.add_argument("--option", action="append")
+    g = p.add_mutually_exclusive_group(required=True); g.add_argument("--question"); g.add_argument("--question-file")
+    p = sub.add_parser("handoff", help="다른 작업자(다른 PC 포함)에게 이 주제의 차례를 넘긴다(예: 서버컴 조사 → 개발컴 구현·검증)")
+    p.add_argument("id"); p.add_argument("--agent", required=True); p.add_argument("--to", required=True); p.add_argument("--work")
+    p.add_argument("--body", "--note", dest="body"); p.add_argument("--body-file")
+    p = sub.add_parser("hold", help="대화 세션이 이 주제를 직접 처리하는 동안 자동 실행기가 건드리지 않게 잡는다")
+    p.add_argument("id"); p.add_argument("--agent", required=True); p.add_argument("--minutes", type=int, default=120); p.add_argument("--note")
+    p = sub.add_parser("release", help="잡기 풀기"); p.add_argument("id")
+    p = sub.add_parser("notice-ack", help="허브 공지를 읽었다고 남기기(대시보드에 확인 표시)")
+    p.add_argument("id"); p.add_argument("--agent", required=True)
+    p = sub.add_parser("link-work", help="주제에 작업물(real-work) 작업 ID를 연결한다(주제 하나에 작업 하나)")
+    p.add_argument("id"); p.add_argument("--agent", required=True); p.add_argument("--work", required=True)
     p = sub.add_parser("claim"); p.add_argument("id"); p.add_argument("--agent", required=True); p.add_argument("--note")
     p = sub.add_parser("plan"); p.add_argument("id"); p.add_argument("--agent", required=True)
     p.add_argument("--goal"); p.add_argument("--scope", action="append"); p.add_argument("--input", action="append")
     p.add_argument("--first-step", action="append"); p.add_argument("--risk", action="append"); p.add_argument("--done-when")
     p.add_argument("--status", choices=STATUSES); p.add_argument("--note")
     p = sub.add_parser("note"); p.add_argument("id"); p.add_argument("--agent", required=True)
-    p.add_argument("--kind", default="memo", choices=[k for k in KINDS if k not in ("claim", "plan", "status")]); p.add_argument("--body", required=True)
+    p.add_argument("--kind", default="memo", choices=["memo", "review", "question", "answer"])
+    g = p.add_mutually_exclusive_group(required=True); g.add_argument("--body"); g.add_argument("--body-file")
     p = sub.add_parser("state"); p.add_argument("id"); p.add_argument("--agent", required=True)
     p.add_argument("--status", required=True, choices=STATUSES); p.add_argument("--task"); p.add_argument("--note")
     args = ap.parse_args()
     cfg = load_cfg()
     {"init": cmd_init, "status": cmd_status, "mine": cmd_mine, "inbox": cmd_inbox, "pack": cmd_pack, "claim": cmd_claim, "propose": cmd_propose, "ask": cmd_ask,
-     "plan": cmd_plan, "note": cmd_note, "state": cmd_state}[args.cmd](args, cfg)
+     "plan": cmd_plan, "note": cmd_note, "state": cmd_state, "handoff": cmd_handoff, "hold": cmd_hold, "release": cmd_release,
+     "link-work": cmd_link_work, "notice-ack": cmd_notice_ack}[args.cmd](args, cfg)
 
 
 if __name__ == "__main__":

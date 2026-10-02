@@ -139,6 +139,9 @@ const agentState = a => {
   if (!seen) return { cls: 'neutral', label: '신호 없음', icon: 'clock' };
   const m = (Date.now() - toMs(seen)) / 6e4;
   if (m > stale) return { cls: 'blocked', label: '끊김', icon: 'alert' };
+  const hl = a.health;
+  if (hl && hl.state && hl.state !== 'ok' && hl.needs_user) return { cls: 'blocked', label: HEALTH[hl.state] || '실행 오류', icon: 'alert' };
+  if ((S.data?.runs || []).some(r => r.agent === a.id && isRunning(r))) return { cls: 'progress', label: '실행 중', icon: 'play' };
   if (!a.current) return { cls: 'neutral', label: '쉬는 중', icon: 'pause' };
   return { cls: 'done', label: '작업 중', icon: 'play' };
 };
@@ -171,7 +174,8 @@ function topicChip(state) {
   const s = TOPIC[state] || TOPIC.new;
   return h('span', { class: `st ${s.cls}` }, icon(s.icon), s.label);
 }
-const NOTE_KIND = { triage: '분배', memo: '메모', review: '검토', plan: '진행 베이스', question: '질문', answer: '답변', status: '상태' };
+const NOTE_KIND = { triage: '분배', memo: '메모', review: '검토', plan: '진행 베이스', question: '질문', answer: '답변', status: '상태', claim: '착수', handoff: '인계', work: '작업물' };
+const HEALTH = { auth: '로그인 만료', tool: '실행 도구 없음', timeout: '시간 초과', encoding: '인코딩 오류', parse: '답 형식 오류', error: '실행 오류' };
 const LEDGER_ST = {
   pass: { label: '통과', cls: 'done', icon: 'done' }, pending: { label: '대기', cls: 'user_test', icon: 'clock' },
   fail: { label: '실패', cls: 'blocked', icon: 'alert' }, reverted: { label: '되돌림', cls: 'blocked', icon: 'refresh' },
@@ -1059,7 +1063,31 @@ function agentCard(a) {
       h('div', null, h('b', null, s.tasks.length), h('span', null, '관련 작업'))),
     s.assigned.length ? h('div', { class: 'list' }, s.assigned.slice(0, 4).map(t => h('button', { class: 'item', onclick: () => openTopic(t) },
       h('span', { class: 'body' }, h('div', { class: 't clamp-2' }, t.title), h('div', { class: 'meta' }, topicChip(t.status), priChip(t.priority), t.turn === a.id ? h('span', { class: 'tag' }, '내 차례') : null))))) : null,
+    a.health && a.health.state && a.health.state !== 'ok' ? h('div', { class: `callout ${a.health.needs_user ? 'warn' : ''}` }, h('b', null, `${HEALTH[a.health.state] || '실행 오류'} · ${fmtRel(a.health.since || a.health.at)}부터`), h('div', null, a.health.fix || a.health.message)) : null,
+    (() => { const r = (S.data.runs || []).find(x => x.agent === a.id); return r ? h('div', { class: 'muted', style: { 'font-size': '12px' } }, `마지막 자동 실행 ${fmtRel(r.ended || r.started)} · ${RUN_RESULT[r.result] || r.result}${r.topic ? ' · ' + ((topicById(r.topic) || {}).title || r.topic) : ''}`) : null; })(),
     h('div', { class: 'muted', style: { 'font-size': '12px' } }, `마지막 신호 ${fmtRel(a.last_seen || a.pc_synced)}`));
+}
+// 허브 공지: 모든 PC 작업자에게 보낸 작업 방식 변경. 누가 확인했는지(대화 세션 확인 / 실행기 반영) 보인다
+function noticesCard(agents) {
+  const list = S.data.notices || [];
+  if (!list.length) return null;
+  const targets = n => agents.filter(a => (n.to || ['all']).includes('all') || (n.to || []).includes(a.id));
+  return h('div', { class: 'section-gap' }, card('허브 공지', { big: list.length, unit: '건' },
+    h('div', { class: 'list' }, list.slice(0, 6).map((n, i) => {
+      const tg = targets(n), acked = tg.filter(a => (n.acks || {})[a.id]);
+      return h('details', { class: 'notice', open: i === 0 ? true : null },
+        h('summary', null, h('b', null, n.title), h('span', { class: `st ${acked.length === tg.length ? 'done' : 'user_test'}` }, `확인 ${acked.length}/${tg.length}`), h('span', { class: 'when' }, fmtRel(n.ts))),
+        h('div', { class: 'notice-acks' }, tg.map(a => { const k = (n.acks || {})[a.id];
+          return h('span', { class: `tag ${k ? '' : 'muted'}` }, av(a.id, true), `${a.pc_label} ${a.label || a.id}: `, k ? `${k.via === 'session' ? '확인' : '실행기 반영'} ${fmtRel(k.ts)}` : '미확인'); })),
+        longText(n.body || ''));
+    }))));
+}
+function runRow(r) {
+  return h('div', { class: `run-row r-${r.result}` }, h('span', { class: 'st ' + ({ ok: 'done', partial: 'user_test', fail: 'blocked', running: 'progress' }[r.result] || 'neutral') }, RUN_RESULT[r.result] || r.result),
+    h('div', { class: 'run-b' }, h('div', null, h('b', null, person(r.agent).name), ` · ${fmtAbs(r.started)}${r.ended ? ' → ' + fmtAbs(r.ended).slice(-5) : ''} · 이유: ${r.reason || '-'}`),
+      r.summary ? h('div', { class: 'clamp-2' }, r.summary) : null,
+      (r.failed || []).length ? h('div', { class: 'run-fail' }, '실패: ', r.failed.join('; ')) : null,
+      r.error ? h('div', { class: 'run-fail' }, `원인: ${r.error}`, r.fix ? ` · 조치: ${r.fix}` : '') : null));
 }
 function vAgents() {
   const nodes = S.data.nodes || [], agents = S.data.agents || [];
@@ -1072,6 +1100,7 @@ function vAgents() {
       h('div', { class: 'pc-head' }, h('h3', null, g.label || g.pc), h('span', { class: 'tag' }, g.role === 'hub' ? '허브 · 배분 담당' : '작업 노드'),
         g.error ? h('span', { class: 'st blocked' }, icon('alert'), g.error) : h('span', { class: 'muted', style: { 'font-size': '12px' } }, `마지막 동기화 ${fmtRel(g.synced_at)}`)),
       g.list.length ? h('div', { class: 'agent-grid' }, g.list.map(agentCard)) : empty('이 PC의 작업자 정보가 없습니다.')))),
+    noticesCard(agents),
     h('div', { class: 'grid g-2 section-gap' },
       card('자동 배분 규칙', { right: h('span', { class: `st ${r.auto === false ? 'neutral' : 'done'}` }, icon(r.auto === false ? 'pause' : 'check'), r.auto === false ? '꺼짐' : '켜짐') },
         h('div', { class: 'hint', style: { display: 'grid', gap: '6px' } },
@@ -1162,6 +1191,7 @@ function topicCard(t) {
     h('div', { class: 'row' }, priChip(t.priority), t.kind ? h('span', { class: 'tag' }, t.kind) : null, t.linked_task_id ? h('span', { class: 'tag' }, '작업 연결') : null,
       (t.conflict || []).length ? h('span', { class: 'st blocked' }, icon('alert'), '중복 착수') : null),
     h('div', { class: 'ttl' }, t.title),
+    phaseLine(t, true),
     t.body ? h('div', { class: 'next clamp-2' }, t.body) : null,
     last ? h('div', { class: 's clamp-2', style: { 'font-size': '12px', color: 'var(--ink-3)' } }, `${person(last.by).name} · ${NOTE_KIND[last.kind] || last.kind}: ${last.body}`) : null,
     h('div', { class: 'foot' }, t.assignee ? h('span', { class: 'wait' }, av(t.assignee, true), person(t.assignee).name) : h('span', { class: 'wait' }, '미배정'),
@@ -1545,8 +1575,67 @@ function questionParts(topic, n, redraw) {
 }
 function topicById(id) { return id ? S.d.topics.find(t => t.id === id) || null : null; }
 
+// ------------------------------------------------------------ 지금 단계 · 실행 이력 · 작업물 (주제가 어디서 멈췄는지 한눈에)
+const runsFor = id => (S.data.runs || []).filter(r => r.topic === id);           // 최신이 앞
+function isRunning(r) { return !!r && r.result === 'running' && Date.now() - toMs(r.started) < 30 * 60e3; }
+const holdOf = id => (S.data.holds || []).find(x => x.topic === id && toMs(x.until) > Date.now());
+const RUN_RESULT = { ok: '성공', partial: '일부 실패', fail: '실패', running: '실행 중', skipped: '건너뜀' };
+function topicPhase(t) {
+  const name = id => person(id).name;
+  if (t.status === 'dropped') return { cls: 'neutral', icon: 'x', label: '삭제됨' };
+  if (t.status === 'done') return { cls: 'done', icon: 'check', label: '완료' };
+  if (t.status === 'parked') return { cls: 'neutral', icon: 'pause', label: '보류' };
+  if (t.status === 'backlog') return { cls: 'neutral', icon: 'inbox', label: '미처리', next: '아키텍트 — 내 차례 → 착수 고르기에서 착수·담당 정하기' };
+  const hold = holdOf(t.id);
+  if (hold) return { cls: 'progress', icon: 'user', label: `대화 세션 작업 중 · ${name(hold.agent)}`, detail: `${hold.note || ''} (${fmtAbs(hold.until)}까지 자동 실행 멈춤)` };
+  const run = runsFor(t.id)[0];
+  if (isRunning(run)) return { cls: 'progress', icon: 'play', label: `실행 중 · ${name(run.agent)}`, detail: `${fmtRel(run.started)} 시작 · 이유: ${run.reason || '-'}` };
+  const ask = (S.data.decisions_needed || []).find(q => q.task_id === t.id && !S.d.answers[q.id]);
+  if (ask) return { cls: 'user_test', icon: 'scale', label: '아키텍트 답 대기', detail: ask.question, next: '아키텍트 — 내 차례에서 결정', ask };
+  if (run && run.result === 'fail') return { cls: 'blocked', icon: 'alert', label: `실행 실패 · ${HEALTH[run.error_class] || '오류'}`,
+    detail: `${run.fix || ''} (${fmtRel(run.ended || run.started)})`, next: run.needs_user ? `아키텍트 — ${run.fix || '확인 필요'}` : '자동으로 다시 시도' };
+  const who = t.turn;
+  const partial = run && run.result === 'partial' ? ` · 지난 실행 일부 실패: ${(run.failed || []).join('; ').slice(0, 160)}` : '';
+  if (!t.assignee) return { cls: 'request', icon: 'topics', label: '배분 대기', next: `${name(who || 'dev-claude')} — 자동 배분` };
+  if (t.handoff && t.handoff.to === t.assignee && who === t.assignee)
+    return { cls: 'progress', icon: 'arrow', label: `인계받음 · ${name(who)}`, detail: `${name(t.handoff.from)} → ${name(t.handoff.to)}: ${t.handoff.reason || '-'}${partial}`, next: `${name(who)} — 이어서 처리` };
+  if (who && who !== t.assignee) return { cls: 'validating', icon: 'eye', label: `교차 검토 대기 · ${name(who)}`, detail: partial.slice(3) || null, next: `${name(who)} — 진행 베이스 검토` };
+  if (!t.plan) return { cls: 'request', icon: 'file', label: `진행 베이스 작성 · ${name(who)}`, detail: partial.slice(3) || null, next: `${name(who)} — 목표·범위·첫 단계 작성` };
+  return { cls: 'progress', icon: 'play', label: `진행 중 · ${name(who)}`, detail: partial.slice(3) || null, next: `${name(who)} — 다음 동기화 때 이어서` };
+}
+function phaseLine(t, compact) {
+  const p = topicPhase(t);
+  return h('div', { class: `phase ${p.cls}${compact ? ' compact' : ''}` }, icon(p.icon),
+    h('div', { class: 'phase-b' }, h('b', null, p.label),
+      !compact && p.detail ? h('span', { class: 'clamp-2' }, p.detail) : null,
+      !compact && p.next ? h('span', { class: 'phase-next' }, '다음: ', p.next) : null));
+}
+function runText(r) {
+  const parts = [`${RUN_RESULT[r.result] || r.result}${r.kind === 'answer' ? ' (아키텍트 답 반영)' : ''}${r.mode === 'impl' ? ' · 작업 모드' : ''} · 이유: ${r.reason || '-'}`];
+  if (r.summary) parts.push(r.summary);
+  if ((r.actions || []).length) parts.push('적용: ' + r.actions.join(', '));
+  if ((r.failed || []).length) parts.push('실패: ' + r.failed.join('; '));
+  if (r.error) parts.push('원인: ' + r.error);
+  if (r.fix) parts.push('조치: ' + r.fix);
+  return parts.join('\n');
+}
+function workBox(t, open) {
+  const w = t && t.work_id ? (S.data.works || {})[t.work_id] : null;
+  if (!w) return null;
+  const agents = Object.entries(w.agents || {});
+  return h('details', { class: 'work-box', open: open ? true : null },
+    h('summary', null, icon('file'), h('b', null, `작업물 ${w.id}`), h('span', { class: 'tag' }, w.state || '-'), h('span', { class: 'hint' }, `파일 ${w.file_count}개 · 담당 ${person(w.owner).name}`)),
+    h('div', { class: 'work-b' },
+      h('dl', { class: 'fields' }, h('dt', null, '제목'), h('dd', null, w.title), h('dt', null, '아키텍트 승인'), h('dd', null, w.approval || '없음'),
+        h('dt', null, '참여'), h('dd', null, agents.map(([a, x]) => `${person(a).name}(파일 ${x.files} · 메모 ${x.notes_count})`).join(', ') || '-')),
+      (w.files || []).length ? h('ul', { class: 'work-files' }, w.files.slice(0, 14).map(f => h('li', { class: 'mono' }, f.path, h('span', { class: 'hint' }, ` ${Math.max(1, Math.round(f.size / 1024))}KB`))),
+        w.files.length > 14 ? h('li', { class: 'hint' }, `… 외 ${w.file_count - 14}개`) : null) : null,
+      agents.filter(([, x]) => x.notes_tail).map(([a, x]) => h('div', { class: 'work-note' }, h('b', null, `${person(a).name} 최근 메모`, x.last_note_at ? ` · ${fmtAbs(x.last_note_at)}` : ''), longText(x.notes_tail))),
+      h('a', { class: 'btn sm', href: w.url, target: '_blank', rel: 'noopener noreferrer' }, icon('link'), 'GitHub에서 열기 (real-work)')));
+}
+
 // ------------------------------------------------------------ 히스토리 (모달 오른쪽: 이 주제에서 지금까지 있었던 일)
-const HIST_KIND = { ...NOTE_KIND, created: '등록', reply: '대화', ask: '결정 요청', decide: '결정', message: '메시지' };
+const HIST_KIND = { ...NOTE_KIND, created: '등록', reply: '대화', ask: '결정 요청', decide: '결정', message: '메시지', run: '자동 실행' };
 function historyEvents(topic, task) {
   const ev = [], seen = new Set();
   const push = e => {
@@ -1565,6 +1654,10 @@ function historyEvents(topic, task) {
   if (taskId) {
     for (const c of commentsFor({ kind: 'task', id: taskId })) push({ ts: c.ts, by: c.by, to: c.to, kind: 'reply', body: c.body, pending: c.pending });
     for (const m of S.data.messages.filter(m => m.task_id === taskId).slice(0, 30)) push({ ts: m.ts, by: m.sender, to: m.recipient, kind: 'message', body: m.title, msg: m });
+  }
+  if (topic) for (const r of runsFor(topic.id)) {
+    if (r.result === 'running' && !isRunning(r)) continue;
+    push({ key: `run:${r.id}`, ts: r.ended || r.started, by: r.agent, kind: 'run', body: runText(r), cls: r.result });
   }
   const ids = new Set([topic?.id, taskId].filter(Boolean));
   for (const q of S.data.decisions_needed || []) {
@@ -1585,7 +1678,9 @@ function historyPanel(topic, task, focusKey) {
     h('div', { class: 'hist-title' }, topic.title),
     h('dl', { class: 'fields' }, h('dt', null, '담당'), h('dd', null, topic.assignee ? person(topic.assignee).full : '미배정'),
       h('dt', null, '지금 차례'), h('dd', null, topic.turn ? person(topic.turn).full : '—'),
-      topic.dispatch_reason ? [h('dt', null, topic.assign_by === 'user' ? '담당 지정' : '배분 근거'), h('dd', null, topic.dispatch_reason)] : null),
+      topic.dispatch_reason ? [h('dt', null, topic.assign_by === 'user' ? '담당 지정' : topic.assign_by === 'handoff' ? '인계' : '배분 근거'), h('dd', null, topic.dispatch_reason)] : null),
+    phaseLine(topic),
+    workBox(topic),
     planRows.length ? h('details', { class: 'hist-plan' }, h('summary', null, `진행 베이스 · ${person(topic.plan_by).name}`),
       h('div', { class: 'plan' }, planRows.map(([k, l]) => h('div', null, h('h4', null, l), Array.isArray(plan[k]) ? h('ul', null, plan[k].map(x => h('li', null, x))) : h('div', null, plan[k]))))) : null,
     h('button', { class: 'btn sm', onclick: () => openTopic(topic) }, icon('topics'), '주제 전체 보기'),
@@ -1597,7 +1692,7 @@ function historyPanel(topic, task, focusKey) {
   ] : [h('div', { class: 'hint' }, '연결된 주제·작업이 없어 히스토리가 없습니다.')];
   const LIMIT = 12;
   const list = h('ol', { class: 'hist' });
-  const row = e => h('li', { class: `hist-item k-${e.kind}${e.by === 'user' ? ' me' : ''}${e.key && e.key === focusKey ? ' focus' : ''}` },
+  const row = e => h('li', { class: `hist-item k-${e.kind}${e.cls ? ' r-' + e.cls : ''}${e.by === 'user' ? ' me' : ''}${e.key && e.key === focusKey ? ' focus' : ''}` },
     h('span', { class: 'hist-dot' }, av(e.by, true)),
     h('div', { class: 'hist-body' },
       h('div', { class: 'h' }, h('b', null, person(e.by).name), e.to ? h('span', null, '→ ' + person(e.to).name) : null,
@@ -1760,7 +1855,10 @@ function openTopic(t) {
     S.editTopic === t.id ? topicEditForm(t, () => { S.editTopic = null; openTopic(S.d.topics.find(y => y.id === t.id) || t); }) : null,
     h('h3', null, t.title),
     (t.conflict || []).length ? h('div', { class: 'callout warn' }, h('b', null, '중복 착수: '), `담당은 ${person(t.assignee).full}인데 ${t.conflict.map(c => person(c).full).join(', ')}도 착수했습니다. 한쪽을 멈추거나 담당을 바꿔주세요.`) : null,
-    t.dispatch_reason ? h('div', { class: 'reason' }, h('b', null, t.assign_by === 'user' ? '담당 지정: ' : '배분 근거: '), t.dispatch_reason) : null,
+    phaseLine(t),
+    t.dispatch_reason ? h('div', { class: 'reason' }, h('b', null, t.assign_by === 'user' ? '담당 지정: ' : t.assign_by === 'handoff' ? '인계: ' : '배분 근거: '), t.dispatch_reason) : null,
+    workBox(t, true),
+    runsFor(t.id).length ? [h('h4', null, `자동 실행 이력 ${runsFor(t.id).length}`), h('div', { class: 'run-list' }, runsFor(t.id).slice(0, 8).map(runRow))] : null,
     t.status === 'backlog' ? activateControl(t) : null,
     assignControl(t),
     h('dl', { class: 'fields' }, h('dt', null, '담당'), h('dd', null, t.assignee ? person(t.assignee).full : '미배정'),

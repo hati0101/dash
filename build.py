@@ -452,7 +452,7 @@ def load_ai_runs(folder: Path, log: SourceLog):
 # ---------------------------------------------------------------- 큐레이션(Claude·Astra 직접 기록)
 
 CURATED_KEYS = ("tasks", "decisions_needed", "decisions", "user_actions", "notes",
-                "comments", "acks", "decisions_answered")
+                "comments", "acks", "decisions_answered", "notices")
 
 
 def load_curated(files: list[str], log: SourceLog):
@@ -532,7 +532,7 @@ def load_nodes(cfg: dict, pw: str | None, log: SourceLog):
     """각 PC(작업 노드)의 작업자 현황·주제 기록을 모은다."""
     from node import collect_nodes, all_agents
     if not cfg.get("pc"):
-        return [], [], [], []
+        return [], [], [], [], [], [], {}
     nodes = collect_nodes(cfg, pw)
     for n in nodes:
         last = parse_iso(n.get("synced_at") or n.get("updated_at"))
@@ -547,14 +547,84 @@ def load_nodes(cfg: dict, pw: str | None, log: SourceLog):
     asks = [{"id": q["id"], "question": q.get("question", ""), "options": q.get("options") or [], "owner": "user",
              "task_id": q.get("topic"), "since": q.get("ts"), "_author": q.get("agent"), "from_pc": n["pc"]}
             for n in nodes for q in n.get("asks") or [] if q.get("id")]
-    return summary, agents, records, asks
+    # 자동 실행기 실행 이력(시각·결과·실패 사유)과 대화 세션이 잡은 주제
+    runs = sorted(({**r, "pc": n["pc"]} for n in nodes for r in n.get("runs") or [] if r.get("id")),
+                  key=lambda r: r.get("started") or "", reverse=True)[:400]
+    stamp = iso(now())
+    holds = [{"topic": k, **v, "pc": n["pc"]} for n in nodes for k, v in (n.get("holds") or {}).items()
+             if (v or {}).get("until") and v["until"] > stamp]
+    # 허브 공지를 각 작업자가 확인한 기록(대화 세션 확인 / 실행기 반영)
+    notice_acks: dict[str, dict] = {}
+    for n in nodes:
+        for nid, by in (n.get("notice_acks") or {}).items():
+            notice_acks.setdefault(nid, {}).update(by or {})
+    return summary, agents, records, asks, runs, holds, notice_acks
 
 
-def load_topics(cfg: dict, log: SourceLog, node_records: list | None = None):
+HEALTH_LABEL = {"auth": "로그인 만료", "tool": "실행 도구 없음", "timeout": "시간 초과", "encoding": "인코딩 오류",
+                "parse": "답 형식 오류", "error": "실행 오류"}
+
+
+def health_actions(agents: list[dict]) -> list[dict]:
+    """사람이 해야 고쳐지는 작업자 문제(로그인 만료 등) → 대시보드 '할 일'."""
+    out = []
+    for a in agents:
+        h = a.get("health") or {}
+        if h.get("needs_user") and h.get("state") not in (None, "ok"):
+            out.append({"id": f"health-{a['id']}-{h.get('since') or h.get('at')}", "title": f"{a.get('pc_label')} {a.get('label') or a['id']}: {HEALTH_LABEL.get(h['state'], h['state'])}",
+                        "detail": f"{h.get('fix') or ''} (원인: {h.get('message') or '-'})", "since": h.get("since") or h.get("at"), "kind": "health", "agent": a["id"]})
+    return out
+
+
+def load_works(cfg: dict, topics: list[dict], log: SourceLog) -> dict:
+    """작업물 저장소(real-work)의 작업 목록. 파일 내용은 넣지 않고 목록·상태·작업자 메모 끝부분만 넣는다(게임 소스 비공개 원칙)."""
+    repo = Path(cfg.get("work_repo") or r"D:\real-work")
+    base = repo / "work"
+    if not base.is_dir():
+        log.add("works", "작업물(real-work)", "works", base, 0, error="선택: 작업물 저장소 없음")
+        return {}
+    url = (cfg.get("work_repo_url") or "https://github.com/hati0101/real-work").rstrip("/")
+    works, last = {}, None
+    for readme in sorted(base.glob("*/README.md")):
+        d = readme.parent
+        text = read_text(readme)
+        g = lambda k: ((re.search(rf"^\| {k} \| (.*?) \|$", text, re.M) or [None, ""])[1] or "").strip("` ")  # noqa: E731
+        agents = {}
+        files = []
+        for sub in sorted(x for x in d.iterdir() if x.is_dir()):
+            notes = sub / "NOTES.md"
+            ntext = read_text(notes) if notes.exists() else ""
+            heads = re.findall(r"^## (\S+) · (.+)$", ntext, re.M)
+            fl = [p for p in sub.rglob("*") if p.is_file()]
+            agents[sub.name] = {"files": len(fl), "notes_tail": ntext[-1500:].strip(), "notes_count": len(heads),
+                                "last_note_at": heads[-1][0] if heads else None}
+            files += [{"path": p.relative_to(d).as_posix(), "size": p.stat().st_size} for p in fl]
+            for p in fl + ([notes] if notes.exists() else []):
+                m = datetime.fromtimestamp(p.stat().st_mtime, KST)
+                last = max(last, m) if last else m
+        hist = re.findall(r"^- (\S+) `([^`]+)` (.+)$", text, re.M)
+        works[d.name] = {"id": d.name, "title": text.splitlines()[0].lstrip("# ").split(" — ", 1)[-1] if text else d.name,
+                         "owner": g("담당"), "kind": g("종류"), "state": g("상태"), "topic": g("대시보드 주제"),
+                         "approval": g("아키텍트 승인"), "created": g("만든 시각"), "agents": agents,
+                         "files": sorted(files, key=lambda f: f["path"])[:80], "file_count": len(files),
+                         "history": [{"ts": a, "by": b, "what": c[:200]} for a, b, c in hist[-12:]],
+                         "url": f"{url}/tree/main/work/{d.name}"}
+    by_topic: dict[str, str] = {}
+    for w in sorted(works.values(), key=lambda w: w.get("created") or ""):
+        if re.match(r"^T-\d{8}-", w.get("topic") or ""):
+            by_topic[w["topic"]] = w["id"]
+    for t in topics:  # 연결 기록이 없으면 README의 주제 칸으로 잇는다
+        if not t.get("work_id") and by_topic.get(t["id"]):
+            t["work_id"] = by_topic[t["id"]]
+    log.add("works", "작업물(real-work)", "works", base, len(works), last, note=f"주제 연결 {sum(1 for t in topics if t.get('work_id'))}건")
+    return works
+
+
+def load_topics(cfg: dict, log: SourceLog, node_records: list | None = None, known: set | None = None):
     from topics import merged_topics  # 같은 병합 규칙을 쓴다
     folder = (ROOT / cfg.get("topics_dir", "topics")).resolve()
     try:
-        rows = merged_topics(folder, cfg, node_records or [])
+        rows = merged_topics(folder, cfg, node_records or [], known)
     except Exception as exc:  # noqa: BLE001
         log.add("topics", "주제 보드", "topics", folder, 0, error=str(exc))
         return []
@@ -640,9 +710,13 @@ def build_payload(cfg: dict, pw: str | None = None) -> dict:
     # 아키텍트가 업무 보드에서 빼라고 한 작업(hidden)은 화면 목록에서 제외하고, 무엇을 뺐는지만 남긴다
     hidden_tasks = [{"id": t["id"], "title": t.get("title"), "reason": t.get("hidden_reason")} for t in tasks if t.get("hidden")]
     tasks = [t for t in tasks if not t.get("hidden")]
-    nodes, agents, node_records, asks = load_nodes(cfg, pw, log)
+    nodes, agents, node_records, asks, runs, holds, notice_acks = load_nodes(cfg, pw, log)
+    notices = sorted(({**n, "acks": notice_acks.get(n.get("id"), {})} for n in curated["notices"] if n.get("id")),
+                     key=lambda n: n.get("ts") or "", reverse=True)[:30]
     curated["decisions_needed"] += asks
-    topics = load_topics(cfg, log, node_records)
+    curated["user_actions"] += health_actions(agents)
+    topics = load_topics(cfg, log, node_records, {a["id"] for a in agents} or None)
+    works = load_works(cfg, topics, log)
     from topics import load_routing
     routing = load_routing(cfg)
 
@@ -672,6 +746,10 @@ def build_payload(cfg: dict, pw: str | None = None) -> dict:
         "topics": topics,
         "nodes": nodes,
         "agents": agents,
+        "runs": runs,
+        "holds": holds,
+        "works": works,
+        "notices": notices,
         "sources": log.rows,
         "tasks": tasks,
         "messages": messages,

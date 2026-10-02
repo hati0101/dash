@@ -7,12 +7,16 @@ param([switch]$FromRunner)
 $ErrorActionPreference = 'Continue'
 Set-Location $PSScriptRoot
 $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
+# 예약 작업 환경의 기본 문자표(cp949) 때문에 python 출력이 깨지거나 예외가 나지 않게 UTF-8로 고정
+$env:PYTHONUTF8 = '1'; $env:PYTHONIOENCODING = 'utf-8'
 New-Item -ItemType Directory -Force (Join-Path $PSScriptRoot '.local') | Out-Null
 $log = Join-Path $PSScriptRoot '.local/sync.log'
 function Log([string]$m) { ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ' ' + $m) | Out-File $log -Append -Encoding utf8 }
 # python 출력과 오류를 cmd에서 합쳐 받는다(PowerShell 5의 오류 레코드 장식이 기록에 섞이지 않게). 종료 코드는 $LASTEXITCODE로 남는다.
 function Py([string]$a) { (cmd /c "python $a 2>&1" | Out-String).Trim() }
 
+# 도구를 고치는 동안 잠시 멈춤: .local/pause 파일이 있으면 아무것도 하지 않는다(반쯤 고친 상태가 게시·실행되지 않게)
+if (Test-Path (Join-Path $PSScriptRoot '.local/pause')) { Log '일시 정지(.local/pause) — 건너뜀'; return }
 $lock = Join-Path $PSScriptRoot '.local/sync.lock'
 if ((Test-Path $lock) -and ((Get-Date) - (Get-Item $lock).LastWriteTime).TotalMinutes -lt 20) { Log '이전 동기화 실행 중 — 건너뜀'; return }
 Set-Content $lock $PID
@@ -82,6 +86,11 @@ try {
   if ($out -notmatch '새 알림 0건') { Log "알림: $out" }
   Start-Runner
 
+  # 작업물 저장소(real-work)를 받아 두어 주제 화면의 작업물 목록·상태가 최신이 되게 한다
+  $wr = if ($cfg.work_repo) { $cfg.work_repo } else { 'D:\real-work' }
+  # 실행기가 real-work git 작업 중이면(node-data/realwork.lock) 겹치지 않게 이번에는 건너뛴다
+  $wlock = Join-Path $PSScriptRoot 'node-data/realwork.lock'
+  if ((Test-Path (Join-Path $wr '.git')) -and -not (Test-Path $wlock)) { git -C $wr pull -q --rebase --autostash origin main 2>&1 | Out-Null }
   $out = Py 'build.py --skip-unchanged'
   if ($LASTEXITCODE -eq 10) { return }
   if ($LASTEXITCODE) { Log "생성 실패: $out"; return }

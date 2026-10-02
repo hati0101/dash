@@ -592,7 +592,7 @@ def user_assigns(cfg: dict | None) -> dict:
     return out
 
 
-def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict] | None = None) -> list[dict]:
+def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict] | None = None, known: set | None = None) -> list[dict]:
     """주제 원본 + 허브 작성자 파일(claude/astra) + 다른 PC 작업자 기록 + 사용자 지정 담당을 합친다."""
     out = []
     if not folder.is_dir():
@@ -626,15 +626,23 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
         t["status"] = "new"
         plans = {}
         claims = []
+        handoff = None
+        plan_ts: dict[str, str] = {}
         for _ts, a, r in sorted(events, key=lambda e: e[0] or ""):
             if r.get("status") in STATUSES:
                 t["status"] = r["status"]
+                t["status_at"] = _ts  # 실행기가 '이 PC에서 더 나중에 바꾼 상태'를 판단하는 기준
+            if r.get("work_id") and r.get("kind") in ("work", "handoff"):
+                t["work_id"] = r["work_id"]  # 주제 하나에 작업물 하나: 가장 최근 연결
+            if r.get("kind") == "handoff" and r.get("to"):
+                handoff = {"from": a, "to": norm_agent(r["to"]), "ts": _ts, "reason": (r.get("body") or "")[:300]}
             if r.get("linked_task_id"):
                 t["linked_task_id"] = r["linked_task_id"]
             if r.get("priority") in ("P0", "P1", "P2", "P3"):
                 t["priority"] = r["priority"]
             if r.get("plan"):
                 plans[a] = r["plan"]
+                plan_ts[a] = _ts
             if r.get("kind") == "claim":
                 claims.append(a)
         lead = recs.get(LEAD) or {}
@@ -644,6 +652,12 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
         ua = assigns.get(t["id"])
         if ua and to_dt(ua.get("ts")) >= to_dt(lead.get("assigned_at")):
             t["assignee"], t["assign_by"], t["dispatch_reason"] = ua["agent"], "user", "사용자가 대시보드에서 지정"
+        # 작업자끼리 차례 넘기기(예: 서버컴 조사 → 개발컴 구현·검증 → 서버컴 적용 준비). 그 뒤에 사용자가 다시 지정하면 사용자 지정이 이긴다.
+        if handoff and AGENT_RE.match(handoff["to"] or "") and (known is None or handoff["to"] in known) and to_dt(handoff["ts"]) >= to_dt(lead.get("assigned_at")) \
+                and (not ua or to_dt(handoff["ts"]) >= to_dt(ua.get("ts"))):
+            t["assignee"], t["assign_by"] = handoff["to"], "handoff"
+            t["dispatch_reason"] = f"{handoff['from']}이(가) 넘김: {handoff['reason'] or '-'}"
+            t["handoff"] = handoff
         # 미처리(백로그): 착수 지시·담당 지정·작업 기록이 없으면 배분하지 않고 '미처리'로 둔다
         if base.get("backlog") and not t.get("assignee") and t["status"] == "new" and t["id"] not in activations:
             t["status"] = "backlog"
@@ -659,9 +673,10 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
             t["edited_at"] = ed.get("ts")
         if t["id"] in drops:  # 삭제한 주제: 배분·실행 대상에서 빠지고 화면에서는 '삭제됨'에만 보인다
             t["status"], t["dropped_at"] = "dropped", drops[t["id"]].get("ts")
+            t["status_at"] = max(t.get("status_at") or "", drops[t["id"]].get("ts") or "")
         planner = t["assignee"] if t["assignee"] in plans else (next(iter(plans)) if plans else None)
         if planner:
-            t["plan"], t["plan_by"] = plans[planner], planner
+            t["plan"], t["plan_by"], t["plan_at"] = plans[planner], planner, plan_ts.get(planner)
         t["claims"] = sorted(set(claims))
         t["conflict"] = [a for a in t["claims"] if t.get("assignee") and a != t["assignee"]]
         t["updated_at"] = max([base.get("received_at", "")] + [e[0] or "" for e in events])
@@ -677,10 +692,15 @@ def whose_turn(t: dict) -> str | None:
     a = t.get("assignee")
     if not a:
         return LEAD  # 배분 대기
+    ho = t.get("handoff")
+    if ho and ho.get("to") == a and not (t.get("plan_by") == a and (t.get("plan_at") or "") > (ho.get("ts") or "")):
+        return a  # 넘겨받은 쪽 차례. 받은 쪽이 새 진행 베이스를 쓰면 아래 교차 검토 단계로 돌아간다
     if not t.get("plan"):
         return a  # 진행 베이스 작성 대기
     reviewer = LEAD if a != LEAD else "dev-astra"
-    if not any(n.get("kind") == "review" and n.get("by") != a for n in t.get("notes", [])):
+    # 인계받은 쪽이 새로 쓴 진행 베이스는 그 뒤의 검토만 인정한다(넘기기 전 검토로 건너뛰지 않게)
+    since = (t.get("plan_at") or "") if ho and ho.get("to") == a else ""
+    if not any(n.get("kind") == "review" and n.get("by") != a and (n.get("ts") or "") >= since for n in t.get("notes", [])):
         return reviewer  # 교차 검토 대기
     return a
 
@@ -783,7 +803,7 @@ def cmd_dispatch(args, cfg):
     if not agents:
         sys.exit("등록된 작업자가 없습니다. node.py init으로 이 PC 작업자를 등록하세요.")
     node_recs = [r for n in nodes for r in n.get("topic_records", [])]
-    topics = merged_topics(topics_dir(cfg), cfg, node_recs)
+    topics = merged_topics(topics_dir(cfg), cfg, node_recs, {a["id"] for a in agents})
     loads: dict[str, int] = {}
     for t in topics:
         if t.get("assignee") and t["status"] not in ("done", "parked", "dropped"):
@@ -876,6 +896,27 @@ def cmd_announce(args, cfg):
             print(f"작성: {p}")
         if jobs:
             write_json(state_path, sorted(done))
+    # 허브 공지: 허브 PC 작업자 수신함에 한 번씩(다른 PC 작업자는 그 PC의 node.py inbox가 넣는다)
+    notices = []
+    for rel in cfg.get("curated_files", []):
+        rec = read_json((ROOT / rel).resolve(), None) or {}
+        notices += [n for n in rec.get("notices", []) if isinstance(n, dict) and n.get("id")]
+    sent_path = data_dir(cfg) / ".notices-sent.json"
+    sent_keys = set(read_json(sent_path, []))
+    for n in notices:
+        for aid, box in boxes.items():
+            to = n.get("to") or ["all"]
+            key = f"{n['id']}:{aid}"
+            if key in sent_keys or not ("all" in to or aid in to):
+                continue
+            p = write_inbox(box, f"DASH-NOTICE-{n['id']}-{aid}", f"[허브 공지 → {aid}] {n.get('title')}",
+                            {"sender": "dashboard (허브 공지)", "recipient": aid, "kind": "hub notice"},
+                            (n.get("body") or "") + f"\n\n읽었으면 확인을 남긴다: python \"{ROOT / 'node.py'}\" notice-ack {n['id']} --agent {aid}")
+            sent_keys.add(key)
+            sent += 1
+            print(f"공지 작성: {p}")
+    if notices:
+        write_json(sent_path, sorted(sent_keys))
     print(f"새 알림 {sent}건" + (" — Astra 수신함에 쓴 경우 Astra가 쉬는 중이면 delegate.py queue로 같은 message_id를 한 번 전달하세요." if sent else ""))
 
 

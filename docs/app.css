@@ -573,6 +573,41 @@ mark { background: color-mix(in srgb, var(--st-user_test) 35%, transparent); col
 .start-opt b { font-size: 14px; }
 .start-opt .row { display: flex; gap: 8px; flex-wrap: wrap; }
 .start-opt select { flex: 1 1 160px; min-width: 0; }
+/* 지금 단계·실행 이력·작업물 */
+.phase { --pc: var(--ink-3); display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: 11px; font-size: 12.5px;
+  background: color-mix(in srgb, var(--pc) 10%, var(--card-2)); border: 1px solid color-mix(in srgb, var(--pc) 35%, var(--line)); color: var(--ink-2); }
+.phase > svg { width: 16px; height: 16px; flex: none; color: var(--pc); margin-top: 1px; }
+.phase-b { display: grid; gap: 3px; min-width: 0; overflow-wrap: anywhere; }
+.phase-b b { color: var(--ink); font-size: 13px; }
+.phase-next { color: var(--ink-3); font-size: 12px; }
+.phase.compact { padding: 5px 9px; border-radius: 8px; margin: 6px 0 2px; }
+.phase.compact b { font-size: 12px; font-weight: 700; }
+.phase.progress { --pc: var(--st-progress); } .phase.user_test { --pc: var(--st-user_test); } .phase.blocked { --pc: var(--st-blocked); }
+.phase.done { --pc: var(--st-done); } .phase.request { --pc: var(--st-request); } .phase.validating { --pc: var(--st-validating); }
+.work-box { border: 1px solid var(--line-2); border-radius: 12px; background: var(--card-2); }
+.work-box summary { cursor: pointer; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 12px; font-size: 13px; }
+.work-box summary svg { width: 15px; height: 15px; color: var(--accent-ink); }
+.work-b { display: grid; gap: 10px; padding: 0 12px 12px; }
+.work-b > .btn { justify-self: start; }
+.work-files { margin: 0; padding-left: 18px; font-size: 12px; display: grid; gap: 2px; overflow-wrap: anywhere; }
+.work-note { display: grid; gap: 4px; font-size: 12.5px; }
+.run-list { display: grid; gap: 8px; }
+.run-row { display: flex; gap: 10px; align-items: flex-start; padding: 9px 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--card-2); font-size: 12.5px; }
+.run-row .st { flex: none; }
+.run-b { display: grid; gap: 3px; min-width: 0; overflow-wrap: anywhere; color: var(--ink-2); }
+.run-fail { color: var(--st-blocked); }
+.hist-item.k-run .hist-body { background: var(--card-2); border-style: dashed; }
+.hist-item.k-run.r-fail .hist-body, .hist-item.k-run.r-partial .hist-body { border-color: color-mix(in srgb, var(--st-blocked) 50%, var(--line)); border-style: solid; }
+.hist-item.k-handoff .hist-body { border-color: color-mix(in srgb, var(--st-progress) 45%, var(--line)); }
+
+.notice { border-top: 1px solid var(--line); padding: 10px 2px; display: grid; gap: 8px; }
+.notice:first-child { border-top: 0; }
+.notice summary { cursor: pointer; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 13.5px; }
+.notice summary .when { margin-left: auto; color: var(--ink-3); font-size: 12px; }
+.notice-acks { display: flex; flex-wrap: wrap; gap: 6px; }
+.notice-acks .tag { display: inline-flex; align-items: center; gap: 6px; }
+.notice-acks .tag.muted { opacity: .65; }
+
 /* 주제 수정·삭제 */
 .d-head { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .topic-tools { margin-left: auto; display: inline-flex; gap: 6px; }
