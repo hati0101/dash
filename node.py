@@ -509,6 +509,56 @@ def cmd_mine(args, cfg):
             print(f"    배분 근거: {t['dispatch_reason']}")
 
 
+def saved_password() -> str | None:
+    """이 PC에 사용자가 저장해 둔 비밀번호(.local/pw.dpapi, Windows 사용자 계정으로만 풀림). 화면에 내지 않고 이 프로세스 안에서만 쓴다."""
+    dp = ROOT / ".local" / "pw.dpapi"
+    if os.name != "nt" or not dp.exists():
+        return None
+    ps = ("$s = Get-Content -LiteralPath $env:RO_DPAPI | ConvertTo-SecureString; $b = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($s); "
+          "try { [Console]::Out.Write([Runtime.InteropServices.Marshal]::PtrToStringBSTR($b)) } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($b) }")
+    r = subprocess.run(["powershell", "-NoProfile", "-Command", ps], env=dict(os.environ, RO_DPAPI=str(dp)), capture_output=True)
+    pw = r.stdout.decode("utf-8", "replace").strip() if r.returncode == 0 else ""
+    return pw or None
+
+
+def cmd_brief(args, cfg):
+    """대화 세션용: 주제 하나의 내용·진행 베이스·관문·메모·작업물을 한 번에 보여 준다(실게임 시험 단계 등)."""
+    given = getattr(args, "password_file", None) or os.environ.get("REAL_OPS_PASSWORD")
+    pw = password(args) if given else (saved_password() or password(args))
+    data = decrypt_main(cfg, pw)
+    t = next((x for x in data.get("topics", []) if x.get("id") == args.topic), None)
+    if not t:
+        sys.exit(f"주제를 찾지 못했습니다: {args.topic}")
+    step, g = t.get("step") or {}, t.get("gate") or {}
+    print(f"# {t['id']} {t.get('title')}\n유형 {t.get('kind')} · 우선순위 {t.get('priority')} · 상태 {t.get('status')}"
+          + (f" · 단계 {step.get('n')}/9 {step.get('label')}" if step else "") + f"\n담당 {t.get('assignee')}"
+          + (f" (원래 담당 {t['live_from']})" if t.get("live_from") else "") + (" · 실게임 시험 대화 세션 단계" if t.get("live_session") else ""))
+    print("\n## 원래 메모\n" + (t.get("body") or "(없음)"))
+    if t.get("plan"):
+        print("\n## 진행 베이스")
+        for k, v in t["plan"].items():
+            print(f"- {k}: {v}")
+    if g:
+        print(f"\n## 지금 관문 ★{g.get('step') or g.get('n')}/9 {g.get('label')} (아키텍트 결정 대기)\n{g.get('summary') or ''}\n선택지: {' / '.join(g.get('options') or [])}")
+    for hh in t.get("gate_history") or []:
+        print(f"\n## 관문 기록 ★{hh.get('n')} {hh.get('answered_at') or ''}: {hh.get('choice')}" + (f"\n아키텍트 메모: {hh['note']}" if hh.get("note") else ""))
+    notes = t.get("notes") or []
+    if notes:
+        print(f"\n## 최근 기록 {min(12, len(notes))}/{len(notes)}건")
+        for n in notes[-12:]:
+            print(f"- [{n.get('ts')}] {n.get('by')} {n.get('kind')}: {(n.get('body') or '').strip()[:800]}")
+    wid = t.get("work_id")
+    if wid:
+        w = (data.get("works") or {}).get(wid) or {}
+        repo = Path(cfg.get("work_repo") or r"D:\real-work")
+        print(f"\n## 작업물 {wid}\n위치: {repo / 'work' / wid}")
+        for aid, info in (w.get("agents") or {}).items():
+            print(f"- {aid}: {json.dumps(info, ensure_ascii=False)[:600]}")
+    me = Path(__file__).resolve()
+    print(f"\n## 명령\n- 메모: python \"{me}\" note {t['id']} --agent <작업자> --kind memo --body-file 메모.md"
+          f"\n- 끝냄(요약 필수): python \"{me}\" state {t['id']} --agent <작업자> --status done --note \"무엇을 고쳤나·시험 방법\"")
+
+
 def write_message(folder: Path, mid: str, first: str, headers: dict, body: str) -> Path:
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{datetime.now(KST):%Y%m%d-%H%M%S}-{mid}.md"
@@ -531,6 +581,25 @@ def cmd_inbox(args, cfg):
     pc_note = ((data.get("meta", {}).get("routing", {}).get("pcs") or {}).get(pc["id"]) or {}).get("note")
     for t in assigned_to_me(cfg, data):
         a = agents[t["assignee"]]
+        if t.get("live_session"):  # 실게임(격리 서버) 시험 단계: 자동 실행 대신 아키텍트와 대화 세션에서 바로 시험·수정
+            key = f"live:{t['id']}:{(t.get('gate') or {}).get('id') or t.get('status_at')}"
+            if key in done or not a.get("inbox"):
+                continue
+            g = t.get("gate") or {}
+            body = (f"주제: {t['title']}\n지금 단계: {'★4/9 실게임 시험 — 아키텍트가 격리 서버에서 시험' if g else '실게임 시험에서 나온 문제 수정(대화 세션)'}\n"
+                    + (f"원래 담당: {t['live_from']}\n" if t.get("live_from") else "") +
+                    f"\n이 단계는 자동 실행기가 손대지 않는다. 아키텍트가 이 PC Claude 대화를 열면 그 대화에서 바로 시험·수정한다.\n\n"
+                    f"1. 주제 내용·작업물·체크리스트 불러오기: python \"{me}\" brief {t['id']}\n"
+                    f"2. 수정하면 메모: python \"{me}\" note {t['id']} --agent {a['id']} --kind memo --body-file 메모.md\n"
+                    f"3. 수정을 끝내면: python \"{me}\" state {t['id']} --agent {a['id']} --status done --note \"무엇을 고쳤나·시험 방법\" → 바로 ★4 실게임 시험으로 돌아감\n"
+                    "4. 통과·문제 있음·보류 결정은 아키텍트가 대시보드 '내 차례'에서 한다.\n\n"
+                    "격리 서버(server-dev)만 쓴다. 운영 서버 반영은 ★7 승인 뒤 서버컴에서만.")
+            p = write_message(Path(a["inbox"]), f"DASH-LIVE-{t['id']}-{a['id']}", f"[대시보드 → {a['label']}] 실게임 시험 대화로 진행: {t['title']}",
+                              {"sender": "dashboard (9단계 흐름)", "recipient": a["id"], "kind": "live test session", "task_id": t["id"]}, body)
+            done.add(key)
+            sent += 1
+            print(f"실게임 시험 전달: {p}")
+            continue
         key = f"assign:{t['id']}:{t['assignee']}"
         if key in done or not a.get("inbox"):
             continue
@@ -682,6 +751,7 @@ def main():
     p = sub.add_parser("status"); p.add_argument("--agent", required=True); p.add_argument("--project")
     p.add_argument("--task"); p.add_argument("--topic"); p.add_argument("--note"); p.add_argument("--idle", action="store_true")
     sub.add_parser("mine"); sub.add_parser("inbox")
+    p = sub.add_parser("brief", help="대화 세션용: 주제 하나의 내용·진행 베이스·관문·메모·작업물을 한 번에 보기"); p.add_argument("topic")
     p = sub.add_parser("pack"); p.add_argument("--if-changed", action="store_true",
                                                help="기록이 바뀌었거나 마지막 업로드가 60분 지났을 때만 만듦(아니면 종료 코드 10)")
     p = sub.add_parser("propose", help="이 PC의 아이디어·이슈 메모를 한 건씩 올리기(허브가 미처리 주제로 가져감)")
@@ -720,7 +790,7 @@ def main():
     p.add_argument("--status", required=True, choices=STATUSES); p.add_argument("--task"); p.add_argument("--note")
     args = ap.parse_args()
     cfg = load_cfg()
-    {"init": cmd_init, "status": cmd_status, "mine": cmd_mine, "inbox": cmd_inbox, "pack": cmd_pack, "claim": cmd_claim, "propose": cmd_propose, "ask": cmd_ask,
+    {"init": cmd_init, "status": cmd_status, "mine": cmd_mine, "brief": cmd_brief, "inbox": cmd_inbox, "pack": cmd_pack, "claim": cmd_claim, "propose": cmd_propose, "ask": cmd_ask,
      "plan": cmd_plan, "note": cmd_note, "state": cmd_state, "handoff": cmd_handoff, "hold": cmd_hold, "release": cmd_release,
      "link-work": cmd_link_work, "notice-ack": cmd_notice_ack, "request": cmd_request, "reply": cmd_reply}[args.cmd](args, cfg)
 

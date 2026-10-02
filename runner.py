@@ -238,8 +238,8 @@ def find_jobs(data: dict, state: dict, only: str | None = None) -> list[dict]:
         who = t.get("turn")
         if who not in agents or (only and who != only) or t.get("status") not in ACTIVE:
             continue
-        if t["id"] in holds:
-            continue  # 대화 세션이 잡고 있다
+        if t["id"] in holds or t.get("live_session"):
+            continue  # 대화 세션이 잡고 있다(실게임 시험 단계는 개발컴 Claude 대화 세션 몫)
         # 담당이고 진행 베이스가 있고 진행 중이면 '작업 모드'(작업물 저장소의 자기 폴더에 결과물을 직접 만든다)
         req_to_me = (t.get("open_request") or {}).get("to") == who
         stage_mine = t.get("stage") in ("test", "pack") and t.get("stage_owner") == who
@@ -259,8 +259,8 @@ def find_jobs(data: dict, state: dict, only: str | None = None) -> list[dict]:
     for q in data.get("decisions_needed", []):
         if q.get("_author") in agents and (not only or q["_author"] == only) and q["id"] in answers and q["id"] not in used:
             t = next((x for x in data.get("topics", []) if x["id"] == q.get("task_id")), None)
-            if t and (t["id"] in holds or t.get("status") in ("done", "parked", "dropped")):
-                continue
+            if t and (t["id"] in holds or t.get("live_session") or t.get("status") in ("done", "parked", "dropped")):
+                continue  # 대화 세션 처리 중·실게임 시험 단계(개발컴 Claude 대화)는 실행기가 깨우지 않는다
             if limited(state.setdefault("topics", {}).setdefault(t["id"] if t else f"ans-{q['id']}", {})):
                 continue
             jobs.append({"kind": "answer", "agent": q["_author"], "topic": t, "ask": q, "answer": answers[q["id"]],
@@ -1125,8 +1125,8 @@ def queue_summary(aid: str, data: dict, state: dict) -> dict:
             continue
         out["total"] += 1
         st = (state.get("topics") or {}).get(t["id"], {})
-        if t["id"] in holds:
-            out["held"] += 1
+        if t["id"] in holds or t.get("live_session"):
+            out["held"] += 1  # 대화 세션 몫(실게임 시험 단계 포함)
         elif t["id"] in runnable:
             out["runnable"] += 1
         elif (st.get("retry_after") or "") > stamp:
