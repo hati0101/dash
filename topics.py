@@ -779,7 +779,7 @@ def score_agents(topic: dict, agents: list[dict], loads: dict, routing: dict) ->
             s += float(km.get("weight", 2)); why.append(f"유형 {topic.get('kind')} → {a.get('ai')}")
         pref = topic.get("prefer") or "auto"
         if norm_agent(pref) == a["id"]:
-            s += 20; why.append("사용자 선호 +20")
+            s += 1000; why.append("아키텍트가 이 작업자를 지정")  # 특정 작업자를 고르면 부하 감점과 상관없이 그 작업자에게 간다
         elif pref in ("claude", "gpt") and a.get("ai") == pref:
             s += 5; why.append(f"사용자 선호 {pref} +5")
         load = loads.get(a["id"], 0)
@@ -938,6 +938,106 @@ def cmd_announce(args, cfg):
     print(f"새 알림 {sent}건" + (" — Astra 수신함에 쓴 경우 Astra가 쉬는 중이면 delegate.py queue로 같은 message_id를 한 번 전달하세요." if sent else ""))
 
 
+def cmd_tidy(args, cfg):
+    """허브 PC 작업자 수신함의 자동 알림(DASH-*)과 아키텍트 행동 사본(USR-*) 가운데 반영이 끝난 것을 done/으로 옮긴다(지우지 않는다).
+    실행기는 수신함 파일이 아니라 대시보드 데이터(차례·결정·대화)로 일하므로, 이 파일들은 처리 주체 없이 쌓여 '미처리'로 보였다."""
+    from node import collect_nodes, all_agents
+    pw = os.environ.get("REAL_OPS_PASSWORD") or (Path(args.password_file).read_text(encoding="utf-8").strip() if args.password_file else None)
+    nodes = collect_nodes(cfg, pw) if cfg.get("pc") else []
+    recs = [r for n in nodes for r in n.get("topic_records", [])]
+    known = {a["id"] for a in all_agents(nodes)} or None
+    topics = {t["id"]: t for t in merged_topics(topics_dir(cfg), cfg, recs, known)}
+    _, urec = user_file(cfg)
+    answered = {d.get("id"): d for d in urec.get("decisions_answered", [])}
+    comments = {c.get("id"): c for c in urec.get("comments", [])}
+    asks = {q.get("id"): q for n in nodes for q in n.get("asks") or []}
+    acks: dict[str, dict] = {}
+    for n in nodes:
+        for nid, by in (n.get("notice_acks") or {}).items():
+            acks.setdefault(nid, {}).update(by or {})
+    now = datetime.now(KST)
+
+    def acted_after(tid, who, ts) -> bool:
+        t = topics.get(tid)
+        if not t:
+            return True  # 주제가 없어졌으면 더 할 일 없음
+        if t["status"] in ("done", "parked", "dropped"):
+            return True
+        return any(n.get("by") == who and to_dt(n.get("ts")) > to_dt(ts) for n in t.get("notes", []))
+
+    def settled(mid: str, head: str, age_h: float) -> str | None:
+        m = re.match(r"^DASH-TOPIC-(CONFLICT|NEW|ASSIGN|REVIEW)-(T-\d{8}-[a-z0-9]+)(?:-([a-z0-9-]+))?$", mid)
+        if m:
+            kind, tid, who = m.groups()
+            t = topics.get(tid)
+            if not t or t["status"] in ("done", "parked", "dropped"):
+                return "주제 종료"
+            if kind == "CONFLICT" and who not in (t.get("conflict") or []):
+                return "중복 착수 해소"
+            if kind == "NEW" and (t.get("assignee") or t["status"] != "new"):
+                return "배분됨"
+            if kind == "ASSIGN" and (t.get("assignee") != who or t.get("plan")):
+                return "착수·진행 베이스 작성됨"
+            if kind == "REVIEW" and t.get("turn") != who:
+                return "검토 끝남"
+        m = re.match(r"^DASH-ASSIGN-(T-\d{8}-[a-z0-9]+)-([a-z0-9-]+)$", mid)
+        if m:
+            t = topics.get(m.group(1))
+            if not t or t["status"] in ("done", "parked", "dropped") or t.get("assignee") != m.group(2) or t.get("plan"):
+                return "착수·진행 베이스 작성됨"
+        m = re.match(r"^DASH-NOTICE-(N-[A-Za-z0-9-]+?)-((?:dev|server|[a-z0-9]+)-[a-z0-9]+)$", mid)
+        if m and (acks.get(m.group(1), {}).get(m.group(2)) or {}).get("via") == "session":
+            return "공지 확인됨"  # 대화 세션이 직접 확인한 경우만(실행기 반영만으로는 수신함 메시지를 남겨 둔다)
+        if mid.startswith(("USR-STATE-", "USR-ASSIGN-")):
+            return "대시보드에서 이미 적용됨(사본)"
+        if mid.startswith("USR-DECIDE-"):
+            did = (re.search(r"^in_reply_to:\s*(\S+)", head, re.M) or [None, ""])[1]
+            d, q = answered.get(did), asks.get(did)
+            if d and q and q.get("topic") and acted_after(q["topic"], q.get("agent"), d.get("ts")):
+                return "질문한 작업자가 결정 반영"
+        if mid.startswith("USR-REPLY-"):
+            c = comments.get(mid[len("USR-REPLY-"):]) or {}
+            tg = c.get("target") or {}
+            if tg.get("kind") == "topic" and acted_after(tg.get("id"), c.get("to"), c.get("ts")):
+                return "받는 작업자가 답 반영"
+        if mid.startswith(("USR-", "DASH-")) and age_h > 48:
+            return "48시간 지난 자동 알림·사본"
+        return None
+
+    moved: dict[str, int] = {}
+    for a in cfg.get("agents", []):
+        box = Path(a.get("inbox") or "")
+        if not a.get("inbox") or not box.is_dir():
+            continue
+        for p in sorted(box.glob("*.md")):
+            try:
+                head = "\n".join(p.read_text(encoding="utf-8-sig", errors="replace").splitlines()[:15])
+            except OSError:
+                continue
+            mid = (re.search(r"^message_id:\s*(\S+)", head, re.M) or [None, ""])[1]
+            if not mid.startswith(("USR-", "DASH-")):
+                continue  # AI가 보낸 실제 보고는 건드리지 않는다
+            why = settled(mid, head, (now.timestamp() - p.stat().st_mtime) / 3600)
+            if not why:
+                continue
+            if getattr(args, "dry_run", False):
+                print(f"  [옮길 예정] {p.name} — {why}")
+                moved[why] = moved.get(why, 0) + 1
+                continue
+            done = box / "done"
+            done.mkdir(exist_ok=True)
+            dst, k = done / p.name, 1
+            while dst.exists():
+                dst, k = done / f"{p.stem}-{k}{p.suffix}", k + 1
+            try:
+                p.replace(dst)
+                moved[why] = moved.get(why, 0) + 1
+            except OSError:
+                pass
+    total = sum(moved.values())
+    print(f"수신함 정리 {total}건" + (": " + ", ".join(f"{k} {v}" for k, v in moved.items()) if total else ""))
+
+
 # ---------------------------------------------------------------- CLI
 
 def main():
@@ -961,6 +1061,8 @@ def main():
     sub.add_parser("import-proposals", help="각 PC 작업자가 올린 메모를 미처리 주제로 가져오기(허브)")
     sub.add_parser("list")
     sub.add_parser("announce")
+    p = sub.add_parser("tidy", help="자동 알림(DASH-*)·아키텍트 행동 사본(USR-*) 중 반영이 끝난 것을 수신함 done/으로 옮김")
+    p.add_argument("--dry-run", action="store_true")
     sub.add_parser("dispatch", help="새 주제 자동 배분(허브 PC에서만)")
     p = sub.add_parser("triage"); p.add_argument("id"); p.add_argument("--by", required=True, choices=AUTHORS)
     p.add_argument("--assign", required=True, help="작업자 ID (예: dev-claude, server-gpt). claude/astra도 허용")
@@ -980,7 +1082,7 @@ def main():
     cfg = load_cfg()
     {"pull": cmd_pull, "add-blob": cmd_add_blob, "add": cmd_add, "list": cmd_list, "announce": cmd_announce,
      "triage": cmd_triage, "plan": cmd_plan, "note": cmd_note, "status": cmd_status, "comment": cmd_comment,
-     "dispatch": cmd_dispatch, "activate": cmd_activate, "import-proposals": cmd_import_proposals}[args.cmd](args, cfg)
+     "dispatch": cmd_dispatch, "activate": cmd_activate, "import-proposals": cmd_import_proposals, "tidy": cmd_tidy}[args.cmd](args, cfg)
 
 
 if __name__ == "__main__":

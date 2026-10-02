@@ -264,7 +264,9 @@ def load_messages(bridge: Path, limits: dict, log: SourceLog):
         m["replies"] = replies.get(m["id"], [])
         m["followups"] = [x["id"] for x in out if m["task_id"] and x["task_id"] == m["task_id"]
                           and x["sender"] == m["recipient"] and (x["ts"] or "") > (m["ts"] or "")][:5]
-        m["unprocessed"] = m["box"] == "inbox-claude"
+        # 대시보드 자동 알림(DASH-*)·아키텍트 행동 사본(USR-*)은 처리할 '미처리'가 아니라 기록이다
+        m["auto"] = bool(re.match(r"^(DASH|USR)-", str(m.get("id") or "")))
+        m["unprocessed"] = m["box"] == "inbox-claude" and not m["auto"]
     out.sort(key=lambda m: m["ts"] or "", reverse=True)
     return out
 

@@ -1319,7 +1319,7 @@ function vMessages() {
   const f = S.f.msg;
   const filt = {
     all: () => true, a2c: m => m.sender === 'astra', c2a: m => m.sender === 'claude',
-    unprocessed: m => S.d.unprocessed.includes(m), unanswered: m => S.d.unanswered.includes(m),
+    unprocessed: m => S.d.unprocessed.includes(m), unanswered: m => S.d.unanswered.includes(m), auto: m => m.auto,
   }[f] || (() => true);
   const unp = S.d.unprocessed;
   const list = all.filter(filt).slice(0, 300);
@@ -1327,8 +1327,10 @@ function vMessages() {
   const narrow = matchMedia('(max-width: 880px)').matches;
   return [
     head('MESSAGES', 'Claude ↔ Astra', `${all.length}건`,
-      chips([['all', '전체'], ['a2c', 'Astra→Claude'], ['c2a', 'Claude→Astra'], ['unprocessed', `미처리 ${unp.length}`], ['unanswered', `답장 대기 ${S.d.unanswered.length}`]], f, v => { S.f.msg = v; S.msgSel = null; render(); }, '메시지 필터'),
+      chips([['all', '전체'], ['a2c', 'Astra→Claude'], ['c2a', 'Claude→Astra'], ['unprocessed', `미처리 ${unp.length}`], ['unanswered', `답장 대기 ${S.d.unanswered.length}`], ['auto', `자동 알림·사본 ${all.filter(m => m.auto).length}`]], f, v => { S.f.msg = v; S.msgSel = null; render(); }, '메시지 필터'),
       unp.length ? h('button', { class: 'btn primary', onclick: () => ackMessages(unp.map(m => m.id)) }, icon('check'), `미처리 ${unp.length}건 모두 확인 처리`) : null),
+    h('p', { class: 'hint', style: { margin: '-6px 0 12px' } }, '여기는 AI 사이 기록입니다. 아키텍트가 답하거나 확인할 것은 "내 차례"에 모입니다. ',
+      '아키텍트 결정·답의 사본과 대시보드 자동 알림은 "미처리"에서 빠지고, 작업자가 반영하면 수신함에서 자동으로 정리됩니다.'),
     h('div', { class: 'split' },
       h('div', { class: 'card msg-list', role: 'listbox', 'aria-label': '메시지 목록' },
         list.length ? list.map(m => h('button', { class: 'msg', role: 'option', 'aria-selected': String(m === S.msgSel),

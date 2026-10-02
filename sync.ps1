@@ -48,6 +48,10 @@ try {
   try { $env:REAL_OPS_PASSWORD = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($b) } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($b) }
   $cfg = Get-Content 'config.local.json' -Raw -Encoding UTF8 | ConvertFrom-Json
   $role = if ($cfg.pc -and $cfg.pc.role) { $cfg.pc.role } else { 'hub' }
+  # 게시 시간대(아키텍트 결정 2026-10-02): 오전 7시~자정에만 공개 저장소에 올린다. 밤에는 받기·배분·AI 실행은 계속하고 올리기만 쉰다.
+  # config.local.json "publish_hours": [시작, 끝]으로 바꿀 수 있다(끝 24 = 자정).
+  $ph = if ($cfg.publish_hours) { @($cfg.publish_hours) } else { @(7, 24) }
+  function Quiet { $h = (Get-Date).Hour; return -not ($h -ge [int]$ph[0] -and $h -lt [int]$ph[1]) }
 
   # 한 번 동기화. 예약 작업은 10분마다 시작하지만, 그 안에서 1분 간격으로 여러 번 돌려
   # AI 결과·다른 PC 기록이 들어오면 1~2분 안에 대시보드에 반영되게 한다(바뀐 게 없으면 아무것도 올리지 않는다).
@@ -61,6 +65,7 @@ try {
     $out = Py 'node.py inbox'
     if ($LASTEXITCODE) { Log "수신 전달 실패: $out" } elseif ($out -notmatch '새 전달 0건') { Log "수신 전달: $out" }
     Start-Runner
+    if (Quiet) { return }
     $out = Py 'node.py pack --if-changed'
     if ($LASTEXITCODE -eq 10) { return }
     if ($LASTEXITCODE) { Log "기록 암호화 실패: $out"; return }
@@ -85,6 +90,8 @@ try {
   if ($LASTEXITCODE) { Log "자동 배분 실패: $out" } elseif ($out -notmatch '자동 배분 0건') { Log "자동 배분: $out" }
   $out = Py 'topics.py announce'
   if ($out -notmatch '새 알림 0건') { Log "알림: $out" }
+  $out = Py 'topics.py tidy'
+  if ($out -notmatch '수신함 정리 0건') { Log $out }
   Start-Runner
 
   # 작업물 저장소(real-work)를 받아 두어 주제 화면의 작업물 목록·상태가 최신이 되게 한다
@@ -92,6 +99,7 @@ try {
   # 실행기가 real-work git 작업 중이면(node-data/realwork.lock) 겹치지 않게 이번에는 건너뛴다
   $wlock = Join-Path $PSScriptRoot 'node-data/realwork.lock'
   if ((Test-Path (Join-Path $wr '.git')) -and -not (Test-Path $wlock)) { git -C $wr pull -q --rebase --autostash origin main 2>&1 | Out-Null }
+  if (Quiet) { return }  # 게시 시간대 밖: 만들고 올리기는 쉰다(07시가 되면 모아서 한 번에 게시)
   $out = Py 'build.py --skip-unchanged'
   if ($LASTEXITCODE -eq 10) { return }
   if ($LASTEXITCODE) { Log "생성 실패: $out"; return }
