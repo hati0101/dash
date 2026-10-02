@@ -657,6 +657,10 @@ mark { background: color-mix(in srgb, var(--st-user_test) 35%, transparent); col
 .mine-row, .mine-group { flex: none; }
 .mine-row { display: flex; gap: 12px; align-items: flex-start; padding: 11px 10px; border-radius: 12px; border: 1px solid transparent; background: none; width: 100%; text-align: left; color: inherit; }
 .mine-row:hover { background: var(--card-2); }
+/* ★ 관문 추적: 하루 넘게 기다린 관문은 왼쪽 띠로, 주제 카드에는 대기 시간 */
+.mine-row.late { box-shadow: inset 3px 0 0 var(--st-blocked); }
+.proj .gate-wait { font-size: 12px; color: var(--st-user_test); font-weight: 600; }
+.gate-new svg { color: var(--st-user_test); }
 .mine-row[aria-selected="true"] { background: var(--card-3); border-color: var(--line-2); box-shadow: inset 3px 0 0 var(--accent); }
 .mine-row .lead-ico { width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center; flex: none; background: var(--card-3); color: var(--ink-2); }
 .mine-row .lead-ico svg { width: 15px; height: 15px; }

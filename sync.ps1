@@ -52,7 +52,7 @@ try {
   $role = if ($cfg.pc -and $cfg.pc.role) { $cfg.pc.role } else { 'hub' }
   # 게시 시간대(아키텍트 결정 2026-10-02): 오전 7시~자정에만 공개 저장소에 올린다. 밤에는 받기·배분·AI 실행은 계속하고 올리기만 쉰다.
   # config.local.json "publish_hours": [시작, 끝]으로 바꿀 수 있다(끝 24 = 자정).
-  $ph = if ($cfg.publish_hours) { @($cfg.publish_hours) } else { @(7, 24) }
+  $ph = if ($cfg.publish_hours) { @($cfg.publish_hours) } else { @(0, 24) }  # 2026-10-03 아키텍트: 24시간 게시
   function Quiet { $h = (Get-Date).Hour; return -not ($h -ge [int]$ph[0] -and $h -lt [int]$ph[1]) }
 
   # 한 번 동기화. 예약 작업은 10분마다 시작하지만, 그 안에서 1분 간격으로 여러 번 돌려

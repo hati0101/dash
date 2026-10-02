@@ -424,6 +424,12 @@ function derive(data) {
     title: `배분되지 않은 주제: ${t.title}`, sub: `${Math.round(t._age)}시간 경과 · 허브 자동 동기화 확인`, go: () => openTopic(t) });
   for (const t of topics.filter(t => (t.conflict || []).length)) missed.push({ key: `conflict-topic:${t.id}:${t.conflict.join(',')}`, level: 'bad', icon: 'alert',
     title: `중복 착수: ${t.title}`, sub: `담당 ${t.assignee} · 추가 착수 ${t.conflict.join(', ')}`, go: () => openTopic(t) });
+  // ★ 관문이 하루 넘게 답을 기다리면 놓친 항목으로(대기 목록이 바뀌면 확인했어도 다시 올라온다)
+  const lateGates = (data.decisions_needed || []).filter(q => q.kind === 'gate' && !answers[q.id] && (q.options || []).length && hoursSince(q.since) >= GATE_LATE_H)
+    .sort((a, b) => toMs(a.since) - toMs(b.since));
+  if (lateGates.length) missed.push({ key: `gate-late:${lateGates.map(q => q.id).sort().join(',')}`, level: 'warn', icon: 'scale',
+    title: `★ 관문 ${lateGates.length}건이 ${GATE_LATE_H}시간 넘게 대기`, sub: `가장 오래: ${(topics.find(t => t.id === lateGates[0].task_id) || {}).title || lateGates[0].task_id} · ${waitText(lateGates[0].since)}`,
+    go: () => { S.f.mine = 'gate'; S.mineSel = null; go('mine'); } });
   const staleMin = data.meta.routing?.stale_minutes || 120;
   for (const a of data.agents || []) {
     const mine = topics.filter(t => t.assignee === a.id && !['done', 'parked', 'dropped'].includes(t.status));
@@ -464,13 +470,33 @@ const NAV = [
   { id: 'sources', label: '연결', icon: 'sources' },
 ];
 
+// 새로 도착한 ★ 관문: 이 기기에서 아직 내 차례를 열어 보지 않은 관문을 위쪽 띠·알림으로 알린다
+function checkNewGates() {
+  const ids = gateQueue().map(x => x.q.id);
+  const seen = store.get('seenGates');
+  if (!Array.isArray(seen)) { store.set('seenGates', ids); store.set('newGates', []); return; }  // 처음 연 기기는 지금 것을 본 것으로
+  const fresh = ids.filter(id => !seen.includes(id));
+  const pending = [...new Set([...(store.get('newGates') || []), ...fresh])].filter(id => ids.includes(id));
+  store.set('newGates', pending);
+  store.set('seenGates', [...new Set([...seen.filter(id => ids.includes(id)), ...ids])]);
+  if (fresh.length && 'Notification' in window && Notification.permission === 'granted') {
+    const names = gateQueue().filter(x => fresh.includes(x.q.id)).map(x => `${x.label} · ${x.topic ? x.topic.title : x.q.task_id}`);
+    try {
+      const n = new Notification(`★ 관문 ${fresh.length}건 도착`, { body: names.slice(0, 4).join('\n') + (names.length > 4 ? `\n외 ${names.length - 4}건` : ''), icon: 'icon-192.png', tag: 'real-gates' });
+      n.onclick = () => { window.focus(); S.f.mine = 'gate'; S.mineSel = null; go('mine'); n.close(); };
+    } catch { /* 알림을 못 띄우는 환경 */ }
+  }
+}
+const newGates = () => (store.get('newGates') || []).filter(id => gateQueue().some(x => x.q.id === id));
 function enterApp() {
   S.d = derive(S.data);
   $('#lock').hidden = true;
   $('#app').hidden = false;
   readHash();
+  checkNewGates();
   render();
-  if (!S.timer) S.timer = setInterval(() => { if (!document.hidden) refresh(); }, 60 * 1000);
+  // 보고 있을 때는 1분마다, 창을 내려 두었을 때도 5분마다 확인한다(새 관문 알림이 늦지 않게)
+  if (!S.timer) { let tick = 0; S.timer = setInterval(() => { tick++; if (!document.hidden || tick % 5 === 0) refresh(); }, 60 * 1000); }
 }
 async function refresh(manual) {
   try {
@@ -479,6 +505,7 @@ async function refresh(manual) {
     if (env.published_at === S.env?.published_at) { if (manual) toast('이미 최신입니다 · 게시 ' + fmtRel(env.published_at)); return; }
     if (env.salt !== S.env.salt) { S.env = env; toast('비밀번호가 바뀌었습니다. 다시 열어주세요.'); return lockNow(); }
     S.env = env; S.data = await openEnvelope(env, S.key); S.d = derive(S.data);
+    checkNewGates();
     S._keepScroll = true; render(); toast('새 데이터를 반영했습니다');
   } catch (e) { if (manual) toast('갱신 실패: ' + e.message); }
 }
@@ -489,6 +516,7 @@ function readHash() {
 }
 function go(view, opts = {}) {
   S.view = view;
+  if (view === 'mine') { S.freshGates = new Set([...(S.freshGates || []), ...newGates()]); store.set('newGates', []); }  // 열어 봤으면 새 도착 표시는 이 화면의 '새' 표시로만 남김
   if (opts.msg) S.f.msg = opts.msg;
   if (opts.stage) S.f.stage = opts.stage;
   if (opts.q != null) S.q = opts.q;
@@ -569,6 +597,7 @@ function topbar() {
     h('span', { class: `live${age > 1.5 ? ' stale' : ''}`, title: '데이터 생성 ' + fmtAbs(gen) },
       h('span', { class: 'dot' }), h('span', { class: 'lbl' }, age > 1.5 ? fmtRel(gen) + ' 갱신' : 'live')),
     h('button', { class: 'icon-btn', title: '새 데이터 확인', 'aria-label': '새 데이터 확인', onclick: () => refresh(true) }, icon('refresh')),
+    (() => { const n = newGates().length; return n ? h('button', { class: 'btn mine-btn hot gate-new', title: '새로 도착한 ★ 관문 — 누르면 내 차례 관문 목록', onclick: () => { S.f.mine = 'gate'; S.mineSel = null; go('mine'); } }, icon('scale'), `새 관문 ${n}`) : null; })(),
     (() => { const n = myQueue().total; return h('button', { class: `btn mine-btn${n ? ' hot' : ''}`, onclick: () => go('mine'), title: '아키텍트가 답하거나 확인할 것' }, icon('user'), n ? `내 차례 ${n}` : '내 차례 없음'); })(),
     h('button', { class: 'icon-btn bell', title: `놓친 항목 ${missed}`, 'aria-label': `놓친 항목 ${missed}건 보기`, onclick: openMissedDrawer },
       icon('bell'), missed ? h('span', { class: 'count' }, missed) : null));
@@ -794,6 +823,22 @@ function myQueue() {
   const backlog = d.topics.filter(t => t.status === 'backlog');
   return { decisions, tests, actions, questions, backlog, total: decisions.length + tests.length + actions.length + questions.length };
 }
+// 아키텍트 관문 대기열: 주제가 관문에 도착하면 여기서 끝까지 추적한다(답할 때까지 내 차례·개요·새 도착 알림에 남음)
+const GATE_ORDER = { 4: 0, 40: 1, 5: 2, 7: 3, 9: 4 };
+const GATE_LATE_H = 24;  // 이보다 오래 기다리면 '오래 대기'로 강조하고 놓친 항목에 올린다
+function waitText(ts) {
+  const hh = hoursSince(ts);
+  return isNaN(hh) ? '대기' : hh < 1 ? `${Math.max(1, Math.round(hh * 60))}분째 대기` : hh < 48 ? `${Math.round(hh)}시간째 대기` : `${Math.round(hh / 24)}일째 대기`;
+}
+function gateQueue() {
+  return (S.data.decisions_needed || []).filter(q => q.kind === 'gate' && !S.d.answers[q.id] && (q.options || []).length)
+    .map(q => {
+      const m = (q.question || '').match(/^\[(\d+)\/9 ([^\]]+)\]/) || [];
+      const n = q.gate || Number(m[1]);
+      return { q, n, label: `★${m[1] || n}/9 ${m[2] || '관문'}`, topic: topicById(q.task_id), late: hoursSince(q.since) >= GATE_LATE_H };
+    })
+    .sort((a, b) => (GATE_ORDER[a.n] ?? 9) - (GATE_ORDER[b.n] ?? 9) || toMs(a.q.since) - toMs(b.q.since));
+}
 // 목록에서 주제 이름을 보여주고 누르면 주제 서랍을 연다
 function topicTag(id) {
   if (!id) return null;
@@ -806,6 +851,7 @@ function histCount(topic, taskId) {
 }
 // 내 차례 소분류: [값, 이름, 아이콘, 강조]
 const MINE_TYPES = [
+  ['gate', '★ 관문', 'scale', 'warn'],
   ['decision', '결정·승인', 'scale', 'warn'],
   ['question', 'AI 질문', 'messages', 'warn'],
   ['test', '실게임·확인', 'flask', 'warn'],
@@ -815,7 +861,10 @@ const MINE_TYPES = [
 const MINE_TYPE = Object.fromEntries(MINE_TYPES.map(([v, l, i, c]) => [v, { label: l, icon: i, cls: c }]));
 function mineItems() {
   const q = myQueue(), items = [];
-  for (const x of q.decisions) items.push({ key: `d:${x.id}`, type: 'decision', title: x.question, who: x._author || 'claude', when: x.since, topic: topicById(x.task_id), taskId: x.task_id, ref: x,
+  // ★ 관문: 단계 순(실게임 시험 → 결과 확인 → 배포본 → 운영 반영 → 완료 확정), 같은 단계는 오래 기다린 것부터
+  for (const x of gateQueue()) items.push({ key: `d:${x.q.id}`, type: 'gate', title: x.topic ? x.topic.title : x.q.question.split('\n')[0], who: x.q._author || 'claude', when: x.q.since,
+    topic: x.topic, taskId: x.q.task_id, ref: x.q, sub: `${x.label} · ${waitText(x.q.since)}`, late: x.late });
+  for (const x of q.decisions.filter(d => d.kind !== 'gate')) items.push({ key: `d:${x.id}`, type: 'decision', title: x.question, who: x._author || 'claude', when: x.since, topic: topicById(x.task_id), taskId: x.task_id, ref: x,
     sub: x.recommendation ? '권장 ' + x.recommendation : (x.options || []).length ? `선택지 ${x.options.length}개` : '' });
   for (const { topic, note } of q.questions) items.push({ key: `q:${topic.id}:${note.ts}`, type: 'question', title: note.body, who: note.by, when: note.ts, topic, ref: note });
   for (const t of q.tests) items.push({ key: `t:${t.id}`, type: 'test', title: t.title, sub: t.next_action || t.summary || '', who: t.owner, when: t.updated_at, topic: S.d.topics.find(x => x.linked_task_id === t.id) || null, taskId: t.id, ref: t });
@@ -844,17 +893,20 @@ function vMine() {
   const row = it => {
     const ty = MINE_TYPE[it.type];
     const on = selecting && checked.has(it.topic?.id);
-    return h('button', { class: `mine-row${on ? ' checked' : ''}`, role: 'option', 'aria-selected': String(selecting ? on : !narrow && it.key === S.mineSel), onclick: () => selecting ? toggle(it) : pick(it) },
+    return h('button', { class: `mine-row${on ? ' checked' : ''}${it.late ? ' late' : ''}`, role: 'option', 'aria-selected': String(selecting ? on : !narrow && it.key === S.mineSel), onclick: () => selecting ? toggle(it) : pick(it) },
       selecting ? h('span', { class: `check${on ? ' on' : ''}`, 'aria-hidden': 'true' }, on ? icon('check') : null) : h('span', { class: `lead-ico ${ty.cls}` }, icon(ty.icon)),
       h('span', { class: 'body' },
-        h('span', { class: 'kind' }, h('b', null, ty.label), it.topic && it.type !== 'backlog' ? h('span', { class: 'topic' }, it.topic.title) : null),
+        h('span', { class: 'kind' }, h('b', null, ty.label), it.topic && !['backlog', 'gate'].includes(it.type) ? h('span', { class: 'topic' }, it.topic.title) : null,
+          it.type === 'gate' && S.freshGates?.has(it.ref.id) ? h('span', { class: 'st progress' }, '새') : null,
+          it.late ? h('span', { class: 'st blocked' }, '오래 대기') : null),
         h('span', { class: 't clamp-2' }, it.title),
         it.sub && it.type !== 'backlog' ? h('span', { class: 's clamp-1' }, it.sub) : null,
         h('span', { class: 'meta' }, av(it.who, true), h('span', null, person(it.who).name), histCount(it.topic, it.taskId), h('span', { class: 'when' }, fmtRel(it.when)))));
   };
   const group = (title, items) => items.length ? [h('div', { class: 'mine-group' }, title, h('b', null, items.length)), items.map(row)] : null;
   const listBody = !list.length ? empty(f === 'all' ? '지금 대응할 것이 없습니다.' : `${MINE_TYPE[f].label} 항목이 없습니다.`)
-    : f === 'all' ? [group('대응할 것', urgent), group('착수 고르기 · 미처리 주제', all.filter(i => i.type === 'backlog'))] : list.map(row);
+    : f === 'all' ? [group('★ 관문 · 오래 기다린 것부터', urgent.filter(i => i.type === 'gate')), group('대응할 것', urgent.filter(i => i.type !== 'gate')),
+      group('착수 고르기 · 미처리 주제', all.filter(i => i.type === 'backlog'))] : list.map(row);
   const ids = list.filter(i => checked.has(i.topic?.id)).map(i => i.topic.id);
   const dropped = S.d.topics.filter(t => t.status === 'dropped');
   const listTools = f !== 'backlog' ? null : h('div', { class: 'mine-list-tools' }, selecting
@@ -869,7 +921,10 @@ function vMine() {
     dropped.map(t => h('div', { class: 'dropped-row' }, h('span', { class: 'clamp-1' }, t.title), h('button', { class: 'btn sm', onclick: () => dropTopics(t.id, true) }, icon('refresh'), '되살리기')))) : null;
   const detail = sel ? mineDetail(sel, null) : null;
   return [
-    head('MY TURN', '내 차례', urgent.length ? `대응할 것 ${urgent.length}건 · 미처리 주제 ${count('backlog')}건` : `지금 대응할 것 없음 · 미처리 주제 ${count('backlog')}건`),
+    head('MY TURN', '내 차례', urgent.length ? `대응할 것 ${urgent.length}건 · 미처리 주제 ${count('backlog')}건` : `지금 대응할 것 없음 · 미처리 주제 ${count('backlog')}건`,
+      !('Notification' in window) ? null : Notification.permission === 'default'
+        ? h('button', { class: 'btn', title: '대시보드 창이 열려 있으면(내려 두어도) 새 ★ 관문이 도착할 때 바탕화면 알림을 띄웁니다', onclick: () => Notification.requestPermission().then(() => render()) }, icon('bell'), '새 관문 알림 켜기')
+        : Notification.permission === 'granted' ? h('span', { class: 'hint' }, '새 관문 바탕화면 알림 켜짐') : h('span', { class: 'hint' }, '알림이 브라우저에서 막혀 있음(사이트 설정에서 허용)')),
     tabs,
     h('div', { class: `mine-split fit-page${narrow ? ' narrow' : ''}` },
       h('div', { class: 'card mine-list', role: 'listbox', 'aria-label': '내 차례 목록', 'aria-multiselectable': selecting ? 'true' : null }, listTools, listBody, droppedBox),
@@ -886,6 +941,7 @@ function openMineItem(it) {
   modalSplit(d.eyebrow, d.main, d.side);
 }
 function mineDetail(it, redraw) {
+  if (it.type === 'gate') return { eyebrow: `★ 관문 · ${it.sub}`, ...decisionParts(it.ref, redraw) };
   if (it.type === 'decision') return { eyebrow: '결정·승인 요청', ...decisionParts(it.ref, redraw) };
   if (it.type === 'question') return { eyebrow: 'AI 질문', ...questionParts(it.topic, it.ref, redraw) };
   if (it.type === 'test') return { eyebrow: '실게임·확인 대기', ...testParts(it.ref, it.topic, redraw) };
@@ -1261,9 +1317,11 @@ function composerCard(repo) {
 function topicCard(t) {
   return h('button', { class: 'proj', onclick: () => openTopic(t) },
     h('div', { class: 'row' }, priChip(t.priority), t.kind ? h('span', { class: 'tag' }, t.kind) : null, t.linked_task_id ? h('span', { class: 'tag' }, '작업 연결') : null,
-      (t.conflict || []).length ? h('span', { class: 'st blocked' }, icon('alert'), '중복 착수') : null),
+      (t.conflict || []).length ? h('span', { class: 'st blocked' }, icon('alert'), '중복 착수') : null,
+      t.status === 'review_user' && t.gate && hoursSince(t.gate.opened_at) >= GATE_LATE_H ? h('span', { class: 'st blocked' }, '오래 대기') : null),
     h('div', { class: 'ttl clamp-2' }, t.title),
     phaseLine(t, true),
+    t.status === 'review_user' && t.gate ? h('div', { class: 'gate-wait' }, waitText(t.gate.opened_at), ' · 내 차례에서 결정') : null,
     h('div', { class: 'foot' }, t.assignee ? h('span', { class: 'wait' }, av(t.assignee, true), person(t.assignee).name) : h('span', { class: 'wait' }, '미배정'),
       t.turn ? h('span', { class: 'tag' }, `차례: ${person(t.turn).name}`) : null,
       (t.notes || []).length ? h('span', null, `메모 ${(t.notes || []).length}`) : null,

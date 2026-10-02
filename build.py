@@ -635,7 +635,7 @@ def gate_decisions(topics: list[dict], curated: dict, known: set) -> list[dict]:
     out = []
     for t in topics:
         title = t.get("title") or t["id"]
-        g = t.get("gate")
+        g = t.get("gate") if t.get("status") == "review_user" else None  # 삭제·보류된 주제에 남은 관문은 묻지 않는다
         if g and t["id"] not in asking:
             out.append({"id": g["id"], "kind": "gate", "gate": g["n"], "owner": "user", "task_id": t["id"], "since": g["opened_at"], "_author": g.get("by") or t.get("assignee"),
                         "question": f"[{g.get('step', g['n'])}/9 {g['label']}] {title}\n\n{(g.get('summary') or '(AI 결과 요약 없음 — 주제 히스토리를 확인하세요)').strip()}",

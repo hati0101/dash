@@ -824,6 +824,7 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
             t["edited_at"] = ed.get("ts")
         if t["id"] in drops:  # 삭제한 주제: 배분·실행 대상에서 빠지고 화면에서는 '삭제됨'에만 보인다
             t["status"], t["dropped_at"] = "dropped", drops[t["id"]].get("ts")
+            t.pop("gate", None); t.pop("live_session", None); t["step"] = None
             t["status_at"] = max(t.get("status_at") or "", drops[t["id"]].get("ts") or "")
         planner = t["assignee"] if t["assignee"] in plans else (next(iter(plans)) if plans else None)
         if planner:
@@ -842,7 +843,9 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
         # 중복 착수 = 지금 담당이 정해진 뒤에 담당이 아닌 작업자가 착수한 경우만.
         # 인계·담당 변경 전에 남은 이전 담당의 착수 기록은 충돌이 아니다(거짓 경보 방지).
         since = to_dt(assigned_at)
-        t["conflict"] = sorted({a for a, ts in claims if t.get("assignee") and a != t["assignee"] and to_dt(ts) > since})
+        # 관문 대기·완료·보류에서는 아무도 작업하지 않으므로 경보하지 않는다. 실게임 시험 이관 전 원래 담당의 착수도 충돌이 아니다
+        t["conflict"] = [] if t["status"] not in ("new", "triage", "ready", "active") else \
+            sorted({a for a, ts in claims if t.get("assignee") and a not in (t["assignee"], t.get("live_from")) and to_dt(ts) > since})
         t["updated_at"] = max([base.get("received_at", "")] + [e[0] or "" for e in events])
         t["authors"] = sorted(set(list(recs) + [r.get("agent") for r in by_topic.get(t["id"], [])]))
         t["turn"] = whose_turn(t)
