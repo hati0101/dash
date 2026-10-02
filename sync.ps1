@@ -52,6 +52,7 @@ try {
   # 한 번 동기화. 예약 작업은 10분마다 시작하지만, 그 안에서 1분 간격으로 여러 번 돌려
   # AI 결과·다른 PC 기록이 들어오면 1~2분 안에 대시보드에 반영되게 한다(바뀐 게 없으면 아무것도 올리지 않는다).
   function Sync-Once {
+  if (Test-Path (Join-Path $PSScriptRoot '.local/pause')) { return }  # 반복 도중에 멈춤을 걸어도 바로 멈춘다
   $out = (git pull -q --rebase --autostash origin main 2>&1 | Out-String).Trim()
   if ($LASTEXITCODE) { Log "받기 실패: $out" }
 
