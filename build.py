@@ -532,7 +532,7 @@ def load_nodes(cfg: dict, pw: str | None, log: SourceLog):
     """각 PC(작업 노드)의 작업자 현황·주제 기록을 모은다."""
     from node import collect_nodes, all_agents
     if not cfg.get("pc"):
-        return [], [], []
+        return [], [], [], []
     nodes = collect_nodes(cfg, pw)
     for n in nodes:
         last = parse_iso(n.get("synced_at") or n.get("updated_at"))
@@ -543,7 +543,11 @@ def load_nodes(cfg: dict, pw: str | None, log: SourceLog):
     summary = [{"pc": n["pc"], "label": n.get("label", n["pc"]), "role": n.get("role"), "synced_at": n.get("synced_at") or n.get("updated_at"),
                 "error": n.get("error"), "agents": sorted((n.get("agents") or {}).keys())} for n in nodes]
     records = [r for n in nodes for r in n.get("topic_records") or []]
-    return summary, agents, records
+    # 작업자가 남긴 승인·결정 질문 → 대시보드 '결정이 필요한 문제'
+    asks = [{"id": q["id"], "question": q.get("question", ""), "options": q.get("options") or [], "owner": "user",
+             "task_id": q.get("topic"), "since": q.get("ts"), "_author": q.get("agent"), "from_pc": n["pc"]}
+            for n in nodes for q in n.get("asks") or [] if q.get("id")]
+    return summary, agents, records, asks
 
 
 def load_topics(cfg: dict, log: SourceLog, node_records: list | None = None):
@@ -636,7 +640,8 @@ def build_payload(cfg: dict, pw: str | None = None) -> dict:
     # 아키텍트가 업무 보드에서 빼라고 한 작업(hidden)은 화면 목록에서 제외하고, 무엇을 뺐는지만 남긴다
     hidden_tasks = [{"id": t["id"], "title": t.get("title"), "reason": t.get("hidden_reason")} for t in tasks if t.get("hidden")]
     tasks = [t for t in tasks if not t.get("hidden")]
-    nodes, agents, node_records = load_nodes(cfg, pw, log)
+    nodes, agents, node_records, asks = load_nodes(cfg, pw, log)
+    curated["decisions_needed"] += asks
     topics = load_topics(cfg, log, node_records)
     from topics import load_routing
     routing = load_routing(cfg)

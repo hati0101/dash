@@ -1,0 +1,405 @@
+"""자동 실행기 — 배정된 일이 이 PC 작업자의 차례가 되면 그 AI를 화면 없이 깨워 처리시킨다.
+
+안전 원칙
+- AI에게는 읽기 도구만 준다(Claude: Read/Grep/Glob, Codex: 읽기 전용 샌드박스). AI는 명령을 실행하거나 파일을 고치지 않는다.
+- AI는 '다음 행동'을 정해진 JSON으로만 답한다. 실제 기록(착수·진행 베이스·메모·완료·질문·메모 올리기·작업물 메모)은 이 실행기가 검증한 뒤 한다.
+- 코드 적용·설치·재시작·DB·배포·운영 변경이 필요하면 AI는 'ask'로 아키텍트에게 묻고 멈춘다. 답은 대시보드 '결정이 필요한 문제'에서 버튼으로 한다.
+- 같은 단계는 한 번만 깨운다. 한 주제는 하루 최대 6번. 한 번 실행에 최대 3건.
+
+  python runner.py            할 일이 있으면 처리
+  python runner.py --dry-run  무엇을 깨울지만 보여 줌(실행 안 함)
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+import node  # noqa: E402
+
+KST = timezone(timedelta(hours=9))
+MAX_PER_RUN = 3
+MAX_PER_TOPIC_PER_DAY = 6
+AI_TIMEOUT = 20 * 60
+ACTIVE = ("new", "triage", "ready", "active")
+STATUSES = ("triage", "ready", "active", "done", "parked")
+
+SCHEMA = {
+    "type": "object", "additionalProperties": False, "required": ["summary", "actions"],
+    "properties": {
+        "summary": {"type": "string"},
+        "actions": {"type": "array", "items": {
+            "type": "object", "additionalProperties": False,
+            "required": ["type", "kind", "body", "status", "plan", "work_id", "question", "options", "title", "origin", "task"],
+            "properties": {
+                "type": {"type": "string", "enum": ["claim", "plan", "note", "state", "work_note", "ask", "propose"]},
+                "kind": {"type": ["string", "null"]},
+                "body": {"type": ["string", "null"]},
+                "status": {"type": ["string", "null"], "enum": ["triage", "ready", "active", "done", "parked", None]},
+                "plan": {"type": ["object", "null"], "additionalProperties": False,
+                         "required": ["goal", "scope", "inputs", "first_steps", "risks", "done_when"],
+                         "properties": {"goal": {"type": "string"}, "scope": {"type": "array", "items": {"type": "string"}},
+                                        "inputs": {"type": "array", "items": {"type": "string"}},
+                                        "first_steps": {"type": "array", "items": {"type": "string"}},
+                                        "risks": {"type": "array", "items": {"type": "string"}}, "done_when": {"type": "string"}}},
+                "work_id": {"type": ["string", "null"]},
+                "question": {"type": ["string", "null"]},
+                "options": {"type": ["array", "null"], "items": {"type": "string"}},
+                "title": {"type": ["string", "null"]},
+                "origin": {"type": ["string", "null"]},
+                "task": {"type": ["string", "null"]},
+            }}},
+    },
+}
+
+
+def now() -> datetime:
+    return datetime.now(KST)
+
+
+def log(msg: str):
+    p = node.node_dir(CFG) / "runner.log"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("a", encoding="utf-8") as fh:
+        fh.write(f"{now():%Y-%m-%d %H:%M:%S} {msg}\n")
+    print(msg)
+
+
+# ---------------------------------------------------------------- 데이터
+
+def load_data(pw: str) -> dict:
+    """허브는 지금 상태로 새로 모으고, 노드는 게시본을 연 뒤 이 PC의 최신 기록을 덮어쓴다."""
+    if (CFG.get("pc") or {}).get("role") == "hub":
+        import build
+        cfg = dict(CFG)
+        example = json.loads((ROOT / "config.example.json").read_text(encoding="utf-8-sig"))
+        cfg["limits"] = {**example["limits"], **cfg.get("limits", {})}
+        return build.build_payload(cfg, pw)
+    data = node.decrypt_main(CFG, pw)
+    rec = node.load_records(CFG)
+    mine = {}
+    for r in rec.get("topic_records", []):
+        mine.setdefault(r.get("topic"), []).append(r)
+    for t in data.get("topics", []):  # 게시 뒤에 이 PC에서 한 기록을 반영
+        for r in mine.get(t["id"], []):
+            if r.get("ts", "") > (data["meta"].get("generated_at") or ""):
+                if r.get("status") in STATUSES:
+                    t["status"] = r["status"]
+                if r.get("plan"):
+                    t["plan"], t["plan_by"] = r["plan"], r["agent"]
+                t.setdefault("notes", []).append({"ts": r.get("ts"), "kind": r.get("kind"), "body": r.get("body", ""), "by": r.get("agent")})
+    return data
+
+
+def find_jobs(data: dict, state: dict) -> list[dict]:
+    agents = node.my_agents(CFG)
+    today = f"{now():%Y%m%d}"
+    answers = {a["id"]: a for a in data.get("decisions_answered", [])}
+    jobs = []
+    for t in data.get("topics", []):
+        who = t.get("turn")
+        if who not in agents or t.get("status") not in ACTIVE:
+            continue
+        sig = hashlib.sha1(json.dumps([t["id"], who, t.get("status"), len(t.get("notes", [])), bool(t.get("plan"))],
+                                      ensure_ascii=False).encode()).hexdigest()[:12]
+        st = state.setdefault("topics", {}).setdefault(t["id"], {})
+        if st.get("last_sig") == sig:
+            continue
+        if st.get("day") == today and st.get("count", 0) >= MAX_PER_TOPIC_PER_DAY:
+            continue
+        jobs.append({"kind": "topic", "agent": who, "topic": t, "sig": sig})
+    # 내가 물었던 질문에 아키텍트가 답했으면 다시 깨운다
+    for q in data.get("decisions_needed", []):
+        if q.get("_author") in agents and q["id"] in answers and q["id"] not in state.setdefault("answers_used", []):
+            t = next((x for x in data.get("topics", []) if x["id"] == q.get("task_id")), None)
+            jobs.append({"kind": "answer", "agent": q["_author"], "topic": t, "ask": q, "answer": answers[q["id"]], "sig": f"ans-{q['id']}"})
+    return jobs[:MAX_PER_RUN]
+
+
+# ---------------------------------------------------------------- 지시문
+
+READ_HINT = {
+    "claude": "읽기는 Read·Grep·Glob 도구로 한다. 이 도구들로 필요한 파일을 직접 열어 확인한다.",
+    "codex": "너는 읽기 전용 샌드박스에서 돈다. 읽기 명령(Get-Content, Get-ChildItem, Select-String, rg, type, dir 등)은 실행해도 된다. 쓰기·설치·네트워크·서비스 제어 명령은 막혀 있으니 시도하지 않는다.",
+}
+
+def build_prompt(job: dict, data: dict) -> str:
+    a = node.my_agents(CFG)[job["agent"]]
+    pc = CFG.get("pc", {})
+    pcs = (data.get("meta", {}).get("routing", {}).get("pcs") or {})
+    pc_rule = (pcs.get(pc.get("id")) or {}).get("note") or ""
+    t = job.get("topic") or {}
+    comments = [c for c in data.get("comments", []) if (c.get("target") or {}).get("id") == t.get("id")]
+    notes = "\n".join(f"- [{n.get('ts', '')[:16]}] {n.get('by')} ({n.get('kind')}): {str(n.get('body', ''))[:600]}" for n in t.get("notes", [])[-15:]) or "(없음)"
+    convo = "\n".join(f"- {c.get('_author') or c.get('by')}: {str(c.get('body', ''))[:800]}" for c in comments[-10:]) or "(없음)"
+    plan = json.dumps(t.get("plan"), ensure_ascii=False, indent=1) if t.get("plan") else "(아직 없음)"
+    role = "담당" if t.get("assignee") == job["agent"] else "교차 검토자"
+    ans = ""
+    if job["kind"] == "answer":
+        ans = (f"\n## 아키텍트의 답\n질문: {job['ask'].get('question')}\n답: {job['answer'].get('choice') or ''} {job['answer'].get('note') or ''}\n"
+               "이 답에 따라 다음 행동을 정하라. 답이 승인이면 승인된 범위만 한다.\n")
+    return f"""너는 REAL 프로젝트의 작업자 `{job['agent']}`({pc.get('label')} · {a.get('label')})이다. 이 주제의 {role}로서 다음 행동을 정한다.
+사용자는 '아키텍트'라고 부른다. 모든 글은 한국어로 쓴다.
+
+## 먼저 읽을 것(읽을 수 있으면)
+- 공통 지침: D:\\real-ai-guidelines\\FOUNDATION.md (없으면 로컬 AGENTS.md/CLAUDE.md)
+- 이 PC 규칙: {pc_rule or '로컬 지침의 PC 역할을 따른다'}
+
+## 주제
+- ID: {t.get('id')}  제목: {t.get('title')}
+- 유형: {t.get('kind')} · 우선순위: {t.get('priority')} · 상태: {t.get('status')} · 담당: {t.get('assignee')}
+- 배분 근거: {t.get('dispatch_reason') or '-'}
+- 원래 메모:
+{t.get('body') or '(없음)'}
+
+## 지금까지의 기록
+{notes}
+
+## 진행 베이스
+{plan}
+
+## 아키텍트와의 대화
+{convo}
+{ans}
+## 규칙
+- {READ_HINT[job['runner']]}
+- 파일 수정·설치·재시작·DB 변경·배포·네트워크 사용은 하지 않는다(막혀 있다).
+- 조사가 필요하면 읽기 도구로 실제 파일을 읽고 근거(경로·줄)를 메모에 적는다. 추측은 추측이라고 적는다.
+- 코드 적용·빌드 산출물 설치·서버 재시작·DB 변경·배포·운영 설정 변경이 필요하면 직접 하지 말고 `ask`로 아키텍트에게 질문하고 멈춘다(선택지를 2~4개 준다).
+- 작업물 교환 저장소에 남길 내용이 있으면 `work_note`(work_id 필수, 예: IV-20261002-T1)로 남긴다.
+- 메모 수집 주제라면 찾은 메모를 한 건씩 `propose`로 올린다(비밀값은 [가림]).
+- 이미 끝낸 단계는 다시 하지 않는다. 할 일이 없으면 actions를 비워도 된다.
+
+## 단계 가이드
+1) 담당인데 착수 기록이 없으면 `claim`
+2) 진행 베이스가 없으면 `plan` (goal·scope·inputs·first_steps·risks·done_when)
+3) 교차 검토자면 진행 베이스를 읽고 `note`(kind="review")로 검토 의견
+4) 읽기로 할 수 있는 조사·확인은 해서 결과를 `note`(kind="memo")로
+5) 주제가 요구한 일이 끝났으면 `state`(status="done")
+6) 승인이 필요하면 `ask`
+
+## 답 형식 (이 JSON 하나만 출력. 다른 글 금지)
+{{"summary": "한 줄 요약", "actions": [{{"type": "claim|plan|note|state|work_note|ask|propose", "kind": null, "body": null, "status": null, "plan": null, "work_id": null, "question": null, "options": null, "title": null, "origin": null, "task": null}}]}}
+- 각 action의 쓰지 않는 칸은 null로 둔다.
+"""
+
+
+# ---------------------------------------------------------------- AI 실행
+
+def find_claude() -> list[str] | None:
+    for name in ("claude.cmd", "claude.exe", "claude"):
+        p = shutil.which(name)
+        if p:
+            return ["cmd", "/c", p] if p.lower().endswith(".cmd") else [p]
+    return None
+
+
+def find_codex() -> str | None:
+    p = shutil.which("codex") or shutil.which("codex.exe")
+    if p:
+        return p
+    base = Path(os.environ.get("LOCALAPPDATA", "")) / "OpenAI" / "Codex" / "bin"
+    found = sorted(base.glob("*/codex.exe"), key=lambda x: x.stat().st_mtime, reverse=True) if base.is_dir() else []
+    return str(found[0]) if found else None
+
+
+def read_dirs() -> list[str]:
+    dirs = [d for d in CFG.get("read_dirs", []) if Path(d).is_dir()]
+    for d in (r"D:\real-ai-guidelines", r"D:\real-work"):
+        if Path(d).is_dir() and d not in dirs:
+            dirs.append(d)
+    return dirs
+
+
+def run_ai(agent: dict, prompt: str, tag: str) -> tuple[str, str]:
+    """(결과 JSON 텍스트, 오류) — 오류가 있으면 결과는 빈 문자열."""
+    kind = agent.get("runner") or ("codex" if agent.get("ai") == "gpt" else "claude")
+    out_dir = node.node_dir(CFG) / "runner"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    env = {k: v for k, v in os.environ.items() if k != "REAL_OPS_PASSWORD"}  # AI 프로세스에는 비밀번호를 넘기지 않는다
+    if kind == "claude":
+        exe = find_claude()
+        if not exe:
+            return "", "claude 명령을 찾지 못함"
+        args = exe + ["-p", "--output-format", "json", "--allowedTools", "Read", "Grep", "Glob",
+                      "--disallowedTools", "Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch"]
+        for d in read_dirs():
+            args += ["--add-dir", d]
+        try:
+            r = subprocess.run(args, input=prompt.encode("utf-8"), capture_output=True, timeout=AI_TIMEOUT, cwd=str(ROOT), env=env)
+        except subprocess.TimeoutExpired:
+            return "", "시간 초과"
+        raw = r.stdout.decode("utf-8", errors="replace")
+        (out_dir / f"{tag}.claude.json").write_text(raw + "\n--- stderr ---\n" + r.stderr.decode("utf-8", errors="replace"), encoding="utf-8")
+        if r.returncode != 0:
+            return "", f"claude 종료 코드 {r.returncode}"
+        try:
+            return json.loads(raw).get("result", ""), ""
+        except ValueError:
+            return raw, ""
+    if kind == "codex":
+        exe = find_codex()
+        if not exe:
+            return "", "codex 명령을 찾지 못함"
+        schema = out_dir / "schema.json"
+        schema.write_text(json.dumps(SCHEMA, ensure_ascii=False), encoding="utf-8")
+        last = out_dir / f"{tag}.codex.txt"
+        args = [exe, "exec", "-s", "read-only", "-C", str(ROOT), "--skip-git-repo-check", "--output-schema", str(schema), "-o", str(last), "-"]
+        try:
+            r = subprocess.run(args, input=prompt.encode("utf-8"), capture_output=True, timeout=AI_TIMEOUT, cwd=str(ROOT), env=env)
+        except subprocess.TimeoutExpired:
+            return "", "시간 초과"
+        (out_dir / f"{tag}.codex.log").write_text(r.stdout.decode("utf-8", errors="replace")[-20000:] + "\n--- stderr ---\n" +
+                                                  r.stderr.decode("utf-8", errors="replace")[-20000:], encoding="utf-8")
+        if r.returncode != 0 or not last.exists():
+            return "", f"codex 종료 코드 {r.returncode}"
+        return last.read_text(encoding="utf-8", errors="replace"), ""
+    return "", f"자동 실행 안 함(runner={kind})"
+
+
+def parse_actions(text: str) -> dict:
+    m = re.search(r"\{.*\}", text, re.S)
+    if not m:
+        raise ValueError("JSON 없음")
+    obj = json.loads(m.group(0))
+    if not isinstance(obj, dict) or not isinstance(obj.get("actions"), list):
+        raise ValueError("형식 오류")
+    return obj
+
+
+# ---------------------------------------------------------------- 기록 적용(검증 후)
+
+WORK_PY = Path(r"D:\real-work\work.py")
+
+
+def apply(job: dict, result: dict) -> list[str]:
+    agent, t = job["agent"], job.get("topic") or {}
+    tid = t.get("id")
+    done, work_touched = [], False
+    for a in result.get("actions", [])[:12]:
+        typ = a.get("type")
+        body = (a.get("body") or "").strip()
+        try:
+            if typ == "claim" and tid:
+                node.add_topic_record(CFG, tid, agent, "claim", status="active", body=body or "자동 실행기: 착수")
+            elif typ == "plan" and tid and isinstance(a.get("plan"), dict):
+                p = {k: v for k, v in a["plan"].items() if k in ("goal", "scope", "inputs", "first_steps", "risks", "done_when") and v}
+                node.add_topic_record(CFG, tid, agent, "plan", plan=p, body=body or "진행 베이스 작성(자동 실행기)")
+            elif typ == "note" and tid and body:
+                kind = a.get("kind") if a.get("kind") in ("memo", "review", "question", "answer") else "memo"
+                node.add_topic_record(CFG, tid, agent, kind, body=body[:6000])
+            elif typ == "state" and tid and a.get("status") in STATUSES:
+                node.add_topic_record(CFG, tid, agent, "status", status=a["status"], body=body or f"상태 {a['status']}",
+                                      linked_task_id=a.get("task") if a.get("task") and node.REF_RE.match(a["task"]) else None)
+            elif typ == "ask" and (a.get("question") or "").strip():
+                node.add_ask(CFG, agent, tid, a["question"], a.get("options") or [])
+            elif typ == "propose" and (a.get("title") or "").strip():
+                node.add_proposal(CFG, agent, a["title"], body, a.get("kind") or "기타", "P2", a.get("origin") or "")
+            elif typ == "work_note" and body and a.get("work_id") and WORK_PY.exists():
+                kind = a.get("kind") if a.get("kind") in ("메모", "검토", "검증", "질문", "답변", "적용기록") else "메모"
+                r = subprocess.run([sys.executable, str(WORK_PY), "note", a["work_id"], "--agent", agent, "--kind", kind, "--body", body[:6000]],
+                                   capture_output=True, text=True, encoding="utf-8", errors="replace")
+                if r.returncode != 0:
+                    done.append(f"작업물 메모 실패: {r.stdout.strip() or r.stderr.strip()}")
+                    continue
+                work_touched = True
+            else:
+                done.append(f"건너뜀({typ})")
+                continue
+            done.append(typ)
+        except SystemExit as exc:  # node.py 검증 실패
+            done.append(f"{typ} 거부: {exc}")
+    if work_touched:
+        r = subprocess.run([sys.executable, str(WORK_PY), "sync", "--agent", agent, "--message", f"자동 실행기 {tid or ''}"],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace")
+        done.append("작업물 올림" if r.returncode == 0 else f"작업물 올리기 실패: {r.stdout.strip()[-300:]}")
+    return done
+
+
+# ---------------------------------------------------------------- 실행
+
+def main():
+    for s in (sys.stdout, sys.stderr):
+        try:
+            s.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--password-file")
+    args = ap.parse_args()
+    global CFG
+    CFG = node.load_cfg()
+    if CFG.get("runner_enabled") is False:
+        print("자동 실행기 꺼짐(config runner_enabled=false)")
+        return
+    pw = Path(args.password_file).read_text(encoding="utf-8").strip() if args.password_file else os.environ.get("REAL_OPS_PASSWORD")
+    if not pw:
+        sys.exit("비밀번호가 필요합니다(REAL_OPS_PASSWORD).")
+    lock = node.node_dir(CFG) / "runner.lock"
+    if lock.exists() and (now().timestamp() - lock.stat().st_mtime) < 90 * 60 and not args.dry_run:
+        print("실행 중인 실행기가 있어 건너뜀")
+        return
+    state_path = node.node_dir(CFG) / "runner-state.json"
+    state = node.read_json(state_path, {}) or {}
+    data = load_data(pw)
+    jobs = find_jobs(data, state)
+    if not jobs:
+        print("깨울 일 없음")
+        return
+    if args.dry_run:
+        for j in jobs:
+            print(f"[깨울 예정] {j['agent']} ← {j['kind']} {(j.get('topic') or {}).get('id')} {(j.get('topic') or {}).get('title')}")
+        return
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text(str(os.getpid()))
+    try:
+        for j in jobs:
+            agent = node.my_agents(CFG)[j["agent"]]
+            t = j.get("topic") or {}
+            tag = f"{now():%Y%m%d-%H%M%S}-{j['agent']}-{t.get('id') or 'answer'}"
+            log(f"깨움 {j['agent']} ← {t.get('id')} {t.get('title')}")
+            j["runner"] = agent.get("runner") or ("codex" if agent.get("ai") == "gpt" else "claude")
+            text, err = run_ai(agent, build_prompt(j, data), tag)
+            st = state.setdefault("topics", {}).setdefault(t.get("id") or j["sig"], {})
+            today = f"{now():%Y%m%d}"
+            st["count"] = (st.get("count", 0) + 1) if st.get("day") == today else 1
+            st["day"] = today
+            if err:
+                log(f"  실패: {err}")
+                st["last_error"] = err
+                if t.get("id"):  # 대시보드에서도 보이게 남긴다
+                    node.add_topic_record(CFG, t["id"], j["agent"], "memo", body=f"자동 실행기: AI를 깨우지 못함 — {err}")
+                st["last_sig"] = j["sig"]
+                continue
+            try:
+                result = parse_actions(text)
+            except ValueError as exc:
+                log(f"  답 해석 실패: {exc}")
+                st["last_error"] = f"답 해석 실패: {exc}"
+                st["last_sig"] = j["sig"]
+                continue
+            done = apply(j, result)
+            if j["kind"] == "answer":
+                state.setdefault("answers_used", []).append(j["ask"]["id"])
+            st["last_sig"] = j["sig"]
+            st["last_result"] = {"summary": result.get("summary", "")[:300], "actions": done, "at": now().isoformat(timespec="seconds")}
+            log(f"  결과: {result.get('summary', '')[:200]} · 적용 {', '.join(done) or '없음'}")
+    finally:
+        node.write_json(state_path, state)
+        lock.unlink(missing_ok=True)
+
+
+CFG: dict = {}
+
+if __name__ == "__main__":
+    main()

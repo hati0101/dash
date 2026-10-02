@@ -15,6 +15,15 @@ $lock = Join-Path $PSScriptRoot '.local/sync.lock'
 if ((Test-Path $lock) -and ((Get-Date) - (Get-Item $lock).LastWriteTime).TotalMinutes -lt 20) { Log '이전 동기화 실행 중 — 건너뜀'; return }
 Set-Content $lock $PID
 
+# 자동 실행기: 이 PC 작업자 차례인 일이 있으면 그 AI를 화면 없이 깨운다. 따로 돌게 띄워 동기화는 바로 끝난다.
+# (비밀번호 환경 변수는 실행기에만 이어지고, 실행기는 AI 프로세스에 넘기지 않는다)
+function Start-Runner {
+  if (-not (Test-Path (Join-Path $PSScriptRoot 'runner.py'))) { return }
+  try {
+    Start-Process -FilePath 'python' -ArgumentList 'runner.py' -WorkingDirectory $PSScriptRoot -WindowStyle Hidden
+  } catch { Log ('자동 실행기 시작 실패: ' + $_.Exception.Message) }
+}
+
 function Push-Safely([string[]]$paths) {
   # 자기 파일만 올린다. 다른 PC가 먼저 올렸으면 받아서 다시 시도한다(한 번).
   foreach ($try in 1..2) {
@@ -41,6 +50,7 @@ try {
     $pcid = $cfg.pc.id
     $out = Py 'node.py inbox'
     if ($LASTEXITCODE) { Log "수신 전달 실패: $out" } elseif ($out -notmatch '새 전달 0건') { Log "수신 전달: $out" }
+    Start-Runner
     $out = Py 'node.py pack --if-changed'
     if ($LASTEXITCODE -eq 10) { return }
     if ($LASTEXITCODE) { Log "기록 암호화 실패: $out"; return }
@@ -65,6 +75,7 @@ try {
   if ($LASTEXITCODE) { Log "자동 배분 실패: $out" } elseif ($out -notmatch '자동 배분 0건') { Log "자동 배분: $out" }
   $out = Py 'topics.py announce'
   if ($out -notmatch '새 알림 0건') { Log "알림: $out" }
+  Start-Runner
 
   $out = Py 'build.py --skip-unchanged'
   if ($LASTEXITCODE -eq 10) { return }

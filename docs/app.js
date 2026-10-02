@@ -468,11 +468,17 @@ function sidebar() {
     sources: data.sources.filter(s => !s.ok && !/선택/.test(s.error || '')).length || null,
   };
   const hot = { topics: true, messages: true, sources: true };
-  const srcRows = data.sources.filter(s => !/선택/.test(s.error || '') || s.count).map(s => {
-    const stale = s.last_modified && hoursSince(s.last_modified) > 48;
-    return h('button', { class: 'src-row', title: `${s.name} · ${s.count}건 · ${fmtRel(s.last_modified)}`, onclick: () => go('sources') },
-      h('span', { class: 'src-name' }, s.name), h('span', { class: `dot${!s.ok ? ' bad' : stale ? ' warn' : ''}`, 'aria-label': !s.ok ? '오류' : stale ? '오래됨' : '정상' }));
-  });
+  // 출처는 한 줄 요약만 두고, 문제가 있는 출처만 아래에 따로 보여 준다(목록이 길어 스크롤이 생기지 않게)
+  const srcs = data.sources.filter(s => !/선택/.test(s.error || '') || s.count);
+  const srcState = s => (!s.ok ? 'bad' : s.last_modified && hoursSince(s.last_modified) > 48 ? 'warn' : '');
+  const bad = srcs.filter(s => srcState(s));
+  const srcRows = [
+    h('button', { class: 'src-row', title: '연결 화면에서 전체 보기', onclick: () => go('sources') },
+      h('span', { class: 'src-name' }, `출처 ${srcs.length}곳 · 정상 ${srcs.length - bad.length}`),
+      h('span', { class: `dot${bad.some(s => srcState(s) === 'bad') ? ' bad' : bad.length ? ' warn' : ''}` })),
+    bad.slice(0, 3).map(s => h('button', { class: 'src-row', title: `${s.name} · ${s.error || '48시간 넘게 변화 없음'}`, onclick: () => go('sources') },
+      h('span', { class: 'src-name muted' }, s.name), h('span', { class: `dot ${srcState(s)}` }))),
+  ];
   return h('nav', { class: 'side', 'aria-label': '주 메뉴' },
     h('div', { class: 'side-brand' }, h('span', { class: 'brand-mark', 'aria-hidden': 'true' }), data.meta.project || 'REAL 운영체제'),
     NAV.map(n => h('button', { class: 'nav-btn', 'aria-current': S.view === n.id ? 'page' : null, onclick: () => go(n.id) },

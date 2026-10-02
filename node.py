@@ -205,6 +205,50 @@ def cmd_propose(args, cfg):
     print(f"메모 올림 {pid}: {title} — 다음 동기화 때 허브가 미처리 주제로 가져갑니다")
 
 
+def add_ask(cfg, agent: str, topic: str | None, question: str, options: list[str]) -> str:
+    """아키텍트 승인·결정이 필요할 때 질문을 남긴다. 허브가 대시보드 '결정이 필요한 문제'에 올린다."""
+    import secrets
+    check_agent(cfg, agent)
+    q = question.strip()[:1000]
+    if not q:
+        sys.exit("질문이 비어 있습니다.")
+    rec = load_records(cfg)
+    rec.setdefault("asks", [])
+    aid = f"DN-{agent}-{datetime.now(KST):%Y%m%d}-{secrets.token_hex(3)}"
+    rec["asks"].append({"id": aid, "agent": agent, "topic": topic if topic and TOPIC_RE.match(topic) else None,
+                        "question": q, "options": [str(o)[:200] for o in (options or [])][:6], "ts": now_iso()})
+    rec["asks"] = rec["asks"][-500:]
+    rec["agents"][agent]["last_seen"] = now_iso()
+    rec["updated_at"] = now_iso()
+    write_json(records_path(cfg), rec)
+    return aid
+
+
+def add_proposal(cfg, agent: str, title: str, body: str, kind: str = "기타", priority: str = "P2", origin: str = "") -> str | None:
+    import secrets
+    check_agent(cfg, agent)
+    title = (title or "").strip()[:200]
+    if not title:
+        return None
+    rec = load_records(cfg)
+    if any(p.get("title") == title and p.get("agent") == agent for p in rec["proposals"]):
+        return None
+    pid = f"P-{pc_info(cfg)['id']}-{datetime.now(KST):%Y%m%d}-{secrets.token_hex(3)}"
+    rec["proposals"].append({"id": pid, "agent": agent, "title": title, "body": (body or "").strip()[:8000],
+                             "kind": kind if kind in ("기능·개선", "버그", "조사·분석", "디자인", "운영·도구", "기타") else "기타",
+                             "priority": priority if priority in ("P0", "P1", "P2", "P3") else "P2",
+                             "origin": (origin or "")[:300], "ts": now_iso()})
+    rec["proposals"] = rec["proposals"][-2000:]
+    rec["updated_at"] = now_iso()
+    write_json(records_path(cfg), rec)
+    return pid
+
+
+def cmd_ask(args, cfg):
+    aid = add_ask(cfg, args.agent, args.topic, args.question, [o for o in (args.option or []) if o])
+    print(f"질문 남김 {aid} — 다음 동기화 때 대시보드 '결정이 필요한 문제'에 올라갑니다")
+
+
 def cmd_claim(args, cfg):
     add_topic_record(cfg, args.id, args.agent, "claim", status="active", body=args.note or "착수")
     print(f"{args.id}: {args.agent} 착수")
@@ -377,6 +421,7 @@ def collect_nodes(cfg: dict, pw: str | None) -> list[dict]:
         rec["agents"] = {k: v for k, v in (rec.get("agents") or {}).items() if k.startswith(pcid + "-")}
         rec["topic_records"] = [r for r in rec.get("topic_records") or [] if str(r.get("agent", "")).startswith(pcid + "-")]
         rec["proposals"] = [p for p in rec.get("proposals") or [] if str(p.get("agent", "")).startswith(pcid + "-")]
+        rec["asks"] = [q for q in rec.get("asks") or [] if str(q.get("agent", "")).startswith(pcid + "-")]
         rec["pc"] = pcid
         rec["source"] = f.name
         out.append(rec)
@@ -412,6 +457,8 @@ def main():
     p.add_argument("--agent", required=True); p.add_argument("--title", required=True); p.add_argument("--body")
     p.add_argument("--kind", default="기타", choices=["기능·개선", "버그", "조사·분석", "디자인", "운영·도구", "기타"])
     p.add_argument("--priority", default="P2", choices=["P0", "P1", "P2", "P3"]); p.add_argument("--origin", help="원래 메모 위치(예: 스티커 메모, 파일 경로)")
+    p = sub.add_parser("ask", help="아키텍트 결정·승인이 필요한 질문 남기기(대시보드 '결정이 필요한 문제')")
+    p.add_argument("--agent", required=True); p.add_argument("--topic"); p.add_argument("--question", required=True); p.add_argument("--option", action="append")
     p = sub.add_parser("claim"); p.add_argument("id"); p.add_argument("--agent", required=True); p.add_argument("--note")
     p = sub.add_parser("plan"); p.add_argument("id"); p.add_argument("--agent", required=True)
     p.add_argument("--goal"); p.add_argument("--scope", action="append"); p.add_argument("--input", action="append")
@@ -423,7 +470,7 @@ def main():
     p.add_argument("--status", required=True, choices=STATUSES); p.add_argument("--task"); p.add_argument("--note")
     args = ap.parse_args()
     cfg = load_cfg()
-    {"init": cmd_init, "status": cmd_status, "mine": cmd_mine, "inbox": cmd_inbox, "pack": cmd_pack, "claim": cmd_claim, "propose": cmd_propose,
+    {"init": cmd_init, "status": cmd_status, "mine": cmd_mine, "inbox": cmd_inbox, "pack": cmd_pack, "claim": cmd_claim, "propose": cmd_propose, "ask": cmd_ask,
      "plan": cmd_plan, "note": cmd_note, "state": cmd_state}[args.cmd](args, cfg)
 
 

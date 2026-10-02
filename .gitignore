@@ -11,6 +11,7 @@
 !/sync.ps1
 !/setup-auto.ps1
 !/node.py
+!/runner.py
 !/routing.example.json
 !/서버컴-연결.md
 !/docs/
