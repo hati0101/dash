@@ -430,6 +430,12 @@ function derive(data) {
   if (lateGates.length) missed.push({ key: `gate-late:${lateGates.map(q => q.id).sort().join(',')}`, level: 'warn', icon: 'scale',
     title: `★ 관문 ${lateGates.length}건이 ${GATE_LATE_H}시간 넘게 대기`, sub: `가장 오래: ${(topics.find(t => t.id === lateGates[0].task_id) || {}).title || lateGates[0].task_id} · ${waitText(lateGates[0].since)}`,
     go: () => { S.f.mine = 'gate'; S.mineSel = null; go('mine'); } });
+  // 실행기 멈춤: AI 차례인데 실행기가 같은 사유로 계속 건너뛰거나, 처리한 뒤 한 시간 넘게 변화가 없는 주제(2026-10-03)
+  for (const a of data.agents || []) for (const s of (a.queue || {}).stalled || []) {
+    const t = topics.find(x => x.id === s.topic);
+    if (t) missed.push({ key: `stall:${s.topic}:${s.since || ''}`, level: 'bad', icon: 'alert', title: `실행기 멈춤: ${t.title}`,
+      sub: `${person(a.id).name} · ${s.reason || '원인 미상'}`, go: () => openTopic(t) });
+  }
   const staleMin = data.meta.routing?.stale_minutes || 120;
   for (const a of data.agents || []) {
     const mine = topics.filter(t => t.assignee === a.id && !['done', 'parked', 'dropped'].includes(t.status));
@@ -1388,6 +1394,7 @@ function topicFlow(t, asking) {
   if ((t.conflict || []).length) why.push('중복 착수');
   if (t.assignee && lockOf(t.assignee)) why.push('담당 멈춤');
   if (t.status === 'active' && hoursSince(t.updated_at) > 24) why.push('24시간 멈춤');
+  if (queueCode(t) === 'stalled') why.push('실행기 멈춤');
   if (why.length) return { col: 'blocked', why };
   if (t.turn && t.assignee && t.turn !== t.assignee) return { col: 'validating', why: [] };
   if (t.plan && t.turn === t.assignee && ['ready', 'active'].includes(t.status)) return { col: 'progress', why: [] };
@@ -1942,8 +1949,16 @@ function topicPhase(t) {
     return { cls: 'progress', icon: 'arrow', label: `인계받음 · ${name(who)}`, detail: `${name(t.handoff.from)} → ${name(t.handoff.to)}: ${t.handoff.reason || '-'}${partial}`, next: `${name(who)} — 이어서 처리` };
   if (who && who !== t.assignee) return { cls: 'validating', icon: 'eye', label: `교차 검토 대기 · ${name(who)}`, detail: partial.slice(3) || null, next: `${name(who)} — 진행 베이스 검토` };
   if (!t.plan) return { cls: 'request', icon: 'file', label: `진행 베이스 작성 · ${name(who)}`, detail: partial.slice(3) || null, next: `${name(who)} — 목표·범위·첫 단계 작성` };
-  return { cls: 'progress', icon: 'play', label: `${t.step ? '2/9 ' : ''}진행 중 · ${name(who)}`, detail: partial.slice(3) || null, next: `${name(who)} — 다음 동기화 때 이어서` };
+  const qc = queueCode(t);
+  if (qc === 'stalled') { const s = stallOf(t); return { cls: 'blocked', icon: 'alert', label: `실행기 멈춤 · ${name(who)}`, detail: `${s?.reason || '원인 미상'}${s?.since ? ` (${fmtRel(s.since)}부터)` : ''}`, next: '아키텍트 — 개발컴 Claude에게 확인 요청(자동으로 다시 깨우지 않음)' }; }
+  return { cls: 'progress', icon: 'play', label: `${t.step ? '2/9 ' : ''}진행 중 · ${name(who)}`, detail: partial.slice(3) || null, next: `${name(who)} — ${QUEUE_NEXT[qc] || '다음 동기화 때 이어서'}` };
 }
+// 실행기가 올린 주제별 판정(작업자 기록 queue.items). '다음' 문구를 실행기 실제 판정과 같게 한다
+const QUEUE_NEXT = { runnable: '다음 동기화 때 이어서', retry: '실패 뒤 재시도 대기(10~30분)', limit: '오늘 실행 한도(10회) 도달 — 내일 이어서',
+  waiting_answer: '아키텍트 답을 기다림', waiting_change: '이 단계는 처리함 — 다른 작업자 기록·아키텍트 답이 오면 이어서', held: '대화 세션이 처리 중' };
+function queueOf(t) { return ((S.data.agents || []).find(a => a.id === t.turn) || {}).queue || null; }
+function queueCode(t) { const q = queueOf(t); return q && q.items ? q.items[t.id] || null : null; }
+function stallOf(t) { const q = queueOf(t); return q && (q.stalled || []).find(x => x.topic === t.id) || null; }
 function phaseLine(t, compact) {
   const p = topicPhase(t);
   return h('div', { class: `phase ${p.cls}${compact ? ' compact' : ''}` }, icon(p.icon),

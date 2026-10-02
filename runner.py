@@ -1031,6 +1031,18 @@ def mark_done(st: dict, j: dict):
         st["last_sig"], st["last_parts"] = j["sig"], j.get("parts") or st.get("last_parts")
 
 
+def note_skip(st: dict, agent_id: str, tid: str, reason: str):
+    """건너뜀을 주제 상태에 센다. 같은 사유는 처음 한 번과 60회마다만 로그에 남긴다(매분 같은 줄이 쌓이지 않게).
+    3회 넘게 같은 사유로 건너뛰면 대시보드에 '실행기 멈춤'으로 올라간다(queue_summary → stalled)."""
+    if st.get("skip_reason") != reason:
+        st.update(skip_reason=reason, skip_count=1, skip_since=now().isoformat(timespec="seconds"))
+        log(f"건너뜀 {agent_id} ← {tid}: {reason}")
+        return
+    st["skip_count"] = st.get("skip_count", 1) + 1
+    if st["skip_count"] % 60 == 0:
+        log(f"건너뜀 {agent_id} ← {tid}: {reason} (같은 사유 {st['skip_count']}회째, {st.get('skip_since')}부터)")
+
+
 def run_job(j: dict, data: dict, state: dict) -> bool:
     agent_id = j["agent"]
     agent = node.my_agents(CFG)[agent_id]
@@ -1039,14 +1051,16 @@ def run_job(j: dict, data: dict, state: dict) -> bool:
     # 실행 직전 재확인: 그 사이 대화 세션이 잡았거나 이 PC에서 끝낸 주제는 건너뛴다
     if t.get("id"):
         if t["id"] in node.active_holds(CFG):
-            log(f"건너뜀 {agent_id} ← {t['id']}: 대화 세션이 잡고 있음")
+            note_skip(st, agent_id, t["id"], "대화 세션이 잡고 있음")
             return False
         fresh = {"topics": [copy.deepcopy(t)], "meta": data.get("meta", {}), "agents": data.get("agents", [])}
         overlay_local(fresh, node.load_records(CFG))
         if fresh["topics"][0].get("status") in ("done", "parked", "dropped"):
-            log(f"건너뜀 {agent_id} ← {t['id']}: 이미 {fresh['topics'][0]['status']}")
+            note_skip(st, agent_id, t["id"], f"이 PC 기록상 이미 {fresh['topics'][0]['status']}")
             mark_done(st, j)
             return False
+    for k in ("skip_reason", "skip_count", "skip_since"):  # 실제로 깨우면 건너뜀 기록은 지운다
+        st.pop(k, None)
     started = now()
     tag = f"{started:%Y%m%d-%H%M%S}-{agent_id}-{t.get('id') or 'answer'}"
     log(f"깨움 {agent_id} ← {t.get('id')} {t.get('title')} · 이유: {j.get('reason')} · {j.get('mode')}")
@@ -1123,25 +1137,36 @@ def queue_summary(aid: str, data: dict, state: dict) -> dict:
     answered = {a["id"] for a in data.get("decisions_answered", [])}
     asking = {q.get("task_id") for q in data.get("decisions_needed", []) if q.get("_author") == aid and q["id"] not in answered}
     holds, stamp, today = node.active_holds(CFG), now().isoformat(timespec="seconds"), f"{now():%Y%m%d}"
-    out = {"total": 0, "runnable": 0, "waiting_answer": 0, "waiting_change": 0, "retry": 0, "limit": 0, "held": 0}
+    out = {"total": 0, "runnable": 0, "waiting_answer": 0, "waiting_change": 0, "retry": 0, "limit": 0, "held": 0, "stalled": 0}
+    items, stalled = {}, []  # 주제별 판정(대시보드 '다음' 문구가 실행기 판정과 같게) · 멈춘 주제
     for t in data.get("topics", []):
         if t.get("turn") != aid or t.get("status") not in ACTIVE:
             continue
         out["total"] += 1
         st = (state.get("topics") or {}).get(t["id"], {})
         if t["id"] in holds or t.get("live_session"):
-            out["held"] += 1  # 대화 세션 몫(실게임 시험 단계 포함)
+            code = "held"  # 대화 세션 몫(실게임 시험 단계 포함)
+        elif (st.get("skip_count") or 0) >= 3:
+            code = "stalled"
+            stalled.append({"topic": t["id"], "reason": st.get("skip_reason"), "since": st.get("skip_since")})
         elif t["id"] in runnable:
-            out["runnable"] += 1
+            code = "runnable"
         elif (st.get("retry_after") or "") > stamp:
-            out["retry"] += 1
+            code = "retry"
         elif st.get("day") == today and st.get("count", 0) >= MAX_PER_TOPIC_PER_DAY:
-            out["limit"] += 1
+            code = "limit"
         elif t["id"] in asking:
-            out["waiting_answer"] += 1
+            code = "waiting_answer"
         else:
-            out["waiting_change"] += 1  # 이미 처리함 — 다른 작업자 기록·아키텍트 대화를 기다림
+            code = "waiting_change"  # 이미 처리함 — 다른 작업자 기록·아키텍트 대화를 기다림
+            last = ((st.get("last_result") or {}).get("at")) or ""
+            if last and (now() - datetime.fromisoformat(last)).total_seconds() > 3600:
+                code = "stalled"  # 내 차례인데 같은 단계를 처리한 뒤 한 시간 넘게 아무 변화가 없음 → 다시 깨우지 않으므로 멈춤
+                stalled.append({"topic": t["id"], "reason": "같은 단계를 처리했는데 차례가 그대로라 다시 깨우지 않음", "since": last})
+        items[t["id"]] = code
+        out[code] = out.get(code, 0) + 1
     out["answers"] = sum(1 for j in find_jobs(data, copy.deepcopy(state), only=aid) if j["kind"] == "answer")
+    out["items"], out["stalled"] = items, stalled
     return out
 
 
