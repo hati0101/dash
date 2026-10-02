@@ -118,27 +118,30 @@ def overlay_local(data: dict, rec: dict):
     """이 PC 기록 중 게시본에 아직 없는 것을 반영한다.
     상태는 '게시본이 상태를 정한 시각(status_at)'보다 나중 기록만 이긴다. 그래서 허브가 이 PC 기록을 받기 전에
     게시본을 만들었더라도, 이 PC에서 끝낸(done) 주제를 다시 깨우지 않는다."""
-    from topics import whose_turn
-    gen = (data.get("meta") or {}).get("generated_at") or ""
+    from topics import whose_turn, to_dt
+    # 시각은 반드시 실제 시각으로 비교한다. 이 PC 기록은 +09:00, 아키텍트 답은 Z(세계 표준시)라 글자로 비교하면
+    # "18:47 끝냄"이 "10:34Z(=19:34) 관문 답"보다 나중으로 잘못 판정된다(2026-10-03, 관문 답으로 다시 연 주제를 계속 건너뛴 결함)
+    gen = to_dt((data.get("meta") or {}).get("generated_at"))
     known = {a.get("id") for a in data.get("agents", [])} | set(node.my_agents(CFG))
     mine: dict[str, list] = {}
     for r in rec.get("topic_records", []):
         mine.setdefault(r.get("topic"), []).append(r)
     for t in data.get("topics", []):
-        rows = sorted(mine.get(t["id"], []), key=lambda r: r.get("ts") or "")
+        rows = sorted(mine.get(t["id"], []), key=lambda r: to_dt(r.get("ts")))
         if not rows:
             continue
         seen = {(n.get("ts"), n.get("by"), n.get("kind")) for n in t.get("notes", [])}
         changed = False
         for r in rows:
             ts = r.get("ts") or ""
-            if r.get("status") in STATUSES and ts > (t.get("status_at") or "") and t.get("status") != "dropped":
+            when = to_dt(ts)
+            if r.get("status") in STATUSES and when > to_dt(t.get("status_at")) and t.get("status") != "dropped":
                 t["status"], t["status_at"], changed = r["status"], ts, True
-            if r.get("plan") and (not t.get("plan") or ts > gen):
+            if r.get("plan") and (not t.get("plan") or when > gen):
                 t["plan"], t["plan_by"], changed = r["plan"], r["agent"], True
-            if r.get("work_id") and r.get("kind") in ("work", "handoff") and ts > gen:
+            if r.get("work_id") and r.get("kind") in ("work", "handoff") and when > gen:
                 t["work_id"] = r["work_id"]
-            if r.get("kind") == "handoff" and r.get("to") in known and ts > max(gen, (t.get("handoff") or {}).get("ts") or ""):
+            if r.get("kind") == "handoff" and r.get("to") in known and when > max(gen, to_dt((t.get("handoff") or {}).get("ts"))):
                 t["assignee"], t["assign_by"], changed = r["to"], "handoff", True
                 t["handoff"] = {"from": r.get("agent"), "to": r["to"], "ts": ts, "reason": (r.get("body") or "")[:300]}
             if r.get("kind") == "request" and r.get("to") in known and r.get("req_id") and r["req_id"] not in {x.get("id") for x in t.get("requests") or []}:
