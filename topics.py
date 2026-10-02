@@ -605,6 +605,101 @@ def user_assigns(cfg: dict | None) -> dict:
     return out
 
 
+# ---------------------------------------------------------------- 단계·관문 (아키텍트 결정 2026-10-02, 정정본)
+# 1 등록 → 2 진행 → 3 AI 자체 시험(자동, 관문 없음) → ★4 실게임 시험 → ★5 배포본 결정 → 6 배포본 작성(AI)
+# → ★7 운영 반영 승인 → 8 운영 반영(서버컴) → ★9 완료 확정.  ★ = 아키텍트 관문(내 차례에 자동으로 올라옴).
+# AI는 done을 직접 만들지 못한다. AI의 '끝냄'(state done)은 다음 단계·관문으로 넘기는 신호다. 완료(done)는 ★9에서만.
+# 조사·분석 주제는 시험·배포가 없으므로 2 진행을 끝내면 바로 ★결과 확인(후속 구현 / 보류 / 완료 확정)으로 온다.
+GATE_LABEL = {4: "실게임 시험", 5: "배포본 결정", 7: "운영 반영 승인", 9: "완료 확정", 40: "결과 확인"}
+STAGE_STEP = {"work": (2, "진행"), "test": (3, "AI 자체 시험"), "pack": (6, "배포본 작성"), "deploy": (8, "운영 반영")}
+STAGE_GATE = {"test": 4, "pack": 7, "deploy": 9}  # 그 단계에서 AI가 끝내면 열리는 관문(진행은 자체 시험으로 자동으로 넘어감)
+
+
+# 시험·배포할 것이 없는 주제: 조사·분석 종류, 제목이 기획·구상·조사·연구·검토·연결 시험·메모 수집인 것
+NO_TEST_RE = re.compile(r"기획|구상|조사|연구|분석|검토|여부|\[연결 시험\]|\[메모 수집\]|실사용 시험|자동실행 테스트")
+NO_TEST_SAID = re.compile(r"시험할 것 없음|배포할 것 없음|바꾼 파일 없음")
+
+
+def is_research(t: dict, body: str = "") -> bool:
+    """True면 2 진행을 끝냈을 때 3 자체 시험을 건너뛰고 바로 ★결과 확인. AI가 끝냄 요약에 '시험할 것 없음'이라고 적어도 같다."""
+    return t.get("kind") == "조사·분석" or bool(NO_TEST_RE.search(t.get("title") or "")) or bool(NO_TEST_SAID.search(body or ""))
+
+
+def gate_options(n: int, t: dict, tested: bool = False) -> list[str]:
+    return {4: ["통과", "문제 있음(메모에 내용 적기 → 진행으로 되돌림)", "보류"],
+            5: ["배포본 만들기", "보류", "수정"],
+            7: ["서버컴에 반영", "보류"],
+            9: ["완료 확정", "문제 있음(진행으로 되돌림)"],
+            40: ["후속 구현 주제 만들기", "보류", "완료 확정(배포할 것 없음)"]}[n]
+
+
+def gate_action(n: int, ans: dict) -> str:
+    """관문 답 → 다음: work|pack|deploy|park|done|open5. 선택지 없이 메모만 오면 수정(진행으로)."""
+    c = ans.get("choice") or ""
+    if "보류" in c:
+        return "park"
+    if n == 4:
+        return "open5" if c.startswith("통과") else "work"
+    if n == 5:
+        return "pack" if "배포본" in c else "work"
+    if n == 7:
+        return "deploy" if "서버컴" in c else "park"
+    if n == 40:
+        return "done" if "완료 확정" in c else "work"
+    return "done" if c.startswith("완료") else "work"
+
+
+def gate_id(n: int, tid: str, ts) -> str:
+    return f"G{n}-{tid[2:]}-{to_dt(ts).astimezone(KST):%Y%m%d%H%M%S}"
+
+
+def run_gates(t: dict, finishes: list, answered: dict) -> dict:
+    """AI의 끝냄 기록과 아키텍트 관문 답을 시간순으로 따라가 지금 단계·관문을 정한다."""
+    stage, since, gate, history, final = "work", None, None, [], None
+    fin = sorted(finishes, key=lambda f: to_dt(f[0]))
+    for _ in range(300):
+        if gate is None:
+            nxt = next((f for f in fin if since is None or to_dt(f[0]) > to_dt(since)), None)
+            if not nxt:
+                break
+            ts, by, body = nxt
+            since = ts
+            if stage == "work" and not is_research(t, body):
+                stage = "test"  # 진행 끝 → AI 자체 시험(관문 없음)
+                continue
+            n = 40 if stage == "work" else STAGE_GATE[stage]
+            gate = {"n": n, "id": gate_id(n, t["id"], ts), "opened_at": ts, "by": by, "summary": body, "from_stage": stage}
+        ans = answered.get(gate["id"])
+        if not ans:
+            break
+        act = gate_action(gate["n"], ans)
+        history.append({**gate, "choice": ans.get("choice"), "note": ans.get("note"), "answered_at": ans.get("ts"), "act": act})
+        since = ans.get("ts") or since
+        prev, gate = gate, None
+        if act in ("park", "done"):
+            final = act
+            break
+        if act == "open5":
+            gate = {"n": 5, "id": gate_id(5, t["id"], since), "opened_at": since, "by": prev["by"], "summary": prev["summary"], "from_stage": prev["from_stage"]}
+            continue
+        stage = act
+    return {"stage": stage, "since": since, "gate": gate, "history": history[-10:], "final": final}
+
+
+def stage_owner(stage: str, t: dict, known) -> str | None:
+    """단계별로 움직일 작업자: 격리 시험·배포본은 개발컴, 운영 반영은 서버컴(메인 Astra)."""
+    peers = sorted(known or [])
+    a = t.get("assignee") or LEAD
+    if stage in ("test", "pack"):
+        return a if a.startswith("dev-") else LEAD
+    if stage == "deploy":
+        for cand in ("server-astra", *[p for p in peers if p.startswith("server-")]):
+            if cand in (known or {cand}):
+                return cand
+    return None
+
+
+
 def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict] | None = None, known: set | None = None) -> list[dict]:
     """주제 원본 + 허브 작성자 파일(claude/astra) + 다른 PC 작업자 기록 + 사용자 지정 담당을 합친다."""
     out = []
@@ -618,6 +713,7 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
     activations = {r.get("topic") for r in urec.get("topic_activate", [])}
     edits = {r.get("topic"): r for r in urec.get("topic_edit", [])}
     drops = {r.get("topic"): r for r in urec.get("topic_drop", [])}
+    gate_answers = {r.get("id"): r for r in urec.get("decisions_answered", []) if str(r.get("id", "")).startswith("G")}
     by_topic: dict[str, list[dict]] = {}
     for r in node_records or []:
         by_topic.setdefault(r.get("topic"), []).append(r)
@@ -645,10 +741,13 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
         handoff = None
         plan_ts: dict[str, str] = {}
         requests: dict[str, dict] = {}  # 요청 ID → 요청(담당은 그대로 두고 다른 작업자에게 자료·확인을 부탁)
+        finishes: list[tuple] = []  # AI의 '끝냄'(state done) — 다음 관문을 여는 신호
         for _ts, a, r in sorted(events, key=lambda e: e[0] or ""):
             if r.get("status") in STATUSES:
                 t["status"] = r["status"]
                 t["status_at"] = _ts  # 실행기가 '이 PC에서 더 나중에 바꾼 상태'를 판단하는 기준
+                if r["status"] == "done":
+                    finishes.append((_ts, a, (r.get("body") or "")[:2000]))
             if r.get("work_id") and r.get("kind") in ("work", "handoff"):
                 t["work_id"] = r["work_id"]  # 주제 하나에 작업물 하나: 가장 최근 연결
             if r.get("kind") == "request" and r.get("to") and r.get("req_id"):
@@ -687,6 +786,22 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
             t["status"] = "backlog"
             if t["status"] == "new":
                 t["status"] = "triage"
+        if finishes:  # 단계·관문: AI 끝냄은 다음 단계·관문으로, 완료는 아키텍트 ★9(조사·분석은 결과 확인)에서만
+            g = run_gates(t, finishes, gate_answers)
+            t["gate_history"] = g["history"]
+            if g["gate"]:
+                gt = g["gate"]
+                gt.update(label=GATE_LABEL[gt["n"]], options=gate_options(gt["n"], t), step=4 if gt["n"] == 40 else gt["n"])
+                t["gate"], t["status"], t["status_at"] = gt, "review_user", gt["opened_at"]
+            elif g["final"]:
+                t["status"], t["confirmed"] = ("done", True) if g["final"] == "done" else ("parked", False)
+                t["status_at"] = g["since"]
+            else:
+                t["status"], t["stage"] = "active", g["stage"]
+                t["status_at"] = g["since"]
+                t["stage_owner"] = stage_owner(g["stage"], t, known)
+            step = (t["gate"]["step"], t["gate"]["label"] + " 대기") if t.get("gate") else STAGE_STEP.get(t.get("stage") or "work")
+            t["step"] = {"n": step[0], "label": step[1]} if t["status"] not in ("done", "parked") else None
         ed = edits.get(t["id"])
         if ed:  # 아키텍트 수정본이 원본·작업자 기록보다 우선
             t["title"], t["body"] = ed.get("title") or t.get("title"), ed.get("body", t.get("body"))
@@ -703,6 +818,11 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
             t["plan"], t["plan_by"], t["plan_at"] = plans[planner], planner, plan_ts.get(planner)
         reqs = [q for q in requests.values() if AGENT_RE.match(q["to"] or "") and (known is None or q["to"] in known)]
         t["requests"] = sorted(reqs, key=lambda q: q["ts"] or "")[-10:]
+        # 끝냄 이전에 보낸 요청은 그 단계와 함께 닫힌다(요청 받은 쪽을 계속 깨우지 않음)
+        last_fin = max((to_dt(f[0]) for f in finishes), default=None)
+        for q in reqs:
+            if q["status"] == "open" and last_fin and to_dt(q["ts"]) <= last_fin:
+                q["status"] = "closed"
         opened = [q for q in reqs if q["status"] == "open"]
         t["open_request"] = max(opened, key=lambda q: q["ts"] or "") if opened else None
         t["reviewer"] = review_partner(t.get("assignee"), peers)
@@ -730,11 +850,13 @@ def review_partner(a: str | None, known: set | None) -> str | None:
 
 
 def whose_turn(t: dict) -> str | None:
-    if t["status"] in ("done", "parked", "backlog", "dropped"):
+    if t["status"] in ("done", "parked", "backlog", "dropped", "review_user"):
         return None
     req = t.get("open_request")
     if req and req.get("to"):
         return req["to"]  # 요청받은 쪽 차례. 답(reply)하면 담당에게 돌아간다
+    if t.get("stage_owner") and t.get("stage") in ("test", "pack", "deploy"):
+        return t["stage_owner"]  # 격리 시험·배포본 작성은 개발컴, 운영 반영은 서버컴
     a = t.get("assignee")
     if not a:
         return LEAD  # 배분 대기
@@ -914,7 +1036,7 @@ def cmd_dispatch(args, cfg):
     topics = merged_topics(topics_dir(cfg), cfg, node_recs, {a["id"] for a in all_list})
     loads: dict[str, int] = {}
     for t in topics:
-        if t.get("assignee") and t["status"] not in ("done", "parked", "dropped"):
+        if t.get("assignee") and t["status"] not in ("done", "parked", "dropped", "review_user"):
             loads[t["assignee"]] = loads.get(t["assignee"], 0) + 1
     labels = {a["id"]: f"{a['pc_label']} {a.get('label', a['id'])}" for a in all_list}
     if not agents:
@@ -922,7 +1044,7 @@ def cmd_dispatch(args, cfg):
         return
     done = 0
     for t in topics:
-        if t.get("assignee") or t["status"] in ("done", "parked", "backlog", "dropped"):
+        if t.get("assignee") or t["status"] in ("done", "parked", "backlog", "dropped", "review_user"):
             continue
         rows = score_agents(t, agents, loads, routing)
         if not rows:

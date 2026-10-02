@@ -468,6 +468,9 @@ def cmd_note(args, cfg):
 def cmd_state(args, cfg):
     if args.task and not REF_RE.match(args.task):
         sys.exit("--task 형식 오류")
+    if args.status == "done" and len((args.note or "").strip()) < 20:
+        sys.exit("끝냄(done)에는 --note로 결과 요약이 필요합니다(무엇을 했나·작업물 위치·시험 방법·권장 다음 단계). "
+                 "끝냄은 다음 아키텍트 관문을 여는 신호이고, 완료 확정은 아키텍트가 합니다.")
     add_topic_record(cfg, args.id, args.agent, "status", status=args.status, linked_task_id=args.task,
                      body=args.note or f"상태 {args.status}")
     print(f"{args.id}: {args.agent} 상태 {args.status}")

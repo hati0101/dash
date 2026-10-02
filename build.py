@@ -622,6 +622,30 @@ def load_works(cfg: dict, topics: list[dict], log: SourceLog) -> dict:
     return works
 
 
+def gate_decisions(topics: list[dict], curated: dict, known: set) -> list[dict]:
+    """아키텍트 관문(★)마다 결정 요청을 만든다. 같은 주제에 AI가 올린 답 대기 질문이 있으면 새로 만들지 않고 그 질문을 쓴다.
+    이미 답한 관문도 기록으로 넣는다(답을 받아 움직일 작업자를 실행기가 깨우게)."""
+    from topics import stage_owner
+    answered = {d.get("id") for d in curated["decisions_answered"]}
+    asking = {q.get("task_id") for q in curated["decisions_needed"] if q.get("task_id") and q.get("id") not in answered and not str(q.get("id", "")).startswith("G")}
+    out = []
+    for t in topics:
+        title = t.get("title") or t["id"]
+        g = t.get("gate")
+        if g and t["id"] not in asking:
+            out.append({"id": g["id"], "kind": "gate", "gate": g["n"], "owner": "user", "task_id": t["id"], "since": g["opened_at"], "_author": g.get("by") or t.get("assignee"),
+                        "question": f"[{g.get('step', g['n'])}/9 {g['label']}] {title}\n\n{(g.get('summary') or '(AI 결과 요약 없음 — 주제 히스토리를 확인하세요)').strip()}",
+                        "options": g.get("options") or []})
+        for hh in t.get("gate_history") or []:  # 답한 관문: 다음에 움직일 작업자 앞으로
+            nxt = {"test": stage_owner("test", t, known), "pack": stage_owner("pack", t, known), "deploy": stage_owner("deploy", t, known)}.get(hh.get("act")) or t.get("assignee")
+            out.append({"id": hh["id"], "kind": "gate", "gate": hh["n"], "owner": "user", "task_id": t["id"], "since": hh.get("opened_at"), "_author": nxt,
+                        "question": f"[{4 if hh['n'] == 40 else hh['n']}/9 {GATE_NAME.get(hh['n'], '관문')}] {title}\n\n{(hh.get('summary') or '').strip()}", "options": []})
+    return out
+
+
+GATE_NAME = {4: "실게임 시험", 5: "배포본 결정", 7: "운영 반영 승인", 9: "완료 확정", 40: "결과 확인"}
+
+
 def load_topics(cfg: dict, log: SourceLog, node_records: list | None = None, known: set | None = None):
     from topics import merged_topics  # 같은 병합 규칙을 쓴다
     folder = (ROOT / cfg.get("topics_dir", "topics")).resolve()
@@ -718,6 +742,7 @@ def build_payload(cfg: dict, pw: str | None = None) -> dict:
     curated["decisions_needed"] += asks
     curated["user_actions"] += health_actions(agents)
     topics = load_topics(cfg, log, node_records, {a["id"] for a in agents} or None)
+    curated["decisions_needed"] += gate_decisions(topics, curated, {a["id"] for a in agents})
     works = load_works(cfg, topics, log)
     from topics import load_routing
     routing = load_routing(cfg)

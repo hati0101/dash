@@ -173,6 +173,8 @@ def sig_parts(t: dict, who: str, mode: str, data: dict, st: dict) -> dict:
     if req.get("to") == who and who != t.get("assignee"):
         claimed = None
         stage = f"req-{req.get('id')}"
+    elif t.get("stage") in ("test", "pack", "deploy") and t.get("stage_owner") == who:
+        stage = f"stage-{t['stage']}-{t.get('status_at')}"  # 새 단계가 시작될 때마다 한 번
     elif who == t.get("assignee"):
         claimed = any(n.get("by") == who and n.get("kind") == "claim" for n in notes)
         stage = "planned" if t.get("plan") else "claimed" if claimed else "new"
@@ -240,7 +242,8 @@ def find_jobs(data: dict, state: dict, only: str | None = None) -> list[dict]:
             continue  # 대화 세션이 잡고 있다
         # 담당이고 진행 베이스가 있고 진행 중이면 '작업 모드'(작업물 저장소의 자기 폴더에 결과물을 직접 만든다)
         req_to_me = (t.get("open_request") or {}).get("to") == who
-        mode = "impl" if (impl_allowed() and (req_to_me or (who == t.get("assignee") and t.get("plan") and t.get("status") == "active"))) else "plan"
+        stage_mine = t.get("stage") in ("test", "pack") and t.get("stage_owner") == who
+        mode = "impl" if (impl_allowed() and (req_to_me or stage_mine or (who == t.get("assignee") and t.get("plan") and t.get("status") == "active"))) else "plan"
         st = state.setdefault("topics", {}).setdefault(t["id"], {})
         parts = sig_parts(t, who, mode, data, st)
         sig = topic_sig(t, who, mode, data, st)
@@ -262,6 +265,8 @@ def find_jobs(data: dict, state: dict, only: str | None = None) -> list[dict]:
                 continue
             jobs.append({"kind": "answer", "agent": q["_author"], "topic": t, "ask": q, "answer": answers[q["id"]],
                          "sig": f"ans-{q['id']}", "mode": "plan", "reason": "아키텍트 답 도착"})
+    ans_keys = {((j.get("topic") or {}).get("id"), j["agent"]) for j in jobs if j["kind"] == "answer"}
+    jobs = [j for j in jobs if j["kind"] == "answer" or ((j["topic"] or {}).get("id"), j["agent"]) not in ans_keys]
     if only:
         return jobs[:MAX_PER_RUN]
     return jobs
@@ -394,6 +399,31 @@ def impl_section(job: dict, ws: Path | None) -> str:
 """
 
 
+STAGE_GUIDE = {
+    "work": "2 진행: 진행 베이스 → 작업 → 교차 검토. 결과물이 준비되면 끝냄(state done) → 3 AI 자체 시험으로 넘어간다"
+            "(조사·분석·기획 주제, 또는 바꾼 파일이 없어 끝냄 요약에 '시험할 것 없음'이라고 적으면 시험 없이 ★결과 확인으로).",
+    "test": "3 AI 자체 시험(관문 없음, 네가 스스로 한다): 개발컴 격리 환경(server-dev) 기준으로 결과물을 검증한다. "
+            "지금 자동 실행기에는 명령 실행·빌드·서버 기동 권한이 없다. 그래서 정적 검증(실제 파일·데이터·호출부 대조, 근거 경로·줄)과 "
+            "시험 절차·확인 체크리스트 작성까지 한다. 문제를 찾으면 스스로 고치고 다시 검증한다. 같은 문제로 세 번 실패하면 ask로 올린다. "
+            "통과하면 끝냄(state done)의 body에 '실게임 시험 준비' 요약을 쓴다: 격리 서버에 반영할 빌드·파일, 실행 방법, "
+            "아키텍트가 확인할 항목(체크리스트), 자체 검증 근거. 그러면 ★4 실게임 시험 관문이 열린다. 운영 서버에서는 이 단계를 하지 않는다.",
+    "pack": "6 배포본 작성: 아키텍트가 ★5에서 배포본 만들기를 골랐다. real-work 작업물에 배포본을 만든다: 적용 파일, 정확한 대상 경로, 적용 절차, "
+            "백업 방법, 복구 수단, 각 파일 SHA256, 적용 후 확인 방법. 끝냄(state done)으로 ★7 운영 반영 승인 관문을 연다.",
+    "deploy": "8 운영 반영: 아키텍트가 ★7에서 서버컴 반영을 승인했다. 자동 실행기에는 운영 파일을 바꾸는 도구가 없다. "
+              "실행기는 반영 준비 점검만 한다(배포본 파일 해시 확인, 대상 파일의 현재 해시·백업 경로 확인)을 note로 남긴다. "
+              "실제 반영은 서버컴 대화 세션이 hold를 걸고 배포본 절차대로 진행한 뒤, 반영 확인 보고와 함께 끝냄(state done) → ★9 완료 확정.",
+}
+
+
+def stage_text(t: dict, job: dict) -> str:
+    st = t.get("stage") or "work"
+    step = t.get("step") or {}
+    hist = t.get("gate_history") or []
+    last = f"\n- 직전 관문: ★{hist[-1]['n']} → 아키텍트 선택 '{hist[-1].get('choice') or '메모'}' {hist[-1].get('note') or ''}" if hist else ""
+    return (f"- 지금: {step.get('n', 2)}/9 {step.get('label', '진행')}\n- 할 일: {STAGE_GUIDE.get(st, STAGE_GUIDE['work'])}{last}\n"
+            "- AI는 완료(done)를 확정하지 못한다. 끝냄(state done)은 다음 ★관문(아키텍트 확인)을 여는 신호이고, body에 결과 요약이 반드시 있어야 한다.")
+
+
 def agent_directory(data: dict) -> str:
     pcs = (data.get("meta", {}).get("routing", {}).get("pcs") or {})
     rows = []
@@ -469,6 +499,9 @@ def build_prompt(job: dict, data: dict, workspace: Path | None, st: dict) -> str
 ## 이번에 깨운 이유
 {job.get('reason') or '-'}
 
+## 지금 단계 (전체 10단계 중)
+{stage_text(t, job)}
+
 ## 지난번 내 실행 요약 (이미 한 일은 반복하지 않는다)
 {(last.get('summary') or '(없음)')[:500]}{(' · 적용: ' + ', '.join(last.get('actions') or [])[:300]) if last.get('actions') else ''}
 
@@ -501,7 +534,7 @@ def build_prompt(job: dict, data: dict, workspace: Path | None, st: dict) -> str
 - 조사는 읽기 도구로 실제 파일을 읽고 근거(경로·줄)를 적는다. 추측은 추측이라고 적는다.
 - 작업물 기록은 `work_note`로 남긴다(work_id는 비워 둔다. 실행기가 이 주제의 작업물에 쓴다).
 - 메모 수집 주제라면 찾은 메모를 한 건씩 `propose`로 올린다(비밀값은 [가림]). 이미 올린 것은 다시 올리지 않는다.
-- 주제가 요구한 일이 끝났으면 반드시 `state`(status="done")를 남긴다. 끝났는데 진행 중으로 두지 않는다.
+- 이 단계의 일이 끝났으면 반드시 `state`(status="done")로 끝낸다. body에 결과 요약(무엇을 했나·작업물 위치·시험 방법·권장 다음 단계)을 적는다. 요약이 없으면 거부된다.
 
 {impl_section(job, workspace)}
 ## 단계 가이드
@@ -510,7 +543,7 @@ def build_prompt(job: dict, data: dict, workspace: Path | None, st: dict) -> str
 3) 교차 검토자면 진행 베이스를 읽고 `note`(kind="review")로 검토 의견
 4) 읽기로 할 수 있는 조사·확인은 해서 결과를 `note`(kind="memo")로
 5) 다른 PC 일이 필요하면 `handoff`, 운영 변경 승인이 필요하면 `ask`
-6) 끝났으면 `state`(status="done")
+6) 이 단계가 끝났으면 `state`(status="done", body=결과 요약) → 아키텍트 관문으로
 
 ## 답 형식 (이 JSON 하나만 출력. 다른 글 금지)
 {{"summary": "한 줄 요약", "actions": [{{"type": "claim|plan|note|state|work_note|ask|propose|handoff|request|reply", "kind": null, "body": null, "status": null, "plan": null, "work_id": null, "question": null, "options": null, "title": null, "origin": null, "task": null, "to": null}}]}}
@@ -696,6 +729,10 @@ def apply(job: dict, result: dict, data: dict | None = None) -> tuple[list[str],
             elif typ == "note" and tid and body:
                 kind = a.get("kind") if a.get("kind") in ("memo", "review", "question", "answer") else "memo"
                 node.add_topic_record(CFG, tid, agent, kind, body=body[:6000])
+            elif typ == "state" and tid and a.get("status") == "done" and len(body) < 40:
+                failed.append("끝냄 거부: 결과 요약(무엇을 했나·작업물 위치·시험 방법·권장 다음 단계)이 없음 — 다시 깨워 요약을 받음")
+                job["redo"] = True
+                continue
             elif typ == "state" and tid and a.get("status") in STATUSES:
                 node.add_topic_record(CFG, tid, agent, "status", status=a["status"], body=body or f"상태 {a['status']}",
                                       linked_task_id=a.get("task") if a.get("task") and node.REF_RE.match(a["task"]) else None)
@@ -975,6 +1012,8 @@ def run_job(j: dict, data: dict, state: dict) -> bool:
         if len(files) > st.get("files", 0) and not stopped:
             st["cont"] = st.get("cont", 0) + 1  # 진척이 있었으니 다음 동기화 때 이어서 깨운다
         st["files"] = len(files)
+    if j.get("redo"):
+        st["cont"] = st.get("cont", 0) + 1  # 끝냄 요약이 빠졌으니 다음 동기화 때 다시 깨운다
     if j["kind"] == "answer":
         state.setdefault("answers_used", []).append(j["ask"]["id"])
     moved = clear_inbox(agent_id, t.get("id"), before=started)

@@ -192,6 +192,7 @@ const TOPIC_STATES = [
   { id: 'triage', label: '검토 중', cls: 'validating', icon: 'eye' },
   { id: 'ready', label: '준비됨', cls: 'done', icon: 'file' },
   { id: 'active', label: '진행 중', cls: 'progress', icon: 'play' },
+  { id: 'review_user', label: '아키텍트 관문', cls: 'user_test', icon: 'scale' },
   { id: 'done', label: '완료', cls: 'done', icon: 'done' },
   { id: 'parked', label: '보류', cls: 'neutral', icon: 'pause' },
   { id: 'dropped', label: '삭제됨', cls: 'blocked', icon: 'x', hidden: true },
@@ -624,7 +625,7 @@ function vOverview() {
   const tasks = filterTasks(d.tasks, S.f.owner);
   // 완료율은 주제 기준: 완료 ÷ 착수한 주제(새 주제·검토·준비·진행·완료). 미처리·보류·삭제는 뺀다
   const aiOf = id => ((data.agents || []).find(a => a.id === id) || {}).ai || (/claude/.test(id || '') ? 'claude' : /astra|gpt/.test(id || '') ? 'gpt' : '');
-  const started = d.topics.filter(t => ['new', 'triage', 'ready', 'active', 'done'].includes(t.status))
+  const started = d.topics.filter(t => ['new', 'triage', 'ready', 'active', 'review_user', 'done'].includes(t.status))
     .filter(t => S.f.owner === 'claude' ? aiOf(t.assignee) === 'claude' : S.f.owner === 'astra' ? aiOf(t.assignee) === 'gpt' : true);
   const total = started.length, done = started.filter(t => t.status === 'done').length;
   const pct = total ? Math.round(done / total * 100) : 0;
@@ -635,7 +636,7 @@ function vOverview() {
     head('OVERVIEW', '전체 현황', `${pad(now.getMonth() + 1)}.${pad(now.getDate())} (${DAY[now.getDay()]})`, ownerChips),
     // 넓고 높은 화면(1500×860 이상)에서는 한 화면에 스크롤 없이: 윗줄 요약 5칸 + 아랫줄 4칸(칸마다 최대 3건)
     h('div', { class: 'ov-fit' },
-      h('div', { class: 'ov-top' }, completionCard(pct, done, total - done, tasks, S.f.owner), collectedCard(), pipelineCard(tasks), missedCard()),
+      h('div', { class: 'ov-top' }, completionCard(pct, started, S.f.owner), collectedCard(), pipelineCard(tasks), missedCard()),
       h('div', { class: 'ov-bottom' }, todayCard(), decisionsNeededCard(), projectsCard(tasks), activityCard()),
       teamStrip()),
   ];
@@ -677,27 +678,25 @@ function taskSort(a, b) {
   return (PRI_ORDER[a.priority] ?? 9) - (PRI_ORDER[b.priority] ?? 9) || STAGE_ORDER[a.stage] - STAGE_ORDER[b.stage] || toMs(b.updated_at) - toMs(a.updated_at);
 }
 
-function completionCard(pct, done, left, tasks, owner) {
-  const r = 52, C = 2 * Math.PI * r;
-  const ring = h('div', { class: 'ring', role: 'img', 'aria-label': `완료율 ${pct}퍼센트` });
-  ring.innerHTML = `<svg viewBox="0 0 132 132"><circle class="track" cx="66" cy="66" r="${r}" fill="none" stroke-width="12"/>` +
-    `<circle class="val" cx="66" cy="66" r="${r}" fill="none" stroke-width="12" stroke-linecap="round" stroke-dasharray="${C.toFixed(2)}" stroke-dashoffset="${C.toFixed(2)}"/></svg>`;
-  ring.append(h('div', { class: 'pct' }, h('b', null, pct, h('small', null, '%'))));
-  requestAnimationFrame(() => requestAnimationFrame(() => { const v = ring.querySelector('.val'); if (v) v.style.strokeDashoffset = (C * (1 - pct / 100)).toFixed(2); }));
-  // 업무 보드는 그래프에 넣지 않고 따로 알린다(상태는 바꾸지 않는다)
-  const waiting = tasks.filter(t => t.stage === 'user_test').length;
-  const old = tasks.filter(t => t.stage !== 'done' && t.stage !== 'user_test' && t._stale).length;
-  const board = [waiting && `실게임 대기 ${waiting}건(내 차례에서 확인)`, old && `갱신 멈춘 옛 작업표 ${old}건`].filter(Boolean).join(' · ');
-  return card('완료율 · 주제 기준', { cls: 'sum-card' },
-    h('div', { class: 'ring-wrap' }, ring,
-      h('div', { class: 'kv' }, h('div', null, h('div', { class: 'k' }, '완료'), h('div', { class: 'v' }, done)),
-        h('div', null, h('div', { class: 'k' }, '남음'), h('div', { class: 'v' }, left)))),
-    (() => { const n = st => S.d.topics.filter(t => t.status === st).length;  // 남은 주제가 어디쯤 있는지
-      return h('div', { class: 'ring-break' }, [['new', '새 주제'], ['triage', '검토 중'], ['active', '진행 중'], ['backlog', '미처리']].map(([k, l]) =>
-        h('button', { class: 'rb', onclick: () => go('topics') }, h('i', { class: `st-dot ${k}` }), h('span', null, l), h('b', null, n(k))))); })(),
-    h('div', { class: 'foot-note one-line-s', title: [done + left ? `착수한 주제 ${done + left}건 중 완료 ${done}건 (미처리·보류·삭제 제외)` : '아직 착수한 주제가 없습니다.',
-      owner === 'user' ? '아키텍트 담당 주제는 없어서 전체 기준으로 보여 줍니다.' : '', board ? `업무 보드: ${board}` : ''].filter(Boolean).join('\n') },
-      done + left ? `착수 ${done + left}건 중 완료 ${done}건` : '착수한 주제 없음', board ? ` · ${board}` : ''));
+// 완료율: 옆 수집·진행 단계 칸과 같은 막대 6줄(완료·남음 + 남은 주제가 어디 있는지)
+function completionCard(pct, started, owner) {
+  const n = (...st) => started.filter(t => st.includes(t.status)).length;
+  const rows = [
+    { label: '완료', n: n('done'), c: 'st-done', ico: 'check' },
+    { label: '남음', n: started.length - n('done'), c: 'ink-3', ico: 'clock' },
+    { label: '아키텍트 관문', n: n('review_user'), c: 'st-user_test', ico: 'user' },
+    { label: '진행 중', n: n('active'), c: 'st-progress', ico: 'tasks' },
+    { label: '검토·준비', n: n('triage', 'ready'), c: 'st-validating', ico: 'eye' },
+    { label: '새 주제', n: n('new'), c: 'st-request', ico: 'inbox' },
+  ];
+  const max = Math.max(1, ...rows.map(r => r.n));
+  return card('완료율', { big: pct, unit: `% · 착수 ${started.length}건`, cls: 'sum-card', right: moreBtn(0, () => go('topics')) },
+    h('div', { class: 'bars', title: owner === 'user' ? '아키텍트 담당 주제는 없어서 전체 기준으로 보여 줍니다.' : '착수한 주제 기준(미처리·보류·삭제 제외)' },
+      rows.map(r => h('button', { class: 'bar-row', onclick: () => go('topics'), 'aria-label': `${r.label} ${r.n}건` },
+        h('span', { style: { color: `var(--${r.c})`, display: 'grid' } }, icon(r.ico)),
+        h('span', { class: 'lbl' }, r.label),
+        h('span', { class: 'track-bar' }, h('i', { style: { width: (r.n / max * 100) + '%', background: `var(--${r.c})` } })),
+        h('span', { class: 'n' }, r.n)))));
 }
 
 function inWindow(ts, hours, dateOnly) {
@@ -754,6 +753,13 @@ function missedItem(i, redraw) {
 function todayCard() {
   const d = S.d, data = S.data;
   const items = [];
+  // ★ 관문(실게임 시험·배포본 결정·운영 반영 승인·완료 확정·결과 확인)은 한 줄로 묶어 맨 위에
+  const gates = (data.decisions_needed || []).filter(q => q.kind === 'gate' && !d.answers[q.id]);
+  if (gates.length) {
+    const by = {}; for (const q of gates) { const k = (q.question.match(/^\[\d+\/9 ([^\]]+)\]/) || [])[1] || '관문'; by[k] = (by[k] || 0) + 1; }
+    items.push({ ico: 'scale', lv: 'warn', t: `★ 관문 결정 ${gates.length}건`, s: Object.entries(by).map(([k, n]) => `${k} ${n}`).join(' · '), who: 'user',
+      when: gates.map(q => q.since).sort()[0], go: () => { S.f.mine = 'decision'; S.mineSel = null; go('mine'); } });
+  }
   for (const a of data.user_actions) items.push({ ico: 'user', lv: 'warn', t: a.title, s: a.detail, who: 'user', when: a.since, go: () => a.task_id && openTaskById(a.task_id) });
   for (const t of d.tasks.filter(t => t.priority === 'P0' && t.stage !== 'done')) items.push({ ico: 'alert', lv: 'bad', t: `P0 · ${t.title}`, s: t.next_action, who: t.waiting_on || t.owner, when: t.updated_at, go: () => openTask(t) });
   for (const t of d.topics.filter(t => t.status === 'new')) items.push({ ico: 'topics', lv: '', t: `새 주제 · ${t.title}`, s: '분배 대기', who: 'claude', when: t.created_at, go: () => openTopic(t) });
@@ -1252,7 +1258,7 @@ const aiOfAgent = id => ((S.data.agents || []).find(a => a.id === id) || {}).ai 
 const pcOfAgent = id => ((S.data.agents || []).find(a => a.id === id) || {}).pc || String(id || '').split('-')[0];
 function topicFlow(t, asking) {
   if (t.status === 'done') return { col: 'done', why: [] };
-  if ((S.data.decisions_needed || []).some(q => q.task_id === t.id && !S.d.answers[q.id]) || asking.has(t.id)) return { col: 'user_test', why: [] };
+  if (t.status === 'review_user' || (S.data.decisions_needed || []).some(q => q.task_id === t.id && !S.d.answers[q.id]) || asking.has(t.id)) return { col: 'user_test', why: t.gate ? [`★${t.gate.step || t.gate.n}/9 ${t.gate.label}`] : [] };
   const why = [];
   const run = runsFor(t.id)[0];
   if (run && run.result === 'fail') why.push('실행 실패');
@@ -1694,8 +1700,15 @@ const RUN_RESULT = { ok: '성공', partial: '일부 실패', fail: '실패', run
 function topicPhase(t) {
   const name = id => person(id).name;
   if (t.status === 'dropped') return { cls: 'neutral', icon: 'x', label: '삭제됨' };
-  if (t.status === 'done') return { cls: 'done', icon: 'check', label: '완료' };
+  if (t.status === 'done') return { cls: 'done', icon: 'check', label: t.confirmed ? '완료 확정' : '완료' };
   if (t.status === 'parked') return { cls: 'neutral', icon: 'pause', label: '보류' };
+  // 9단계 관문: 아키텍트 결정 차례(★4 실게임 시험 · ★5 배포본 결정 · ★7 운영 반영 승인 · ★9 완료 확정 · 조사·분석은 결과 확인)
+  if (t.status === 'review_user' && t.gate) {
+    const open = (S.data.decisions_needed || []).filter(q => !S.d.answers[q.id]);
+    const ask = open.find(q => q.id === t.gate.id) || open.find(q => q.task_id === t.id);
+    return { cls: 'user_test', icon: 'scale', label: `★${t.gate.step || t.gate.n}/9 ${t.gate.label}`, detail: (t.gate.summary || '').slice(0, 300) || null,
+      next: `아키텍트 — 내 차례에서 고르기: ${(t.gate.options || []).map(o => o.replace(/\(.*\)/, '')).join(' · ')}`, ask };
+  }
   if (t.status === 'backlog') return { cls: 'neutral', icon: 'inbox', label: '미처리', next: '아키텍트 — 내 차례 → 착수 고르기에서 착수·담당 정하기' };
   const hold = holdOf(t.id);
   if (hold) return { cls: 'progress', icon: 'user', label: `대화 세션 작업 중 · ${name(hold.agent)}`, detail: `${hold.note || ''} (${fmtAbs(hold.until)}까지 자동 실행 멈춤)` };
@@ -1711,11 +1724,13 @@ function topicPhase(t) {
   const who = t.turn;
   const partial = run && run.result === 'partial' ? ` · 지난 실행 일부 실패: ${(run.failed || []).join('; ').slice(0, 160)}` : '';
   if (!t.assignee) return { cls: 'request', icon: 'topics', label: '배분 대기', next: `${name(who || 'dev-claude')} — 자동 배분` };
+  const STAGE_NEXT = { test: '정적 검증·시험 절차 작성 → ★4 실게임 시험으로', pack: '배포본(파일 목록·SHA256·백업·복구 절차) → ★7 운영 반영 승인으로', deploy: '서버컴 반영·확인 → ★9 완료 확정으로' };
+  if (t.step && STAGE_NEXT[t.stage]) return { cls: 'progress', icon: 'play', label: `${t.step.n}/9 ${t.step.label} · ${name(who)}`, detail: partial.slice(3) || null, next: `${name(who)} — ${STAGE_NEXT[t.stage]}` };
   if (t.handoff && t.handoff.to === t.assignee && who === t.assignee)
     return { cls: 'progress', icon: 'arrow', label: `인계받음 · ${name(who)}`, detail: `${name(t.handoff.from)} → ${name(t.handoff.to)}: ${t.handoff.reason || '-'}${partial}`, next: `${name(who)} — 이어서 처리` };
   if (who && who !== t.assignee) return { cls: 'validating', icon: 'eye', label: `교차 검토 대기 · ${name(who)}`, detail: partial.slice(3) || null, next: `${name(who)} — 진행 베이스 검토` };
   if (!t.plan) return { cls: 'request', icon: 'file', label: `진행 베이스 작성 · ${name(who)}`, detail: partial.slice(3) || null, next: `${name(who)} — 목표·범위·첫 단계 작성` };
-  return { cls: 'progress', icon: 'play', label: `진행 중 · ${name(who)}`, detail: partial.slice(3) || null, next: `${name(who)} — 다음 동기화 때 이어서` };
+  return { cls: 'progress', icon: 'play', label: `${t.step ? '2/9 ' : ''}진행 중 · ${name(who)}`, detail: partial.slice(3) || null, next: `${name(who)} — 다음 동기화 때 이어서` };
 }
 function phaseLine(t, compact) {
   const p = topicPhase(t);
