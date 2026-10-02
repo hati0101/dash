@@ -15,6 +15,13 @@
   python topics.py note <ID> --by claude --kind review --body "검토 의견"
   python topics.py status <ID> --by claude --status active --task SESSION-RECONNECT-20261001
   python topics.py announce                     새 주제·배정·검토 요청을 수신함 메시지로 남김(중복 없음)
+  python topics.py comment --by claude --target task:<작업ID> --body "답"   대시보드 대화창에 답 남기기
+
+대시보드에서 보낸 "요청"([ops] 이슈)도 pull이 함께 처리한다. 결과는 data/user.json(사용자 몫, 이 도구만 씀)에 남는다.
+  reply       대화창 답 → data/user.json comments + 받는 사람 수신함 메시지
+  ack         밀린 메시지 일괄 확인 → inbox-claude 파일을 done/으로 이동(삭제 없음), 놓친 항목 확인 공유
+  task-state  작업 여러 개 단계 변경 → data/user.json tasks
+  decide      결정 필요 항목에 대한 사용자 선택 → data/user.json decisions_answered + Claude 수신함
 """
 from __future__ import annotations
 
@@ -39,6 +46,11 @@ AUTHORS = ("claude", "astra")
 STATUSES = ("new", "triage", "ready", "active", "done", "parked")
 NOTE_KINDS = ("triage", "memo", "review", "plan", "question", "answer", "status")
 KINDS = ("기능·개선", "버그", "조사·분석", "디자인", "운영·도구", "기타")
+ACTION_ID_RE = re.compile(r"^A-\d{8}-[a-z0-9]{3,10}$")
+REF_RE = re.compile(r"^[A-Za-z0-9_.:\-]{1,200}$")
+TARGET_KINDS = ("task", "message", "topic", "decision", "general")
+STAGES = ("request", "progress", "validating", "user_test", "blocked", "done")
+ACTION_TYPES = ("reply", "ack", "task-state", "decide")
 
 
 def now_iso() -> str:
@@ -160,13 +172,13 @@ def cmd_pull(args, cfg):
         sys.exit("config.local.json에 github_repo(\"owner/name\")가 없습니다.")
     state_path = topics_dir(cfg) / ".pulled.json"
     pulled = read_json(state_path, {})
-    issues = [i for i in fetch_issues(repo) if str(i.get("title", "")).startswith("[topic]")]
-    todo = [i for i in issues if str(i["number"]) not in pulled]
+    issues = [i for i in fetch_issues(repo) if str(i.get("title", "")).startswith(("[topic]", "[ops]"))]
+    todo = sorted((i for i in issues if str(i["number"]) not in pulled), key=lambda i: i["number"])
     if not todo:
-        print(f"새 주제 없음 (이슈 {len(issues)}건 확인)")
+        print(f"새 주제·요청 없음 (이슈 {len(issues)}건 확인)")
         return
     pw = password(args)
-    added = 0
+    added = acted = 0
     for i in todo:
         num = str(i["number"])
         m = BLOB_RE.search(i.get("body") or "")
@@ -175,30 +187,197 @@ def cmd_pull(args, cfg):
             print(f"#{num}: 암호문 없음 — 건너뜀")
             continue
         try:
-            topic = clean_topic(open_blob(m.group(0), pw))
-            if topic["id"] not in i["title"]:
-                raise ValueError("이슈 제목과 주제 ID 불일치")
+            raw = open_blob(m.group(0), pw)
+            if isinstance(raw, dict) and raw.get("type") in ACTION_TYPES:
+                action = clean_action(raw)
+                if action["id"] not in i["title"]:
+                    raise ValueError("이슈 제목과 요청 ID 불일치")
+                print(f"#{num}: " + apply_action(cfg, action, f"GitHub 이슈 #{num}"))
+                acted += 1
+                pulled[num] = {"result": "ok", "action": action["id"], "at": now_iso()}
+            else:
+                topic = clean_topic(raw)
+                if topic["id"] not in i["title"]:
+                    raise ValueError("이슈 제목과 주제 ID 불일치")
+                if save_topic(cfg, topic, f"GitHub 이슈 #{num}", {"issue_number": i["number"]}):
+                    added += 1
+                    print(f"#{num}: 주제 추가 {topic['id']} — {topic['title']}")
+                pulled[num] = {"result": "ok", "topic": topic["id"], "at": now_iso()}
         except ValueError as exc:
             # 키를 모르는 사람이 만든 이슈이거나 비밀번호가 다름. 처리 완료로 표시하지 않고 다음에 다시 본다.
             print(f"#{num}: {exc}")
             continue
-        if save_topic(cfg, topic, f"GitHub 이슈 #{num}", {"issue_number": i["number"]}):
-            added += 1
-            print(f"#{num}: 추가 {topic['id']} — {topic['title']}")
-        pulled[num] = {"result": "ok", "topic": topic["id"], "at": now_iso()}
         if args.close and shutil.which("gh") and i.get("state") == "open":
-            subprocess.run(["gh", "issue", "close", num, "--repo", repo, "--comment", "대시보드 주제로 가져왔습니다."],
+            subprocess.run(["gh", "issue", "close", num, "--repo", repo, "--comment", "대시보드로 가져왔습니다."],
                            capture_output=True)
+        write_json(state_path, pulled)  # 한 건씩 기록해 중간 실패에도 중복 처리하지 않는다
     write_json(state_path, pulled)
-    print(f"가져온 주제 {added}건")
+    print(f"가져온 주제 {added}건 · 처리한 요청 {acted}건")
 
 
 def cmd_add_blob(args, cfg):
     try:
-        topic = clean_topic(open_blob(args.blob, password(args)))
+        raw = open_blob(args.blob, password(args))
+        if isinstance(raw, dict) and raw.get("type") in ACTION_TYPES:
+            print(apply_action(cfg, clean_action(raw), "대시보드 암호문 복사"))
+            return
+        topic = clean_topic(raw)
     except ValueError as exc:
         sys.exit(str(exc))
     print(("추가 " if save_topic(cfg, topic, "대시보드 암호문 복사") else "이미 있음 ") + f"{topic['id']} — {topic['title']}")
+
+
+# ---------------------------------------------------------------- 대시보드 요청(답·일괄 확인·단계 변경·결정)
+
+def clean_ref(v, what: str) -> str:
+    v = str(v or "")
+    if not REF_RE.match(v):
+        raise ValueError(f"{what} 형식 오류: {v[:40]!r}")
+    return v
+
+
+def clean_target(t) -> dict:
+    if not isinstance(t, dict) or t.get("kind") not in TARGET_KINDS:
+        raise ValueError("대상 형식 오류")
+    return {"kind": t["kind"], "id": clean_ref(t.get("id") or "general", "대상 ID"),
+            "title": str(t.get("title", ""))[:200]}
+
+
+def clean_action(raw: dict) -> dict:
+    """브라우저에서 온 요청을 검증·정규화한다. 형식이 틀리면 ValueError."""
+    aid = str(raw.get("id", ""))
+    if not ACTION_ID_RE.match(aid):
+        raise ValueError(f"요청 ID 형식 오류: {aid!r}")
+    kind = raw["type"]
+    a = {"id": aid, "type": kind, "created_at": str(raw.get("created_at", now_iso()))[:40]}
+    if kind == "reply":
+        body = str(raw.get("body", "")).strip()
+        if not body:
+            raise ValueError("빈 답")
+        a.update(target=clean_target(raw.get("target")), body=body[:6000],
+                 to=raw.get("to") if raw.get("to") in AUTHORS else "claude")
+    elif kind == "ack":
+        msgs, keys = raw.get("messages") or [], raw.get("keys") or []
+        if not isinstance(msgs, list) or not isinstance(keys, list) or len(msgs) > 1000 or len(keys) > 1000:
+            raise ValueError("확인 목록 형식 오류")
+        a.update(messages=[clean_ref(x, "메시지 ID") for x in msgs],
+                 keys=[str(k)[:300] for k in keys if isinstance(k, str)])
+    elif kind == "task-state":
+        ids = raw.get("ids") or []
+        if not isinstance(ids, list) or not ids or len(ids) > 200:
+            raise ValueError("작업 목록 형식 오류")
+        stage = raw.get("stage")
+        if stage not in STAGES:
+            raise ValueError("단계 값 오류")
+        a.update(ids=[clean_ref(x, "작업 ID") for x in ids], stage=stage, note=str(raw.get("note", ""))[:2000])
+    elif kind == "decide":
+        a.update(target=clean_ref(raw.get("decision_id"), "결정 ID"), choice=str(raw.get("choice", "")).strip()[:500],
+                 note=str(raw.get("note", "")).strip()[:3000])
+        if not a["choice"] and not a["note"]:
+            raise ValueError("빈 결정")
+    return a
+
+
+def data_dir(cfg) -> Path:
+    return (ROOT / cfg.get("data_dir", "data")).resolve()
+
+
+def user_file(cfg) -> tuple[Path, dict]:
+    path = data_dir(cfg) / "user.json"
+    rec = read_json(path, None) or {"author": "user", "_rule": "이 파일은 topics.py가 사용자 요청을 받아서만 쓴다."}
+    for key in ("processed_actions", "comments", "tasks", "acks", "decisions_answered"):
+        rec.setdefault(key, [])
+    return path, rec
+
+
+def inbox_message_index(folder: Path) -> dict:
+    """inbox 폴더의 message_id → 파일 경로. 헤더가 없으면 파일 이름(확장자 제외)."""
+    out = {}
+    for p in folder.glob("*.md"):
+        mid = p.stem
+        try:
+            for line in p.read_text(encoding="utf-8-sig", errors="replace").splitlines()[:15]:
+                m = re.match(r"^\s*message[_-]id:\s*(\S+)", line, re.I)
+                if m:
+                    mid = m.group(1)
+                    break
+        except OSError:
+            continue
+        out.setdefault(mid, p)
+    return out
+
+
+def apply_action(cfg, a: dict, source: str) -> str:
+    path, rec = user_file(cfg)
+    if a["id"] in rec["processed_actions"]:
+        return f"이미 처리한 요청 {a['id']}"
+    bridge = Path(cfg["bridge_dir"])
+    ts = now_iso()
+    if a["type"] == "reply":
+        rec["comments"].append({"id": a["id"], "ts": a["created_at"] or ts, "target": a["target"],
+                                "to": a["to"], "body": a["body"], "source": source})
+        t = a["target"]
+        box = bridge / ("inbox-astra" if a["to"] == "astra" else "inbox-claude")
+        write_inbox(box, f"USR-REPLY-{a['id']}", f"[사용자 → {a['to'].capitalize()}] 대시보드 답: {t.get('title') or t['id']}",
+                    {"sender": "user (대시보드)", "recipient": a["to"], "kind": "user reply via dashboard",
+                     "task_id": t["id"] if t["kind"] in ("task", "topic") else None,
+                     "in_reply_to": t["id"] if t["kind"] == "message" else None, "target": f"{t['kind']}:{t['id']}"},
+                    a["body"] + f"\n\n(대시보드 대화창에서 보냄 · 답은 python topics.py comment --by {a['to']} --target {t['kind']}:{t['id']} --body \"...\")")
+        result = f"답 전달 → {a['to']} ({t['kind']}:{t['id']})"
+    elif a["type"] == "ack":
+        inbox = bridge / "inbox-claude"
+        done = inbox / "done"
+        done.mkdir(parents=True, exist_ok=True)
+        index = inbox_message_index(inbox)
+        moved = 0
+        for mid in a["messages"]:
+            src = index.get(mid)
+            if not src or not src.exists():
+                continue
+            dst = done / src.name
+            n = 1
+            while dst.exists():
+                dst = done / f"{src.stem}-{n}{src.suffix}"
+                n += 1
+            src.replace(dst)  # 이동만 한다. 삭제하지 않는다.
+            moved += 1
+        for k in a["keys"]:
+            rec["acks"].append({"key": k, "ts": ts, "action": a["id"]})
+        rec["acks"] = rec["acks"][-2000:]
+        result = f"일괄 확인: 메시지 {moved}/{len(a['messages'])}건 done으로 이동, 놓친 항목 {len(a['keys'])}건 확인"
+    elif a["type"] == "task-state":
+        for tid in a["ids"]:
+            rec["tasks"] = [r for r in rec["tasks"] if r.get("id") != tid]
+            rec["tasks"].append({"id": tid, "stage": a["stage"], "state": f"user_set_{a['stage']}",
+                                 "user_note": a["note"] or None, "updated_at": a["created_at"] or ts})
+        write_inbox(bridge / "inbox-claude", f"USR-STATE-{a['id']}", f"[사용자 → Claude] 작업 단계 변경 {len(a['ids'])}건 → {a['stage']}",
+                    {"sender": "user (대시보드)", "recipient": "claude", "kind": "user task-state via dashboard"},
+                    "\n".join(f"- {x}" for x in a["ids"]) + (f"\n\n메모: {a['note']}" if a["note"] else ""))
+        result = f"작업 {len(a['ids'])}건 단계 → {a['stage']}"
+    else:  # decide
+        rec["decisions_answered"] = [r for r in rec["decisions_answered"] if r.get("id") != a["target"]]
+        rec["decisions_answered"].append({"id": a["target"], "choice": a["choice"], "note": a["note"], "ts": a["created_at"] or ts})
+        write_inbox(bridge / "inbox-claude", f"USR-DECIDE-{a['id']}", f"[사용자 → Claude] 결정: {a['target']} → {a['choice'] or '(메모)'}",
+                    {"sender": "user (대시보드)", "recipient": "claude", "kind": "user decision via dashboard", "in_reply_to": a["target"]},
+                    (a["choice"] or "") + (f"\n\n{a['note']}" if a["note"] else ""))
+        result = f"결정 기록 {a['target']} → {a['choice'] or '메모'}"
+    rec["processed_actions"].append(a["id"])
+    rec["processed_actions"] = rec["processed_actions"][-3000:]
+    rec["updated_at"] = ts
+    write_json(path, rec)
+    return result
+
+
+def cmd_comment(args, cfg):
+    kind, _, ref = args.target.partition(":")
+    if kind not in TARGET_KINDS or not REF_RE.match(ref or ""):
+        sys.exit("--target 형식: task:<ID> | message:<ID> | topic:<ID> | decision:<ID> | general:all")
+    path = data_dir(cfg) / f"{args.by}.json"
+    rec = read_json(path, None) or {"author": args.by}
+    rec.setdefault("comments", []).append({"id": f"C-{datetime.now(KST):%Y%m%d}-{secrets.token_hex(3)}", "ts": now_iso(),
+                                           "target": {"kind": kind, "id": ref}, "body": args.body.strip()})
+    write_json(path, rec)  # updated_at은 바꾸지 않는다(작업 갱신 시각과 혼동 방지)
+    print(f"{args.by} 답 기록 → {kind}:{ref}")
 
 
 def cmd_add(args, cfg):
@@ -411,10 +590,13 @@ def main():
     p.add_argument("--kind", default="memo", choices=NOTE_KINDS); p.add_argument("--body", required=True)
     p = sub.add_parser("status"); p.add_argument("id"); p.add_argument("--by", required=True, choices=AUTHORS)
     p.add_argument("--status", choices=STATUSES); p.add_argument("--task"); p.add_argument("--note")
+    p = sub.add_parser("comment"); p.add_argument("--by", required=True, choices=AUTHORS)
+    p.add_argument("--target", required=True, help="task:<ID> | message:<ID> | topic:<ID> | decision:<ID> | general:all")
+    p.add_argument("--body", required=True)
     args = ap.parse_args()
     cfg = load_cfg()
     {"pull": cmd_pull, "add-blob": cmd_add_blob, "add": cmd_add, "list": cmd_list, "announce": cmd_announce,
-     "triage": cmd_triage, "plan": cmd_plan, "note": cmd_note, "status": cmd_status}[args.cmd](args, cfg)
+     "triage": cmd_triage, "plan": cmd_plan, "note": cmd_note, "status": cmd_status, "comment": cmd_comment}[args.cmd](args, cfg)
 
 
 if __name__ == "__main__":

@@ -23,7 +23,7 @@ if (-not $hadEnv) {
 try {
   $cfg = Get-Content 'config.local.json' -Raw -Encoding UTF8 | ConvertFrom-Json
   if ($cfg.github_repo) {
-    python topics.py pull; if ($LASTEXITCODE) { Write-Warning '주제 가져오기 실패 — 계속 진행' }
+    python topics.py pull --close; if ($LASTEXITCODE) { Write-Warning '주제·요청 가져오기 실패 — 계속 진행' }
     python topics.py announce
   }
   $buildArgs = @('build.py'); if ($NewPassword) { $buildArgs += '--new-salt' }
@@ -33,7 +33,7 @@ try {
   if (-not (Get-Command git -ErrorAction SilentlyContinue)) { throw 'git이 설치되어 있지 않습니다.' }
   git add -A
   $staged = git diff --cached --name-only
-  $bad = $staged | Where-Object { $_ -match '^(data/(?!example\.json)|topics/|out/|config\.local\.json)' }
+  $bad = $staged | Where-Object { $_ -match '^(data/(?!example\.json)|topics/|out/|\.local/|config\.local\.json|GUIDE-LOCAL)' }
   if ($bad) { throw "평문 파일이 스테이징됨: $($bad -join ', ')" }
   if ($staged) {
     git commit -m ("dashboard " + (Get-Date -Format 'yyyy-MM-dd HH:mm')) | Out-Null

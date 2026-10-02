@@ -36,7 +36,11 @@ def is_public(m) -> bool:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--password-file")
+    ap.add_argument("--enc", help="검사할 암호문 경로(기본 docs/data.enc.json, 로컬 시험용)")
     args = ap.parse_args()
+    global ENC
+    if args.enc:
+        ENC = Path(args.enc).resolve()
     pw = Path(args.password_file).read_text(encoding="utf-8").strip() if args.password_file else os.environ.get("REAL_OPS_PASSWORD", "")
     if not pw:
         sys.exit("비밀번호가 필요합니다 (--password-file 또는 REAL_OPS_PASSWORD).")
@@ -88,6 +92,8 @@ def main():
         leaks = []
         files = [p for p in DOCS.rglob("*") if p.is_file()] + [ROOT / n for n in ("README.md", "config.example.json") if (ROOT / n).exists()]
         for p in files:
+            if p.suffix in (".png", ".ico"):
+                continue
             text = p.read_text(encoding="utf-8", errors="ignore")
             for probe in probes:
                 if probe in text:

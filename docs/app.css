@@ -410,6 +410,27 @@ mark { background: color-mix(in srgb, var(--st-user_test) 35%, transparent); col
 .plan ul { margin: 0; padding-left: 18px; font-size: 13px; }
 .plan li { margin-bottom: 3px; }
 
+/* 대화·일괄 처리 */
+.btn.sm { height: 30px; padding: 0 10px; font-size: 12.5px; }
+.choice-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.linkish { border: 0; background: none; padding: 0; color: var(--accent-ink); font-weight: 700; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+.reply-box { display: grid; gap: 10px; border-top: 1px solid var(--line); padding-top: 14px; }
+.reply-box h4 { margin: 0; }
+.steps { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+.sel-wrap { position: relative; display: flex; flex-direction: column; }
+.sel-wrap .proj { padding-right: 40px; }
+.sel-wrap.on .proj { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.sel-box { position: absolute; top: 8px; right: 8px; z-index: 2; width: 30px; height: 30px; display: grid; place-items: center; border-radius: 8px; cursor: pointer; }
+.sel-box:hover { background: var(--card-3); }
+.sel-box input { width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer; margin: 0; }
+.pend-tag { margin-top: 6px; align-self: flex-start; }
+.bulkbar {
+  position: sticky; bottom: 14px; z-index: 30; margin-top: 16px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  padding: 10px 12px; border-radius: 14px; background: var(--card-3); border: 1px solid var(--line-2); box-shadow: 0 12px 30px rgba(0, 0, 0, .4);
+}
+.bulkbar b { margin-right: 4px; }
+.bulkbar .btn { height: 32px; padding: 0 10px; font-size: 12.5px; }
+
 /* 서랍 */
 .scrim { position: fixed; inset: 0; background: rgba(0, 0, 0, .45); z-index: 40; opacity: 0; transition: opacity .2s; }
 .scrim.on { opacity: 1; }
@@ -434,6 +455,14 @@ mark { background: color-mix(in srgb, var(--st-user_test) 35%, transparent); col
   transition: all .25s; pointer-events: none; max-width: calc(100% - 32px);
 }
 .toast.on { opacity: 1; transform: translateX(-50%); }
+
+/* ---------------- 앱 설치(PWA) 창: 노치·상태바 영역 피하기 */
+@media (display-mode: standalone) {
+  .top { padding-top: max(12px, env(safe-area-inset-top)); }
+  .side { padding-top: max(16px, env(safe-area-inset-top)); padding-bottom: max(14px, env(safe-area-inset-bottom)); }
+  .page { padding-bottom: max(60px, env(safe-area-inset-bottom)); }
+  .lock { padding-top: max(24px, env(safe-area-inset-top)); }
+}
 
 /* ---------------- 반응형 */
 @media (max-width: 1180px) {

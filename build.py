@@ -451,11 +451,13 @@ def load_ai_runs(folder: Path, log: SourceLog):
 
 # ---------------------------------------------------------------- 큐레이션(Claude·Astra 직접 기록)
 
-CURATED_KEYS = ("tasks", "decisions_needed", "decisions", "user_actions", "notes")
+CURATED_KEYS = ("tasks", "decisions_needed", "decisions", "user_actions", "notes",
+                "comments", "acks", "decisions_answered")
 
 
 def load_curated(files: list[str], log: SourceLog):
     merged = {k: [] for k in CURATED_KEYS}
+    merged["processed_actions"] = []
     for rel in files:
         path = (ROOT / rel).resolve()
         author = path.stem
@@ -475,6 +477,7 @@ def load_curated(files: list[str], log: SourceLog):
                     row["_file_updated"] = data.get("updated_at")
                     merged[key].append(row)
                     count += 1
+            merged["processed_actions"].extend(x for x in data.get("processed_actions", []) if isinstance(x, str))
             log.add(f"curated-{author}", f"직접 기록 · {author}", "curated", path, count, mtime(path),
                     note=f"갱신 {data.get('updated_at', '?')}")
         except Exception as exc:  # noqa: BLE001
@@ -492,9 +495,11 @@ def merge_tasks(base: list[dict], curated: list[dict]):
         if not tid:
             continue
         author = row["_author"]
-        if tid in seen_author and seen_author[tid] != author:
-            conflicts.append({"id": tid, "authors": [seen_author[tid], author]})
-        seen_author[tid] = author
+        # 사용자가 대시보드에서 바꾼 단계는 충돌이 아니라 우선 적용 대상이다
+        if author != "user":
+            if tid in seen_author and seen_author[tid] != author:
+                conflicts.append({"id": tid, "authors": [seen_author[tid], author]})
+            seen_author[tid] = author
         t = by_id.get(tid)
         if t is None:
             t = {"id": tid, "title": tid, "owner": author, "state": "", "stage": "progress",
@@ -504,8 +509,10 @@ def merge_tasks(base: list[dict], curated: list[dict]):
             base.append(t)
         prev_time = parse_iso(t.get("updated_at"))
         row_time = parse_iso(row.get("updated_at")) or parse_iso(row.get("_file_updated"))
-        if prev_time and row_time and row_time < prev_time and t["source"] == "curated":
+        if prev_time and row_time and row_time < prev_time and t["source"] == "curated" and author != "user":
             continue  # 더 오래된 큐레이션은 무시
+        if author == "user":
+            t["user_set"] = {"stage": row.get("stage"), "note": row.get("user_note"), "at": row.get("updated_at")}
         for key in ("title", "area", "owner", "state", "priority", "next_action", "due",
                     "waiting_on", "live_test", "summary", "evidence", "progress"):
             if row.get(key) not in (None, ""):
@@ -636,6 +643,10 @@ def build_payload(cfg: dict) -> dict:
         "decisions_needed": curated["decisions_needed"],
         "user_actions": curated["user_actions"],
         "notes": curated["notes"],
+        "comments": curated["comments"],
+        "acks": [a.get("key") for a in curated["acks"] if a.get("key")],
+        "decisions_answered": curated["decisions_answered"],
+        "processed_actions": curated["processed_actions"],
     }
     masker = Masker()
     payload = masker.walk(payload)
@@ -689,7 +700,10 @@ def main():
     ap.add_argument("--password-file", help="비밀번호를 담은 파일(로컬 시험용). 없으면 REAL_OPS_PASSWORD 또는 입력")
     ap.add_argument("--new-salt", action="store_true", help="새 salt로 암호화(비밀번호를 바꿀 때)")
     ap.add_argument("--dump", help="평문 JSON을 이 경로에 저장(디버그 전용, out/ 아래 권장)")
+    ap.add_argument("--output", help="암호문 출력 경로(로컬 시험용). 시험 비밀번호로는 docs/에 쓰지 않는다")
     ap.add_argument("--no-encrypt", action="store_true", help="암호화하지 않고 --dump만 수행")
+    ap.add_argument("--skip-unchanged", action="store_true",
+                    help="생성 시각 말고 내용이 지난번과 같으면 암호문을 다시 만들지 않고 종료 코드 10으로 끝냄(자동 동기화용)")
     args = ap.parse_args()
 
     cfg = json.loads(read_text(Path(args.config)))
@@ -709,9 +723,22 @@ def main():
         print(f"출처 경고: {s['name']} — {s['error']}")
     if args.no_encrypt:
         return
+    import hashlib
+    body = {k: v for k, v in payload.items() if k != "meta"}
+    body["meta"] = {k: v for k, v in payload["meta"].items() if k != "generated_at"}
+    assets = "".join(hashlib.sha256((ROOT / "docs" / n).read_bytes()).hexdigest() for n in ("app.js", "app.css"))
+    digest = hashlib.sha256((json.dumps(body, ensure_ascii=False, sort_keys=True) + assets).encode("utf-8")).hexdigest()
+    out = Path(args.output).resolve() if args.output else ROOT / cfg.get("output", "docs/data.enc.json")
+    marker = ROOT / ".local" / ("last-content.sha256" if not args.output else "last-content-test.sha256")
+    file_sha = lambda: hashlib.sha256(out.read_bytes()).hexdigest() if out.exists() else ""  # noqa: E731
+    # 내용 해시와 함께 게시 파일 자체의 해시도 비교한다(다른 비밀번호로 만든 파일이 남아 있으면 다시 만든다)
+    if args.skip_unchanged and marker.exists() and marker.read_text().split() == [digest, file_sha()]:
+        print("변경 없음 — 다시 만들지 않습니다")
+        sys.exit(10)
     stamp_assets()
-    out = ROOT / cfg.get("output", "docs/data.enc.json")
     size, info = encrypt(payload, out, get_password(args), args.new_salt)
+    marker.parent.mkdir(exist_ok=True)
+    marker.write_text(f"{digest} {file_sha()}")
     print(f"암호화 완료: {out} (평문 {size:,} bytes) {info}")
 
 

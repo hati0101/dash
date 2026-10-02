@@ -7,6 +7,8 @@
 !/encrypt.mjs
 !/config.example.json
 !/publish.ps1
+!/sync.ps1
+!/setup-auto.ps1
 !/docs/
 !/tests/
 !/data/

@@ -65,6 +65,7 @@ const ICON_PATHS = {
   pause: '<rect x="6.5" y="5" width="3.5" height="14" rx="1"/><rect x="14" y="5" width="3.5" height="14" rx="1"/>',
   user: '<circle cx="12" cy="8.5" r="3.5"/><path d="M5 20a7 7 0 0 1 14 0"/>',
   link: '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>',
+  install: '<path d="M12 4v11M7.5 10.5L12 15l4.5-4.5"/><path d="M5 19.5h14"/>',
 };
 function icon(name) {
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -178,6 +179,67 @@ async function sealTopic(obj) {
   const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, S.key, new TextEncoder().encode(JSON.stringify(obj))));
   return ['REALTOPIC1', b64.enc(b64.dec(S.env.salt), true), b64.enc(iv, true), b64.enc(ct, true)].join('.');
 }
+// ------------------------------------------------------------ 보내기 (대시보드 → PC). 정적 사이트라 GitHub 이슈를 우체통으로 쓴다
+const hex = n => [...crypto.getRandomValues(new Uint8Array(n))].map(b => b.toString(16).padStart(2, '0')).join('');
+function newId(prefix, bytes = 4) { const d = new Date(); return `${prefix}-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${hex(bytes)}`; }
+const pending = {
+  all() { return (store.get('pending', []) || []).filter(p => Date.now() - toMs(p.created_at) < 14 * 864e5); },
+  add(p) { const l = pending.all(); l.push(p); store.set('pending', l); },
+  remove(id) { store.set('pending', pending.all().filter(p => p.id !== id)); },
+  prune(done) { const s = new Set(done || []); store.set('pending', pending.all().filter(p => !s.has(p.id))); },
+};
+async function tokenGet() {
+  const s = store.get('ghtoken');
+  if (!s || !S.key) return null;
+  try { return new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64.dec(s.iv) }, S.key, b64.dec(s.ct))); } catch { return null; }
+}
+async function tokenSet(tok) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, S.key, new TextEncoder().encode(tok)));
+  store.set('ghtoken', { iv: b64.enc(iv), ct: b64.enc(ct), at: new Date().toISOString() });
+}
+async function sendBlob(kind, obj) {
+  const repo = S.data.meta.repo;
+  if (!repo) throw new Error('GitHub 저장소가 연결되지 않았습니다.');
+  const blob = await sealTopic(obj);
+  const title = `[${kind}] ${obj.id}`;
+  const body = `REAL 운영체제 ${kind === 'topic' ? '주제' : '요청'} (암호화됨 · 대시보드 비밀번호로만 열립니다)\n\n아래 줄을 수정하지 마세요.\n\n${blob}\n`;
+  const token = await tokenGet();
+  if (token) {
+    try {
+      const r = await fetch(`https://api.github.com/repos/${repo}/issues`, {
+        method: 'POST', headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title, body }) });
+      if (r.ok) return { via: 'api' };
+      toast(`바로 보내기 실패 (${r.status}) — GitHub 창으로 보냅니다`);
+    } catch { toast('바로 보내기 실패 — GitHub 창으로 보냅니다'); }
+  }
+  const url = `https://github.com/${repo}/issues/new?title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}`;
+  const w = window.open(url, '_blank');
+  if (w) w.opener = null;
+  return { via: 'page', url, blocked: !w };
+}
+function afterSend(res) {
+  if (res.via === 'api') return toast('보냈습니다 · PC 동기화 때 반영됩니다');
+  if (!res.blocked) return toast('GitHub 창에서 "Submit new issue"를 눌러야 전송됩니다');
+  drawer('보내기', h('h3', null, '팝업이 막혔습니다'),
+    h('p', null, '아래 버튼으로 GitHub 창을 열고 "Submit new issue"를 눌러주세요. 내용은 암호문이라 그대로 보내면 됩니다.'),
+    h('a', { class: 'btn primary', href: res.url, target: '_blank', rel: 'noopener noreferrer' }, icon('send'), 'GitHub에서 보내기'));
+}
+async function sendOps(type, fields, summary) {
+  const action = { id: newId('A'), type, created_at: new Date().toISOString(), ...fields };
+  const res = await sendBlob('ops', action);
+  pending.add({ ...fields, id: action.id, type, created_at: action.created_at, summary, via: res.via });
+  S.d = derive(S.data);
+  afterSend(res);
+  return res;
+}
+async function syncAcks(keys) {
+  // 토큰이 있을 때만 조용히 공유한다. 없으면 이 기기에서만 확인 처리.
+  if (!keys.length || !(await tokenGet())) return;
+  try { await sendOps('ack', { messages: [], keys }, `놓친 항목 ${keys.length}건 확인`); } catch { /* 이 기기 확인은 이미 반영됨 */ }
+}
+
 async function fetchEnvelope() {
   const r = await fetch('data.enc.json?t=' + Date.now(), { cache: 'no-store' });
   if (!r.ok) throw new Error('데이터 파일을 받지 못했습니다 (' + r.status + ')');
@@ -239,12 +301,23 @@ const REQ_RE = /assign|request|요청|배정|gate|question|질문|correction|rev
 function derive(data) {
   const L = data.meta.limits || {};
   const staleH = L.stale_hours || 24, unansH = L.unanswered_hours || 6;
+  // PC가 처리한 요청은 대기 목록에서 지우고, 아직 대기 중인 요청은 화면에 먼저 반영한다
+  pending.prune(data.processed_actions);
+  const pend = pending.all();
+  const pendAckMsgs = new Set(pend.filter(p => p.type === 'ack').flatMap(p => p.messages || []));
+  S.serverAcks = new Set([...(data.acks || []), ...pend.filter(p => p.type === 'ack').flatMap(p => p.keys || [])]);
+  const pendStage = {};
+  for (const p of pend.filter(p => p.type === 'task-state')) for (const id of p.ids || []) pendStage[id] = p.stage;
+  const answers = {};
+  for (const a of data.decisions_answered || []) answers[a.id] = { ...a, pending: false };
+  for (const p of pend.filter(p => p.type === 'decide')) answers[p.decision_id] = { id: p.decision_id, choice: p.choice, note: p.note, ts: p.created_at, pending: true };
   const tasks = data.tasks.map(t => {
-    const age = hoursSince(t.updated_at);
-    return { ...t, _age: age, _stale: !['done', 'user_test'].includes(t.stage) && age > staleH, _waitLong: t.stage === 'user_test' && age > 72 };
+    const base = pendStage[t.id] ? { ...t, stage: pendStage[t.id], _pendingStage: true } : t;
+    const age = hoursSince(base._pendingStage ? new Date().toISOString() : base.updated_at);
+    return { ...base, _age: age, _stale: !['done', 'user_test'].includes(base.stage) && age > staleH, _waitLong: base.stage === 'user_test' && age > 72 };
   });
   const msgs = data.messages;
-  const unprocessed = msgs.filter(m => m.unprocessed);
+  const unprocessed = msgs.filter(m => m.unprocessed && !pendAckMsgs.has(m.id));
   const unanswered = msgs.filter(m => m.box === 'inbox-astra' && m.sender === 'claude' && !m.replies.length && !(m.followups || []).length
     && REQ_RE.test((m.kind || '') + ' ' + m.title) && hoursSince(m.ts) > unansH && hoursSince(m.ts) < 72);
   const topics = (data.topics || []).map(t => ({ ...t, _age: hoursSince(t.created_at) }));
@@ -271,10 +344,18 @@ function derive(data) {
     title: `분배되지 않은 주제: ${t.title}`, sub: `${Math.round(t._age)}시간 경과`, go: () => openTopic(t) });
 
   const lastBy = who => msgs.find(m => m.sender === who)?.ts || null;
-  return { tasks, unprocessed, unanswered, missed, topics, lastBy };
+  return { tasks, unprocessed, unanswered, missed, topics, lastBy, answers, pend, pendAckMsgs };
 }
-const openMissed = () => S.d.missed.filter(m => !S.acks.has(m.key));
-function ack(keys) { for (const k of [].concat(keys)) S.acks.add(k); store.set('acks', [...S.acks].slice(-500)); render(); }
+const openMissed = () => S.d.missed.filter(m => !S.acks.has(m.key) && !S.serverAcks?.has(m.key));
+function ack(keys, opts = {}) {
+  keys = [].concat(keys);
+  for (const k of keys) S.acks.add(k);
+  store.set('acks', [...S.acks].slice(-1000));
+  if (!opts.noSync) syncAcks(keys);
+  S._keepScroll = true;
+  render();
+  if (opts.redraw) opts.redraw();
+}
 function filterTasks(list, owner) {
   if (!owner || owner === 'all') return list;
   if (owner === 'user') return list.filter(t => t.waiting_on === 'user' || t.owner === 'user');
@@ -357,6 +438,8 @@ function sidebar() {
     h('div', { class: 'side-h' }, 'TEAM'),
     h('div', { class: 'team-row' }, ['user', 'claude', 'astra', 'cli'].map(id => av(id))),
     h('div', { class: 'side-foot' },
+      !matchMedia('(display-mode: standalone)').matches && !navigator.standalone
+        ? h('button', { class: 'btn', onclick: installApp, title: '주소창 없이 앱처럼 열기' }, icon('install'), '앱으로 설치') : null,
       h('div', { class: 'row' }, av('user'), h('b', null, '내 계정'),
         h('button', { class: 'icon-btn', style: { 'margin-left': 'auto' }, title: '테마 바꾸기', 'aria-label': '테마 바꾸기', onclick: toggleTheme },
           icon(document.documentElement.dataset.theme === 'light' ? 'moon' : 'sun')),
@@ -381,8 +464,19 @@ function topbar() {
     h('span', { class: `live${age > 1.5 ? ' stale' : ''}`, title: '데이터 생성 ' + fmtAbs(gen) },
       h('span', { class: 'dot' }), h('span', { class: 'lbl' }, age > 1.5 ? fmtRel(gen) + ' 갱신' : 'live')),
     h('button', { class: 'icon-btn', title: '새 데이터 확인', 'aria-label': '새 데이터 확인', onclick: () => refresh(true) }, icon('refresh')),
-    h('button', { class: 'icon-btn bell', title: `놓친 항목 ${missed}`, 'aria-label': `놓친 항목 ${missed}건`, onclick: () => { go('overview'); setTimeout(() => $('#missed')?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 50); } },
+    h('button', { class: 'icon-btn bell', title: `놓친 항목 ${missed}`, 'aria-label': `놓친 항목 ${missed}건 보기`, onclick: openMissedDrawer },
       icon('bell'), missed ? h('span', { class: 'count' }, missed) : null));
+}
+function openMissedDrawer() {
+  const items = openMissed();
+  drawer('놓친 항목',
+    h('div', { style: { display: 'flex', gap: '8px', 'align-items': 'center', 'flex-wrap': 'wrap' } },
+      h('h3', null, `놓친 항목 ${items.length}건`),
+      items.length ? h('button', { class: 'btn', style: { 'margin-left': 'auto' }, onclick: () => ack(items.map(i => i.key), { redraw: openMissedDrawer }) }, icon('check'), '모두 확인') : null),
+    items.length ? h('div', { class: 'list' }, items.map(i => missedItem(i, openMissedDrawer))) : empty('놓친 항목이 없습니다.'),
+    S.d.unprocessed.length ? h('div', { class: 'callout' }, h('b', null, `미처리 메시지 ${S.d.unprocessed.length}건`), ' — 알림 확인과 별개로, 메시지를 실제로 처리(done 폴더로 이동)하려면 ',
+      h('button', { class: 'linkish', onclick: () => { closeDrawer(true); go('messages', { msg: 'unprocessed' }); } }, '메시지 화면의 "모두 확인 처리"'), '를 쓰세요.') : null,
+    h('p', { class: 'hint' }, '"확인"은 알림만 끕니다. GitHub 토큰이 연결돼 있으면 다른 기기에도 공유됩니다.'));
 }
 
 function page() {
@@ -496,12 +590,12 @@ function missedCard() {
     items.length ? h('div', { class: 'list' }, items.slice(0, 6).map(missedItem), items.length > 6 ? h('div', { class: 'empty' }, `외 ${items.length - 6}건`) : null)
       : empty('놓친 항목이 없습니다.'));
 }
-function missedItem(i) {
+function missedItem(i, redraw) {
   return h('div', { class: 'item' },
     h('span', { class: `lead-ico ${i.level}` }, icon(i.icon)),
-    h('button', { class: 'body', style: { border: '0', background: 'none', 'text-align': 'left', padding: '0', color: 'inherit' }, onclick: i.go },
+    h('button', { class: 'body', style: { border: '0', background: 'none', 'text-align': 'left', padding: '0', color: 'inherit' }, onclick: () => { if (redraw) closeDrawer(true); i.go(); } },
       h('div', { class: 't clamp-2' }, i.title), i.sub ? h('div', { class: 's clamp-2' }, i.sub) : null),
-    h('button', { class: 'icon-btn ack-btn', title: '확인함', 'aria-label': '확인함으로 표시', onclick: () => ack(i.key) }, icon('check')));
+    h('button', { class: 'icon-btn ack-btn', title: '확인함', 'aria-label': '확인함으로 표시', onclick: () => ack(i.key, { redraw }) }, icon('check')));
 }
 
 function todayCard() {
@@ -521,15 +615,20 @@ function todayCard() {
 }
 function decisionsNeededCard() {
   const list = S.data.decisions_needed;
-  return card('결정이 필요한 문제', { big: list.length, unit: '건' },
-    list.length ? h('div', { class: 'list' }, list.map(q => h('div', { class: 'item' },
-      h('span', { class: 'lead-ico warn' }, icon('scale')),
-      h('div', { class: 'body' }, h('div', { class: 't' }, q.question),
-        q.options?.length ? h('div', { class: 's' }, '선택지: ' + q.options.join(' / ')) : null,
-        q.recommendation ? h('div', { class: 's' }, h('b', null, '권장 '), q.recommendation) : null,
-        h('div', { class: 'meta' }, h('span', { class: 'wait' }, av(q.owner || 'user', true), (person(q.owner || 'user').name) + ' 결정'),
-          h('span', { class: 'tag' }, `${q._author} 제기`), h('span', { class: 'when' }, fmtRel(q.since)))))))
-      : empty('지금 결정할 문제가 없습니다.'));
+  const open = list.filter(q => !S.d.answers[q.id]);
+  return card('결정이 필요한 문제', { big: open.length, unit: '건' },
+    list.length ? h('div', { class: 'list' }, list.map(q => {
+      const ans = S.d.answers[q.id];
+      return h('div', { class: 'item' },
+        h('span', { class: `lead-ico ${ans ? 'good' : 'warn'}` }, icon(ans ? 'check' : 'scale')),
+        h('div', { class: 'body' }, h('div', { class: 't' }, q.question),
+          q.recommendation && !ans ? h('div', { class: 's' }, h('b', null, '권장 '), q.recommendation) : null,
+          ans ? h('div', { class: 's' }, h('b', null, '내 결정: '), ans.choice || '(메모)', ans.note ? ' — ' + ans.note : '', ' · ', ans.pending ? '반영 대기' : 'Claude에게 전달됨')
+            : h('div', { class: 'choice-row' }, (q.options || []).map(o => h('button', { class: 'btn sm', onclick: () => decide(q, o) }, o)),
+              h('button', { class: 'btn sm', onclick: () => openDecisionNeeded(q) }, icon('messages'), '직접 적기')),
+          h('div', { class: 'meta' }, h('span', { class: 'wait' }, av(q.owner || 'user', true), (person(q.owner || 'user').name) + ' 결정'),
+            h('span', { class: 'tag' }, `${q._author} 제기`), h('span', { class: 'when' }, fmtRel(q.since)))));
+    })) : empty('지금 결정할 문제가 없습니다.'));
 }
 function projGrid(tasks) {
   if (!tasks.length) return empty('해당하는 작업이 없습니다.');
@@ -635,12 +734,10 @@ function composerCard(repo) {
   const pri = h('select', { id: 'tp-pri', 'aria-label': '우선순위' }, ['P2 보통', 'P1 높음', 'P0 긴급', 'P3 낮음'].map(k => h('option', { value: k.slice(0, 2) }, k)));
   const prefer = h('select', { id: 'tp-prefer', 'aria-label': '담당 선호' }, [['auto', '자동 분배'], ['claude', 'Claude 우선'], ['astra', 'Astra 우선']].map(([v, l]) => h('option', { value: v }, l)));
   const status = h('div', { class: 'hint', role: 'status', 'aria-live': 'polite' });
-  async function make() {
+  function make() {
     if (!title.value.trim()) { title.focus(); status.textContent = '주제를 적어주세요.'; return null; }
-    const now = new Date();
-    const id = `T-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${b64.enc(crypto.getRandomValues(new Uint8Array(3)), true).toLowerCase().replace(/[^a-z0-9]/g, 'x')}`;
-    const topic = { id, title: title.value.trim(), body: body.value.trim(), kind: kind.value, priority: pri.value, prefer: prefer.value, created_at: now.toISOString(), from: 'dashboard' };
-    return { topic, blob: await sealTopic(topic) };
+    const topic = { id: newId('T', 3), title: title.value.trim(), body: body.value.trim(), kind: kind.value, priority: pri.value, prefer: prefer.value, created_at: new Date().toISOString(), from: 'dashboard' };
+    return { topic };
   }
   function remember(topic) {
     const list = store.get('pendingTopics', []) || [];
@@ -649,24 +746,24 @@ function composerCard(repo) {
     title.value = ''; body.value = '';
   }
   const send = h('button', { class: 'btn primary', disabled: !repo, onclick: async () => {
-    const r = await make(); if (!r) return;
-    const issueBody = `REAL 운영체제 주제 (암호화됨 · 대시보드 비밀번호로만 열립니다)\n\n아래 줄을 수정하지 마세요.\n\n${r.blob}\n`;
-    const url = `https://github.com/${repo}/issues/new?title=${encodeURIComponent('[topic] ' + r.topic.id)}&body=${encodeURIComponent(issueBody)}`;
-    const w = window.open(url, '_blank', 'noopener');
-    remember(r.topic);
-    status.textContent = w ? 'GitHub 창에서 "Submit new issue"를 눌러야 전송됩니다.' : '팝업이 막혔습니다. 아래 "암호문 복사"를 써주세요.';
-    S._keepScroll = true; render();
-  } }, icon('send'), '보내기 (GitHub)');
+    const r = make(); if (!r) return;
+    send.disabled = true;
+    try {
+      const res = await sendBlob('topic', r.topic);
+      remember(r.topic); afterSend(res);
+      S._keepScroll = true; render();
+    } catch (e) { status.textContent = e.message; } finally { send.disabled = false; }
+  } }, icon('send'), '보내기');
   const copy = h('button', { class: 'btn', onclick: async () => {
-    const r = await make(); if (!r) return;
-    try { await navigator.clipboard.writeText(`python topics.py add-blob ${r.blob}`); remember(r.topic); toast('복사했습니다. PC 터미널에 붙여넣으세요.'); S._keepScroll = true; render(); }
+    const r = make(); if (!r) return;
+    try { await navigator.clipboard.writeText(`python topics.py add-blob ${await sealTopic(r.topic)}`); remember(r.topic); toast('복사했습니다. PC 터미널에 붙여넣으세요.'); S._keepScroll = true; render(); }
     catch { status.textContent = '클립보드 복사가 막혔습니다.'; }
   } }, icon('copy'), '암호문 복사 (PC용)');
   return card('주제 던지기', null,
     h('div', { class: 'composer' }, title, body, h('div', { class: 'row' }, kind, pri, prefer),
       h('div', { class: 'row' }, send, copy),
       !repo ? h('div', { class: 'callout warn' }, h('b', null, 'GitHub 저장소가 아직 연결되지 않았습니다. '), '연결 전에는 "암호문 복사"로 PC에서 넣을 수 있습니다.') : null,
-      status,
+      status, sendHint(),
       h('div', { class: 'hint' }, '내용은 이 브라우저에서 대시보드 비밀번호 키로 암호화됩니다. 이슈에는 암호문과 주제 번호만 남습니다.')));
 }
 function topicCard(t) {
@@ -685,18 +782,33 @@ function topicCard(t) {
 // ------------------------------------------------------------ 업무
 function vTasks() {
   const stageFocus = S.f.stage;
+  S.sel = S.sel || new Set();
   const tasks = filterTasks(S.d.tasks, S.f.taskOwner);
+  for (const id of [...S.sel]) if (!tasks.some(t => t.id === id)) S.sel.delete(id);
+  const staleKeys = S.d.missed.filter(i => i.key.startsWith('stale:') && !S.acks.has(i.key) && !S.serverAcks.has(i.key)).map(i => i.key);
+  const pick = (id, on) => { on ? S.sel.add(id) : S.sel.delete(id); S._keepScroll = true; render(); };
+  const selCard = t => h('div', { class: `sel-wrap${S.sel.has(t.id) ? ' on' : ''}` },
+    h('label', { class: 'sel-box', title: '선택' }, h('input', { type: 'checkbox', checked: S.sel.has(t.id), 'aria-label': `${t.title} 선택`, onchange: e => pick(t.id, e.target.checked) })),
+    projCard(t), t._pendingStage ? h('span', { class: 'st user_test pend-tag' }, icon('clock'), '단계 반영 대기') : null);
+  const ids = [...S.sel];
   return [
     head('TASKS', '업무 보드', null,
       chips([['all', '전체'], ['claude', 'Claude'], ['astra', 'Astra'], ['cli', 'CLI'], ['user', '나 대기']], S.f.taskOwner, v => { S.f.taskOwner = v; render(); }, '담당 필터'),
+      staleKeys.length ? h('button', { class: 'btn', onclick: () => ack(staleKeys) }, icon('check'), `멈춤 알림 ${staleKeys.length}건 모두 끄기`) : null,
+      h('button', { class: 'btn', onclick: () => { const all = tasks.filter(t => t.stage !== 'done').map(t => t.id); const every = all.every(id => S.sel.has(id)); all.forEach(id => every ? S.sel.delete(id) : S.sel.add(id)); render(); } }, icon('check'), '진행 중 전체 선택'),
       stageFocus ? h('button', { class: 'btn', onclick: () => { S.f.stage = null; render(); } }, icon('x'), STAGE[stageFocus].label + ' 강조 해제') : null),
     h('div', { class: 'board' }, STAGES.map(s => {
       const list = tasks.filter(t => t.stage === s.id).sort(taskSort);
       return h('div', { class: 'col', style: stageFocus && stageFocus !== s.id ? { opacity: '.45' } : null },
         h('div', { class: 'col-h' }, h('span', { style: { color: `var(--st-${s.id})`, display: 'grid' } }, icon(s.icon)), s.label, h('span', { class: 'badge' }, list.length)),
-        list.length ? list.map(projCard) : h('div', { class: 'empty' }, '없음'));
+        list.length ? list.map(selCard) : h('div', { class: 'empty' }, '없음'));
     })),
-    h('p', { class: 'hint section-gap' }, '단계는 tasks.json의 state와 직접 기록 파일(data/claude.json, data/astra.json)의 stage로 정합니다. 24시간 넘게 갱신이 없으면 "멈춤"으로 표시합니다.'),
+    h('p', { class: 'hint section-gap' }, '카드 오른쪽 위 칸을 눌러 여러 개를 고르면 아래에서 한꺼번에 단계를 바꿀 수 있습니다. 바꾼 단계는 PC 동기화 때 작업표에 반영되고 Claude 수신함에도 알림이 갑니다. 24시간 넘게 갱신이 없으면 "멈춤"으로 표시합니다.'),
+    ids.length ? h('div', { class: 'bulkbar', role: 'region', 'aria-label': '선택한 작업 일괄 처리' },
+      h('b', null, `${ids.length}건 선택`),
+      STAGES.map(s => h('button', { class: 'btn', onclick: () => setStages(ids, s.id) }, h('span', { style: { color: `var(--st-${s.id})`, display: 'grid' } }, icon(s.icon)), s.label)),
+      h('button', { class: 'btn', onclick: () => { const keys = S.d.missed.filter(i => ids.some(id => i.key.startsWith(`stale:${id}:`) || i.key.startsWith(`usertest:${id}:`))).map(i => i.key); if (keys.length) ack(keys); else toast('선택한 작업에 켜진 알림이 없습니다'); } }, icon('bell'), '알림 끄기'),
+      h('button', { class: 'btn', onclick: () => { S.sel.clear(); render(); } }, icon('x'), '선택 해제')) : null,
   ];
 }
 
@@ -706,19 +818,21 @@ function vMessages() {
   const f = S.f.msg;
   const filt = {
     all: () => true, a2c: m => m.sender === 'astra', c2a: m => m.sender === 'claude',
-    unprocessed: m => m.unprocessed, unanswered: m => S.d.unanswered.includes(m),
+    unprocessed: m => S.d.unprocessed.includes(m), unanswered: m => S.d.unanswered.includes(m),
   }[f] || (() => true);
+  const unp = S.d.unprocessed;
   const list = all.filter(filt).slice(0, 300);
   if (!S.msgSel || !list.includes(S.msgSel)) S.msgSel = list[0] || null;
   const narrow = matchMedia('(max-width: 880px)').matches;
   return [
     head('MESSAGES', 'Claude ↔ Astra', `${all.length}건`,
-      chips([['all', '전체'], ['a2c', 'Astra→Claude'], ['c2a', 'Claude→Astra'], ['unprocessed', `미처리 ${S.d.unprocessed.length}`], ['unanswered', `답장 대기 ${S.d.unanswered.length}`]], f, v => { S.f.msg = v; S.msgSel = null; render(); }, '메시지 필터')),
+      chips([['all', '전체'], ['a2c', 'Astra→Claude'], ['c2a', 'Claude→Astra'], ['unprocessed', `미처리 ${unp.length}`], ['unanswered', `답장 대기 ${S.d.unanswered.length}`]], f, v => { S.f.msg = v; S.msgSel = null; render(); }, '메시지 필터'),
+      unp.length ? h('button', { class: 'btn primary', onclick: () => ackMessages(unp.map(m => m.id)) }, icon('check'), `미처리 ${unp.length}건 모두 확인 처리`) : null),
     h('div', { class: 'split' },
       h('div', { class: 'card msg-list', role: 'listbox', 'aria-label': '메시지 목록' },
         list.length ? list.map(m => h('button', { class: 'msg', role: 'option', 'aria-selected': String(m === S.msgSel),
           onclick: () => { if (narrow) return openMessage(m); S.msgSel = m; S._keepScroll = true; render(); } },
-          m.unprocessed ? h('span', { class: 'new-dot', title: '미처리' }) : null,
+          unp.includes(m) ? h('span', { class: 'new-dot', title: '미처리' }) : null,
           h('span', { class: 'route' }, av(m.sender, true), av(m.recipient, true)),
           h('span', { class: 'body' }, h('div', { class: 't clamp-2' }, m.title),
             h('div', { class: 's' }, h('span', null, fmtAbs(m.ts)), m.task_id ? h('span', { class: 'tag' }, m.task_id) : null,
@@ -727,22 +841,46 @@ function vMessages() {
       !narrow ? h('div', { class: 'card reader' }, S.msgSel ? messageDetail(S.msgSel) : empty('메시지를 선택하세요.')) : null),
   ];
 }
-function messageDetail(m) {
+function messageDetail(m, redraw) {
   const all = S.data.messages;
+  const waitingAck = S.d.pendAckMsgs.has(m.id);
+  const isUnprocessed = m.unprocessed && !waitingAck;
+  redraw = redraw || (() => { S._keepScroll = true; render(); });
   const parent = m.in_reply_to ? all.find(x => x.id === m.in_reply_to) : null;
   const replies = m.replies.map(id => all.find(x => x.id === id)).filter(Boolean);
   const hdr = [['보낸이 → 받는이', `${person(m.sender).full} → ${person(m.recipient).full}`], ['시각', fmtAbs(m.ts)], ['message_id', m.id], ['kind', m.kind], ['task_id', m.task_id],
     ['in_reply_to', m.in_reply_to], ['파일', `${m.box}/${m.file}`], ...Object.entries(m.headers || {}).filter(([k]) => !['sender', 'recipient', 'kind', 'task_id', 'in_reply_to', 'route'].includes(k))];
   return [
     h('div', { class: 'row', style: { display: 'flex', gap: '6px', 'flex-wrap': 'wrap', 'margin-bottom': '8px' } },
-      m.unprocessed ? h('span', { class: 'st progress' }, icon('inbox'), '미처리') : h('span', { class: 'st neutral' }, icon('check'), m.box === 'inbox-astra' ? '발신' : '처리됨'),
-      priChip(m.priority), m.task_id ? h('button', { class: 'tag', style: { cursor: 'pointer' }, onclick: () => openTaskById(m.task_id) }, m.task_id) : null),
+      isUnprocessed ? h('span', { class: 'st progress' }, icon('inbox'), '미처리') : waitingAck ? h('span', { class: 'st user_test' }, icon('clock'), '확인 반영 대기')
+        : h('span', { class: 'st neutral' }, icon('check'), m.box === 'inbox-astra' ? '발신' : '처리됨'),
+      priChip(m.priority), m.task_id ? h('button', { class: 'tag', style: { cursor: 'pointer' }, onclick: () => openTaskById(m.task_id) }, m.task_id) : null,
+      isUnprocessed ? h('button', { class: 'btn', style: { 'margin-left': 'auto', height: '30px' }, onclick: () => ackMessages([m.id], redraw) }, icon('check'), '확인 처리') : null),
     h('h3', null, m.title),
     h('dl', { class: 'hdr-table' }, hdr.filter(([, v]) => v).map(([k, v]) => [h('dt', null, k), h('dd', null, v)])),
     h('pre', { class: 'pre' }, m.body || '(본문 없음)'),
     parent || replies.length ? h('div', { class: 'thread' }, h('h4', { class: 'eyebrow', style: { margin: '6px 0 2px' } }, '스레드'),
       parent ? threadRow(parent, '원문') : null, replies.map(r => threadRow(r, '답장'))) : null,
+    h('div', { style: { 'margin-top': '16px' } }, thread({ kind: 'message', id: m.id, title: m.title }, redraw, { placeholder: '이 메시지에 대한 답을 적으세요' })),
   ];
+}
+async function ackMessages(ids, redraw) {
+  if (!ids.length) return;
+  if (ids.length > 1 && !confirm(`미처리 메시지 ${ids.length}건을 확인 처리할까요?\nPC에서 done 폴더로 옮겨집니다(삭제 아님).`)) return;
+  const keys = S.d.missed.filter(i => i.key.startsWith('unprocessed:')).map(i => i.key);
+  try {
+    await sendOps('ack', { messages: ids, keys }, `메시지 ${ids.length}건 확인`);
+    S._keepScroll = true; render(); if (redraw) redraw();
+  } catch (e) { toast(e.message); }
+}
+async function setStages(ids, stage, redraw) {
+  if (!ids.length) return;
+  const label = STAGE[stage].label;
+  if (ids.length > 1 && !confirm(`작업 ${ids.length}건을 "${label}" 단계로 바꿀까요?`)) return;
+  try {
+    await sendOps('task-state', { ids, stage, note: '' }, `작업 ${ids.length}건 → ${label}`);
+    S.sel?.clear(); S._keepScroll = true; render(); if (redraw) redraw();
+  } catch (e) { toast(e.message); }
 }
 function threadRow(m, label) {
   return h('button', { class: 'msg', onclick: () => openMessage(m) },
@@ -844,9 +982,18 @@ function decisionCard(x) {
 // ------------------------------------------------------------ 연결
 function vSources() {
   const data = S.data, m = data.meta;
+  const pend = pending.all();
   return [
-    head('SOURCES', '연결된 출처', null),
-    card('수집 상태', { big: data.sources.length, unit: '곳' }, h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' },
+    head('SOURCES', '연결과 설정', null),
+    h('div', { class: 'grid g-2' }, tokenCard(),
+      card('보낸 요청 · 반영 대기', { big: pend.length, unit: '건' },
+        pend.length ? h('div', { class: 'list' }, [...pend].reverse().map(p => h('div', { class: 'item' },
+          h('span', { class: 'lead-ico' }, icon(p.type === 'reply' ? 'messages' : p.type === 'decide' ? 'scale' : p.type === 'task-state' ? 'tasks' : 'check')),
+          h('div', { class: 'body' }, h('div', { class: 't' }, p.summary || p.type), h('div', { class: 's' }, `${fmtRel(p.created_at)} · ${p.via === 'api' ? '바로 전송됨' : 'GitHub 창으로 보냄(Submit 필요)'} · PC 동기화 후 사라짐`)),
+          h('button', { class: 'icon-btn', title: '목록에서 지우기', 'aria-label': '목록에서 지우기', onclick: () => { pending.remove(p.id); S.d = derive(S.data); render(); } }, icon('x')))))
+          : empty('대기 중인 요청이 없습니다.'),
+        h('p', { class: 'hint' }, 'PC가 GitHub에서 요청을 가져와 처리하면 자동으로 목록에서 빠집니다. GitHub 창에서 Submit을 안 눌렀다면 여기서 지우고 다시 보내면 됩니다.'))),
+    h('div', { class: 'section-gap' }), card('수집 상태', { big: data.sources.length, unit: '곳' }, h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' },
       h('thead', null, h('tr', null, ['상태', '출처', '건수', '최근 변경', '경로·메모'].map(x => h('th', null, x)))),
       h('tbody', null, data.sources.map(s => {
         const stale = s.last_modified && hoursSince(s.last_modified) > 48, optional = /선택/.test(s.error || '');
@@ -868,11 +1015,96 @@ function vSources() {
         h('dt', null, '기록 충돌'), h('dd', null, (m.conflicts || []).length ? m.conflicts.map(c => c.id).join(', ') : '없음'),
         h('dt', null, '저장소'), h('dd', null, m.repo || '미연결'))),
       card('갱신과 협업', null, h('div', { class: 'hint', style: { display: 'grid', gap: '8px' } },
-        h('div', null, h('b', null, '갱신: '), 'PC에서 ', h('span', { class: 'mono' }, 'publish.ps1'), ' 실행 → 수집·암호화·push. 이 화면은 5분마다 새 게시본을 확인합니다.'),
+        h('div', null, h('b', null, '갱신: '), '자동 동기화를 켜두면 PC가 10분마다 보낸 요청을 가져와 처리하고 바뀐 내용만 게시합니다(수동: ', h('span', { class: 'mono' }, 'publish.ps1'), '). 이 화면은 5분마다 새 게시본을 확인합니다.'),
+        h('div', null, h('b', null, '화면에서 보낸 것: '), '답은 Claude/Astra 수신함으로, 일괄 확인은 inbox-claude → done 이동으로, 단계 변경은 작업표 덮어쓰기로 처리됩니다(사용자 기록 파일 data/user.json).'),
         h('div', null, h('b', null, 'Claude: '), h('span', { class: 'mono' }, 'data/claude.json'), ', ', h('span', { class: 'mono' }, 'topics/<id>/claude.json'), '에만 씁니다.'),
         h('div', null, h('b', null, 'Astra: '), h('span', { class: 'mono' }, 'data/astra.json'), ', ', h('span', { class: 'mono' }, 'topics/<id>/astra.json'), '에만 씁니다.'),
         h('div', null, h('b', null, '자동 수집: '), 'tasks.json · inbox-claude · inbox-astra · qa · handoffs · 감사 원장 · Claude 메모리.')))),
   ];
+}
+
+// ------------------------------------------------------------ 대화창 (화면에서 바로 답하기)
+function commentsFor(t) {
+  const same = c => c.target && c.target.kind === t.kind && c.target.id === t.id;
+  const list = (S.data.comments || []).filter(same).map(c => ({ ...c, by: c._author || c.by || 'user' }));
+  for (const p of pending.all().filter(p => p.type === 'reply' && same(p))) list.push({ by: 'user', to: p.to, ts: p.created_at, body: p.body, pending: true });
+  return list.sort((a, b) => toMs(a.ts) - toMs(b.ts));
+}
+function sendHint() {
+  return h('div', { class: 'hint' }, store.get('ghtoken')
+    ? 'GitHub 토큰 연결됨 · 버튼을 누르면 바로 전송되고, PC 동기화 때 Claude/Astra 수신함에 들어갑니다.'
+    : ['보내면 GitHub 창이 열립니다. "Submit new issue"를 눌러야 전송됩니다. ',
+      h('button', { class: 'linkish', onclick: () => { closeDrawer(true); go('sources'); } }, '버튼 하나로 보내기 설정')]);
+}
+function thread(target, redraw, opts = {}) {
+  const items = commentsFor(target);
+  const ta = h('textarea', { placeholder: opts.placeholder || '여기에 답을 적으면 Claude에게 전달됩니다', rows: '3', 'aria-label': '답 입력' });
+  const to = h('select', { 'aria-label': '받는 사람' }, h('option', { value: 'claude' }, 'Claude에게'), h('option', { value: 'astra' }, 'Astra에게'));
+  if (opts.to) to.value = opts.to;
+  const send = h('button', { class: 'btn primary', onclick: async () => {
+    const body = ta.value.trim();
+    if (!body) { ta.focus(); return; }
+    send.disabled = true;
+    try {
+      await sendOps('reply', { target: { kind: target.kind, id: target.id, title: (target.title || '').slice(0, 200) }, to: to.value, body }, `답 → ${person(to.value).name}`);
+      ta.value = '';
+      render(); if (redraw) redraw();
+    } catch (e) { toast(e.message); } finally { send.disabled = false; }
+  } }, icon('send'), '보내기');
+  return h('div', { class: 'reply-box' },
+    h('h4', null, `대화 ${items.length}`),
+    items.length ? h('div', { class: 'note-thread' }, items.map(c => h('div', { class: 'note' }, av(c.by),
+      h('div', { class: 'bubble' }, h('div', { class: 'h' }, h('b', null, person(c.by).name), c.to ? h('span', null, '→ ' + person(c.to).name) : null,
+        h('span', null, fmtAbs(c.ts)), c.pending ? h('span', { class: 'st user_test' }, icon('clock'), '반영 대기') : null),
+        h('p', null, c.body))))) : h('div', { class: 'empty' }, '아직 대화가 없습니다. 아래에 적어 보내면 됩니다.'),
+    h('div', { class: 'composer' }, ta, h('div', { class: 'row' }, to, send)),
+    sendHint());
+}
+async function decide(q, choice, note, redraw) {
+  try {
+    await sendOps('decide', { decision_id: q.id, choice, note: note || '' }, `결정: ${choice || '메모'}`);
+    render(); if (redraw) redraw();
+  } catch (e) { toast(e.message); }
+}
+function openDecisionNeeded(q) {
+  const redraw = () => openDecisionNeeded(q);
+  const ans = S.d.answers[q.id];
+  const note = h('textarea', { placeholder: '선택지 말고 직접 적을 내용 (선택)', rows: '3', 'aria-label': '결정 메모' });
+  drawer('결정이 필요한 문제', h('h3', null, q.question),
+    q.recommendation ? h('div', { class: 'callout' }, h('b', null, '권장 '), q.recommendation) : null,
+    ans ? h('div', { class: 'callout' }, h('b', null, '내 결정: '), ans.choice || '(메모)', ans.note ? ' — ' + ans.note : '', ' ', ans.pending ? h('span', { class: 'st user_test' }, icon('clock'), '반영 대기') : h('span', { class: 'st done' }, icon('check'), '반영됨')) : null,
+    h('h4', null, '선택'),
+    h('div', { style: { display: 'flex', gap: '8px', 'flex-wrap': 'wrap' } }, (q.options || []).map(o => h('button', { class: 'btn', onclick: () => decide(q, o, note.value.trim(), redraw) }, o))),
+    h('div', { class: 'composer' }, note, h('div', { class: 'row' }, h('button', { class: 'btn primary', onclick: () => { if (!note.value.trim()) { note.focus(); return; } decide(q, '', note.value.trim(), redraw); } }, icon('send'), '메모로 결정 보내기'))),
+    sendHint());
+}
+
+function tokenCard() {
+  const has = !!store.get('ghtoken'), repo = S.data.meta.repo || '';
+  const input = h('input', { type: 'password', placeholder: 'github_pat_… 붙여넣기', autocomplete: 'off', spellcheck: 'false', 'aria-label': 'GitHub 토큰' });
+  const status = h('div', { class: 'hint', role: 'status', 'aria-live': 'polite' });
+  const save = h('button', { class: 'btn primary', onclick: async () => {
+    const v = input.value.trim();
+    if (!/^(github_pat_|ghp_)[A-Za-z0-9_]{20,}$/.test(v)) { status.textContent = '토큰 형식이 아닙니다. github_pat_로 시작하는 값을 붙여넣으세요.'; return; }
+    save.disabled = true; status.textContent = 'GitHub에 확인하는 중…';
+    try {
+      const r = await fetch(`https://api.github.com/repos/${repo}/issues?per_page=1`, { headers: { Authorization: `Bearer ${v}`, Accept: 'application/vnd.github+json' } });
+      if (!r.ok) { status.textContent = `GitHub가 거절했습니다 (${r.status}). 저장소와 Issues 권한을 확인하세요.`; return; }
+      await tokenSet(v); input.value = ''; toast('토큰을 저장했습니다. 이제 버튼 하나로 보내집니다.'); render();
+    } catch (e) { status.textContent = '확인 실패: ' + e.message; } finally { save.disabled = false; }
+  } }, '확인 후 저장');
+  return card('버튼 하나로 보내기', { right: has ? h('span', { class: 'st done' }, icon('check'), '연결됨') : h('span', { class: 'st neutral' }, '미연결') },
+    h('div', { class: 'composer' },
+      h('div', { class: 'hint' }, 'GitHub 토큰을 한 번 연결하면 주제·답·일괄 확인이 GitHub 창 없이 바로 전송됩니다. 토큰은 대시보드 키로 암호화해 이 기기에만 저장합니다.'),
+      h('ol', { class: 'hint steps' },
+        h('li', null, '아래 버튼으로 GitHub 토큰 만들기 페이지를 엽니다 (Fine-grained token).'),
+        h('li', null, `Repository access → Only select repositories → ${repo || '이 저장소'}`),
+        h('li', null, 'Permissions → Repository permissions → Issues: Read and write (다른 권한은 주지 않음)'),
+        h('li', null, '만료 기간을 정하고 Generate → 나온 토큰을 아래에 붙여넣기')),
+      h('a', { class: 'btn', href: 'https://github.com/settings/personal-access-tokens/new', target: '_blank', rel: 'noopener noreferrer' }, icon('link'), '토큰 만들기 페이지 열기'),
+      h('div', { class: 'row' }, input, save),
+      has ? h('button', { class: 'btn', onclick: () => { store.del('ghtoken'); toast('이 기기에서 토큰을 지웠습니다'); render(); } }, icon('x'), '이 기기에서 토큰 지우기') : null,
+      status));
 }
 
 // ------------------------------------------------------------ 서랍(상세)
@@ -922,9 +1154,13 @@ function openTask(t) {
     topics.length ? [h('h4', null, '연결된 주제'), topics.map(topicCard)] : null,
     msgs.length ? [h('h4', null, `관련 메시지 ${msgs.length}`), h('div', { class: 'thread' }, msgs.map(m => threadRow(m, `${person(m.sender).name} → ${person(m.recipient).name}`)))] : null,
     vals.length ? [h('h4', null, '관련 QA'), h('div', { class: 'list' }, vals.map(v => h('button', { class: 'item', onclick: () => openValidation(v) }, h('span', { class: 'body' }, h('div', { class: 't' }, v.id), h('div', { class: 's' }, fmtAbs(v.ts) + ' · ' + (v.reviewer || '')))))) ] : null,
+    thread({ kind: 'task', id: t.id, title: t.title }, () => openTaskById(t.id), { placeholder: '이 작업에 대한 답·지시를 적으면 담당에게 전달됩니다', to: t.owner === 'astra' ? 'astra' : 'claude' }),
+    h('h4', null, '단계 바꾸기'),
+    h('div', { style: { display: 'flex', gap: '6px', 'flex-wrap': 'wrap' } }, STAGES.filter(s => s.id !== t.stage).map(s =>
+      h('button', { class: 'btn', onclick: () => setStages([t.id], s.id, () => openTaskById(t.id)) }, h('span', { style: { color: `var(--st-${s.id})`, display: 'grid' } }, icon(s.icon)), s.label))),
     t.fields && Object.keys(t.fields).length ? [h('h4', null, 'tasks.json 원본 필드'), fieldList(t.fields)] : null);
 }
-function openMessage(m) { drawer('메시지', messageDetail(m)); }
+function openMessage(m) { drawer('메시지', messageDetail(m, () => openMessage(m))); }
 function openLedger(e) {
   drawer('감사 원장', h('div', { style: { display: 'flex', gap: '6px' } }, h('span', { class: `st ${LEDGER_ST[e.status].cls}` }, icon(LEDGER_ST[e.status].icon), LEDGER_ST[e.status].label), h('span', { class: 'tag' }, e.has_time ? fmtAbs(e.ts) : e.date)),
     h('h3', null, e.title), h('pre', { class: 'pre' }, e.body));
@@ -961,7 +1197,8 @@ function openTopic(t) {
       Array.isArray(plan[k]) ? h('ul', null, plan[k].map(x => h('li', null, x))) : h('div', null, plan[k]))))] : null,
     [h('h4', null, `메모·검토 ${(t.notes || []).length}`), (t.notes || []).length ? h('div', { class: 'note-thread' }, t.notes.map(n => h('div', { class: 'note' }, av(n.by, false),
       h('div', { class: 'bubble' }, h('div', { class: 'h' }, h('b', null, person(n.by).name), h('span', { class: 'tag' }, NOTE_KIND[n.kind] || n.kind || '메모'), h('span', null, fmtAbs(n.ts))), h('p', null, n.body)))))
-      : empty('아직 메모가 없습니다. PC에서 topics.py로 분배·메모를 남깁니다.')]);
+      : empty('아직 메모가 없습니다. Claude가 분배하면 여기에 기록됩니다.')],
+    thread({ kind: 'topic', id: t.id, title: t.title }, () => openTopic(S.d.topics.find(x => x.id === t.id) || t), { placeholder: '이 주제에 덧붙일 말이나 답을 적으세요', to: t.assignee === 'astra' ? 'astra' : 'claude' }));
 }
 
 // ------------------------------------------------------------ 기타
@@ -979,4 +1216,12 @@ window.addEventListener('hashchange', () => { if (S.data) { readHash(); render()
 let resizeT;
 window.addEventListener('resize', () => { clearTimeout(resizeT); resizeT = setTimeout(() => { if (S.data && S.view === 'messages') render(); }, 200); });
 document.addEventListener('visibilitychange', () => { if (!document.hidden && S.data && hoursSince(S.env?.published_at) > 0.08) refresh(); });
+// 앱 설치(PWA) 지원: 서비스 워커 등록과 설치 버튼
+if ('serviceWorker' in navigator && window.isSecureContext) navigator.serviceWorker.register('sw.js').catch(() => {});
+window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); S.installPrompt = e; if (S.data) render(); });
+window.addEventListener('appinstalled', () => { S.installPrompt = null; toast('앱으로 설치했습니다'); if (S.data) render(); });
+async function installApp() {
+  if (S.installPrompt) { S.installPrompt.prompt(); await S.installPrompt.userChoice; S.installPrompt = null; render(); return; }
+  toast(/iPhone|iPad/.test(navigator.userAgent) ? 'Safari 공유 버튼 → "홈 화면에 추가"를 누르세요' : 'Chrome 메뉴(⋮) → "앱 설치" 또는 "전송, 저장, 공유 → 앱으로 설치"');
+}
 boot();
