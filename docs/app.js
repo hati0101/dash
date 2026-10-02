@@ -703,13 +703,12 @@ function vMine() {
   const redraw = () => { S._keepScroll = true; render(); };
   const decisions = q.decisions.length ? h('div', { class: 'list' }, q.decisions.map(x => h('div', { class: 'item' },
     h('span', { class: 'lead-ico warn' }, icon('scale')),
-    h('div', { class: 'body' }, h('div', { class: 't' }, x.question),
+    h('div', { class: 'body' }, h('button', { class: 't clamp-3 linkless', onclick: () => openDecisionNeeded(x) }, x.question),
       x.recommendation ? h('div', { class: 's' }, h('b', null, '권장 '), x.recommendation) : null,
       h('div', { class: 'meta' }, h('span', { class: 'wait' }, av(x._author || 'claude', true), `${person(x._author || 'claude').name} 질문`),
         x.task_id ? h('button', { class: 'tag', style: { cursor: 'pointer' }, onclick: () => { const t = S.d.topics.find(y => y.id === x.task_id); t ? openTopic(t) : openTaskById(x.task_id); } }, x.task_id) : null,
         h('span', { class: 'when' }, fmtRel(x.since))),
-      h('div', { class: 'choice-row' }, (x.options || []).map(o => h('button', { class: 'btn sm', onclick: () => decide(x, o, '', redraw) }, o)),
-        h('button', { class: 'btn sm', onclick: () => openDecisionNeeded(x) }, icon('messages'), '직접 적기')))))) : empty('답할 결정이 없습니다.');
+      h('div', { class: 'choice-row' }, h('button', { class: 'btn sm primary', onclick: () => openDecisionNeeded(x) }, icon('scale'), `열어서 결정${(x.options || []).length ? ` (선택지 ${x.options.length}개)` : ''}`)))))) : empty('답할 결정이 없습니다.');
   const questions = q.questions.length ? h('div', { class: 'list' }, q.questions.map(({ topic, note }) => h('div', { class: 'item' },
     h('span', { class: 'lead-ico warn' }, icon('messages')),
     h('div', { class: 'body' }, h('div', { class: 't' }, note.body), h('div', { class: 'meta' }, h('span', { class: 'wait' }, av(note.by, true), person(note.by).name),
@@ -758,11 +757,10 @@ function decisionsNeededCard() {
       const ans = S.d.answers[q.id];
       return h('div', { class: 'item' },
         h('span', { class: `lead-ico ${ans ? 'good' : 'warn'}` }, icon(ans ? 'check' : 'scale')),
-        h('div', { class: 'body' }, h('div', { class: 't' }, q.question),
+        h('div', { class: 'body' }, h('button', { class: 't clamp-3 linkless', onclick: () => openDecisionNeeded(q) }, q.question),
           q.recommendation && !ans ? h('div', { class: 's' }, h('b', null, '권장 '), q.recommendation) : null,
-          ans ? h('div', { class: 's' }, h('b', null, '내 결정: '), ans.choice || '(메모)', ans.note ? ' — ' + ans.note : '', ' · ', ans.pending ? '반영 대기' : 'Claude에게 전달됨')
-            : h('div', { class: 'choice-row' }, (q.options || []).map(o => h('button', { class: 'btn sm', onclick: () => decide(q, o) }, o)),
-              h('button', { class: 'btn sm', onclick: () => openDecisionNeeded(q) }, icon('messages'), '직접 적기')),
+          ans ? h('div', { class: 's' }, h('b', null, '내 결정: '), ans.choice || '(메모)', ans.note ? ' — ' + ans.note : '', ' · ', ans.pending ? '반영 대기' : '전달됨')
+            : h('div', { class: 'choice-row' }, h('button', { class: 'btn sm primary', onclick: () => openDecisionNeeded(q) }, icon('scale'), `열어서 결정${(q.options || []).length ? ` (선택지 ${q.options.length}개)` : ''}`)),
           h('div', { class: 'meta' }, h('span', { class: 'wait' }, av(q.owner || 'user', true), (person(q.owner || 'user').name) + ' 결정'),
             h('span', { class: 'tag' }, `${q._author} 제기`), h('span', { class: 'when' }, fmtRel(q.since)))));
     })) : empty('지금 결정할 문제가 없습니다.'));
@@ -1307,14 +1305,28 @@ function assignControl(t) {
 function openDecisionNeeded(q) {
   const redraw = () => openDecisionNeeded(q);
   const ans = S.d.answers[q.id];
-  const note = h('textarea', { placeholder: '선택지 말고 직접 적을 내용 (선택)', rows: '3', 'aria-label': '결정 메모' });
-  drawer('결정이 필요한 문제', h('h3', null, q.question),
+  const note = h('textarea', { placeholder: '선택지 말고 직접 적거나, 고른 선택지에 덧붙일 말 (선택)', rows: '3', 'aria-label': '결정 메모' });
+  const topic = q.task_id ? S.d.topics.find(t => t.id === q.task_id) : null;
+  modal('결정이 필요한 문제',
+    h('div', { class: 'meta', style: { display: 'flex', gap: '8px', 'flex-wrap': 'wrap', 'align-items': 'center' } },
+      h('span', { class: 'wait' }, av(q._author || 'claude', true), `${person(q._author || 'claude').full} 질문`),
+      topic ? h('button', { class: 'tag', style: { cursor: 'pointer' }, onclick: () => openTopic(topic) }, '주제: ' + topic.title) : null,
+      h('span', { class: 'when' }, fmtRel(q.since))),
+    questionText(q.question),
     q.recommendation ? h('div', { class: 'callout' }, h('b', null, '권장 '), q.recommendation) : null,
     ans ? h('div', { class: 'callout' }, h('b', null, '내 결정: '), ans.choice || '(메모)', ans.note ? ' — ' + ans.note : '', ' ', ans.pending ? h('span', { class: 'st user_test' }, icon('clock'), '반영 대기') : h('span', { class: 'st done' }, icon('check'), '반영됨')) : null,
-    h('h4', null, '선택'),
-    h('div', { style: { display: 'flex', gap: '8px', 'flex-wrap': 'wrap' } }, (q.options || []).map(o => h('button', { class: 'btn', onclick: () => decide(q, o, note.value.trim(), redraw) }, o))),
+    (q.options || []).length ? [h('h4', null, '선택지 — 누르면 바로 결정됩니다'), optionList(q, o => decide(q, o, note.value.trim(), redraw))] : null,
+    h('h4', null, '직접 적기'),
     h('div', { class: 'composer' }, note, h('div', { class: 'row' }, h('button', { class: 'btn primary', onclick: () => { if (!note.value.trim()) { note.focus(); return; } decide(q, '', note.value.trim(), redraw); } }, icon('send'), '메모로 결정 보내기'))),
     sendHint());
+}
+// AI 질문은 "(1) … (2) …"처럼 한 줄로 오는 경우가 많아 번호마다 줄을 나눠 읽기 쉽게 한다
+function questionText(s) {
+  const text = String(s || '').replace(/\s*\((\d{1,2})\)\s*/g, '\n\n($1) ').replace(/^\s+/, '');
+  return h('div', { class: 'q-text' }, text);
+}
+function optionList(q, pick) {
+  return h('div', { class: 'opt-list' }, (q.options || []).map(o => h('button', { class: 'opt', onclick: () => pick(o) }, o)));
 }
 
 function tokenCard() {
@@ -1346,10 +1358,13 @@ function tokenCard() {
 }
 
 // ------------------------------------------------------------ 서랍(상세)
-function drawer(eyebrow, ...content) {
+function drawer(eyebrow, ...content) { return openPanel('drawer', eyebrow, content); }
+// 가운데 모달: 결정·승인처럼 읽고 고르는 화면. 내용이 길어도 잘리지 않고 안에서 스크롤된다
+function modal(eyebrow, ...content) { return openPanel('drawer modal', eyebrow, content); }
+function openPanel(cls, eyebrow, content) {
   closeDrawer(true);
   const scrim = h('div', { class: 'scrim', onclick: () => closeDrawer() });
-  const panel = h('aside', { class: 'drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': eyebrow },
+  const panel = h('aside', { class: cls, role: 'dialog', 'aria-modal': 'true', 'aria-label': eyebrow },
     h('div', { class: 'drawer-h' }, h('span', { class: 'eyebrow' }, eyebrow), h('button', { class: 'icon-btn', 'aria-label': '닫기', onclick: () => closeDrawer() }, icon('x'))),
     h('div', { class: 'drawer-b' }, content));
   document.body.append(scrim, panel);
