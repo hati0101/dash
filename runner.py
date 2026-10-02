@@ -4,7 +4,9 @@
 - AI에게는 읽기 도구만 준다(Claude: Read/Grep/Glob, Codex: 읽기 전용 샌드박스). AI는 명령을 실행하거나 파일을 고치지 않는다.
 - AI는 '다음 행동'을 정해진 JSON으로만 답한다. 실제 기록(착수·진행 베이스·메모·완료·질문·메모 올리기·작업물 메모)은 이 실행기가 검증한 뒤 한다.
 - 코드 적용·설치·재시작·DB·배포·운영 변경이 필요하면 AI는 'ask'로 아키텍트에게 묻고 멈춘다. 답은 대시보드 '결정이 필요한 문제'에서 버튼으로 한다.
-- 같은 단계는 한 번만 깨운다. 한 주제는 하루 최대 6번. 한 번 실행에 최대 3건.
+- 같은 단계는 한 번만 깨운다. 깨우는 기준은 '자기 말고 다른 쪽의 변화'(다른 작업자 기록·아키텍트 답·담당/단계 변화)다.
+  자기가 남긴 기록으로 자기를 다시 깨우지 않는다(작업 모드에서 결과물이 늘었을 때만 이어서 깨운다).
+- 한 주제는 하루 최대 10번. 한 번 실행에 최대 3건.
 
   python runner.py            할 일이 있으면 처리
   python runner.py --dry-run  무엇을 깨울지만 보여 줌(실행 안 함)
@@ -100,10 +102,33 @@ def load_data(pw: str) -> dict:
     return data
 
 
+SIG_V = 2
+
+
+def topic_sig(t: dict, who: str, mode: str, data: dict, st: dict) -> str:
+    """깨울지 판단하는 신호. 자기(who)가 남긴 기록은 세지 않는다(자기 재깨움 방지).
+    - 단계(착수 전 → 착수 → 진행 베이스)와 모드(읽기/작업)는 한 방향으로만 바뀌므로 단계마다 한 번씩만 깨운다.
+    - 다른 작업자 기록 수, 아키텍트·다른 작업자의 대화 수가 늘면 깨운다.
+    - cont: 작업 모드에서 결과물이 늘었으면 실행기가 올려 이어서 깨운다(하루 한도 안에서)."""
+    notes = t.get("notes", [])
+    if who == t.get("assignee"):
+        claimed = any(n.get("by") == who and n.get("kind") == "claim" for n in notes)
+        stage = "planned" if t.get("plan") else "claimed" if claimed else "new"
+    else:
+        stage = "review"
+    others = sum(1 for n in notes if n.get("by") != who)
+    talk = sum(1 for c in data.get("comments", [])
+               if (c.get("target") or {}).get("id") == t["id"] and (c.get("_author") or c.get("by")) != who)
+    return hashlib.sha1(json.dumps([t["id"], who, stage, mode, others, talk, st.get("cont", 0)],
+                                   ensure_ascii=False).encode()).hexdigest()[:12]
+
+
 def find_jobs(data: dict, state: dict) -> list[dict]:
     agents = node.my_agents(CFG)
     today = f"{now():%Y%m%d}"
     answers = {a["id"]: a for a in data.get("decisions_answered", [])}
+    migrate = state.get("sig_v") != SIG_V
+    state["sig_v"] = SIG_V
     jobs = []
     for t in data.get("topics", []):
         who = t.get("turn")
@@ -113,9 +138,11 @@ def find_jobs(data: dict, state: dict) -> list[dict]:
         # 개발 PC(허브)는 기본 허용, 다른 PC는 config "implement": true일 때만(운영 서버 보호).
         impl_ok = CFG.get("implement", (CFG.get("pc") or {}).get("role") == "hub")
         mode = "impl" if (impl_ok and who == t.get("assignee") and t.get("plan") and t.get("status") == "active" and WORK_PY.exists()) else "plan"
-        sig = hashlib.sha1(json.dumps([t["id"], who, t.get("status"), len(t.get("notes", [])), bool(t.get("plan")), mode],
-                                      ensure_ascii=False).encode()).hexdigest()[:12]
         st = state.setdefault("topics", {}).setdefault(t["id"], {})
+        sig = topic_sig(t, who, mode, data, st)
+        if migrate and st.get("last_sig") and st.get("last_sig") != sig:
+            st["last_sig"] = sig  # 계산 방식이 바뀐 첫 실행: 이미 처리한 주제를 한꺼번에 다시 깨우지 않는다
+            continue
         if st.get("last_sig") == sig:
             continue
         if st.get("day") == today and st.get("count", 0) >= MAX_PER_TOPIC_PER_DAY:
@@ -153,15 +180,43 @@ def impl_section(job: dict, ws: Path | None) -> str:
 """
 
 
+def run_work(*args: str) -> subprocess.CompletedProcess:
+    """작업물 저장소 도구 실행. 한글 출력이 깨지지 않게 UTF-8로 받는다."""
+    env = {**{k: v for k, v in os.environ.items() if k != "REAL_OPS_PASSWORD"}, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+    return subprocess.run([sys.executable, str(WORK_PY), *args], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", env=env)
+
+
+def linked_work_ids(topic_id: str | None) -> list[str]:
+    """작업물 저장소에서 이 주제에 연결된 작업 ID(README의 '대시보드 주제' 칸이 같은 것)."""
+    base = WORK_PY.parent / "work"
+    if not topic_id or not base.is_dir():
+        return []
+    ids = []
+    for readme in sorted(base.glob("*/README.md")):
+        try:
+            m = re.search(r"^\| 대시보드 주제 \| (.*?) \|$", readme.read_text(encoding="utf-8", errors="replace"), re.M)
+        except OSError:
+            continue
+        if m and m.group(1).strip() == topic_id:
+            ids.append(readme.parent.name)
+    return ids
+
+
+def allowed_work_ids(job: dict) -> list[str]:
+    ids = set(linked_work_ids((job.get("topic") or {}).get("id")))
+    if job.get("work_id"):
+        ids.add(job["work_id"])
+    return sorted(ids)
+
+
 def prepare_workspace(job: dict) -> Path | None:
     """작업물 저장소에 이 주제의 작업 폴더를 만든다(FT-날짜-번호/<작업자>/). 실패하면 None(읽기 모드로)."""
     t = job["topic"]
     wid = "FT-" + t["id"][2:]
     base = WORK_PY.parent / "work" / wid
     if not (base / "README.md").exists():
-        r = subprocess.run([sys.executable, str(WORK_PY), "new", wid, "--agent", job["agent"], "--kind", "기능",
-                            "--title", (t.get("title") or wid)[:120], "--topic", t["id"]],
-                           capture_output=True, text=True, encoding="utf-8", errors="replace")
+        r = run_work("new", wid, "--agent", job["agent"], "--kind", "기능", "--title", (t.get("title") or wid)[:120], "--topic", t["id"])
         if r.returncode != 0:
             log(f"  작업 폴더 만들기 실패: {r.stdout.strip() or r.stderr.strip()}")
             return None
@@ -182,6 +237,7 @@ def build_prompt(job: dict, data: dict, workspace: Path | None = None) -> str:
     convo = "\n".join(f"- {c.get('_author') or c.get('by')}: {str(c.get('body', ''))[:800]}" for c in comments[-10:]) or "(없음)"
     plan = json.dumps(t.get("plan"), ensure_ascii=False, indent=1) if t.get("plan") else "(아직 없음)"
     role = "담당" if t.get("assignee") == job["agent"] else "교차 검토자"
+    work_ids = ", ".join(allowed_work_ids(job)) or "(없음)"
     ans = ""
     if job["kind"] == "answer":
         ans = (f"\n## 아키텍트의 답\n질문: {job['ask'].get('question')}\n답: {job['answer'].get('choice') or ''} {job['answer'].get('note') or ''}\n"
@@ -206,6 +262,9 @@ def build_prompt(job: dict, data: dict, workspace: Path | None = None) -> str:
 ## 진행 베이스
 {plan}
 
+## 연결된 작업물 ID (real-work)
+{work_ids}
+
 ## 아키텍트와의 대화
 {convo}
 {ans}
@@ -214,7 +273,7 @@ def build_prompt(job: dict, data: dict, workspace: Path | None = None) -> str:
 - 파일 수정·설치·재시작·DB 변경·배포·네트워크 사용은 하지 않는다(막혀 있다).
 - 조사가 필요하면 읽기 도구로 실제 파일을 읽고 근거(경로·줄)를 메모에 적는다. 추측은 추측이라고 적는다.
 - 코드 적용·빌드 산출물 설치·서버 재시작·DB 변경·배포·운영 설정 변경이 필요하면 직접 하지 말고 `ask`로 아키텍트에게 질문하고 멈춘다(선택지를 2~4개 준다).
-- 작업물 교환 저장소에 남길 내용이 있으면 `work_note`(work_id 필수, 예: IV-20261002-T1)로 남긴다.
+- 작업물 교환 저장소에 남길 내용이 있으면 `work_note`로 남긴다. work_id는 아래 '연결된 작업물 ID'에서만 고른다(비어 있으면 work_note를 쓰지 않는다. ID를 지어내지 않는다).
 - 메모 수집 주제라면 찾은 메모를 한 건씩 `propose`로 올린다(비밀값은 [가림]).
 - 이미 끝낸 단계는 다시 하지 않는다. 할 일이 없으면 actions를 비워도 된다.
 
@@ -363,8 +422,11 @@ def apply(job: dict, result: dict, data: dict | None = None) -> list[str]:
                 node.add_proposal(CFG, agent, a["title"], body, a.get("kind") or "기타", "P2", a.get("origin") or "")
             elif typ == "work_note" and body and a.get("work_id") and WORK_PY.exists():
                 kind = a.get("kind") if a.get("kind") in ("메모", "검토", "검증", "질문", "답변", "적용기록") else "메모"
-                r = subprocess.run([sys.executable, str(WORK_PY), "note", a["work_id"], "--agent", agent, "--kind", kind, "--body", body[:6000]],
-                                   capture_output=True, text=True, encoding="utf-8", errors="replace")
+                allowed = allowed_work_ids(job)
+                if a["work_id"] not in allowed:
+                    done.append(f"작업물 메모 거부: {a['work_id']}는 이 주제에 연결된 작업이 아님({', '.join(allowed) or '연결 없음'})")
+                    continue
+                r = run_work("note", a["work_id"], "--agent", agent, "--kind", kind, "--body", body[:6000])
                 if r.returncode != 0:
                     done.append(f"작업물 메모 실패: {r.stdout.strip() or r.stderr.strip()}")
                     continue
@@ -376,8 +438,7 @@ def apply(job: dict, result: dict, data: dict | None = None) -> list[str]:
         except SystemExit as exc:  # node.py 검증 실패
             done.append(f"{typ} 거부: {exc}")
     if work_touched:
-        r = subprocess.run([sys.executable, str(WORK_PY), "sync", "--agent", agent, "--message", f"자동 실행기 {tid or ''}"],
-                           capture_output=True, text=True, encoding="utf-8", errors="replace")
+        r = run_work("sync", "--agent", agent, "--message", f"자동 실행기 {tid or ''}")
         done.append("작업물 올림" if r.returncode == 0 else f"작업물 올리기 실패: {r.stdout.strip()[-300:]}")
     return done
 
@@ -411,6 +472,8 @@ def main():
     data = load_data(pw)
     jobs = find_jobs(data, state)
     if not jobs:
+        if not args.dry_run:
+            node.write_json(state_path, state)  # 신호 계산 방식 이전 표시 등은 저장해 둔다
         print("깨울 일 없음")
         return
     if args.dry_run:
@@ -448,13 +511,16 @@ def main():
                 continue
             done = apply(j, result, data)
             if ws:  # 작업 공간 결과물 올리기(비밀값 검사 포함)
-                r = subprocess.run([sys.executable, str(WORK_PY), "sync", "--agent", j["agent"], "--message", f"작업 모드 {t.get('id')}"],
-                                   capture_output=True, text=True, encoding="utf-8", errors="replace")
+                r = run_work("sync", "--agent", j["agent"], "--message", f"작업 모드 {t.get('id')}")
                 done.append("작업물 올림" if r.returncode == 0 else f"작업물 올리기 보류: {(r.stdout or r.stderr).strip()[-300:]}")
                 files = [p for p in ws.rglob("*") if p.is_file()]
                 if t.get("id") and len(files) != st.get("files", 0):  # 파일이 늘었을 때만 기록(같은 단계 반복 깨움 방지)
                     node.add_topic_record(CFG, t["id"], j["agent"], "memo",
                                           body=f"작업물: real-work/work/{j.get('work_id')}/{j['agent']}/ 에 파일 {len(files)}개")
+                    stopped = any(a.get("type") == "ask" or (a.get("type") == "state" and a.get("status") in ("done", "parked"))
+                                  for a in result.get("actions", []))
+                    if len(files) > st.get("files", 0) and not stopped:
+                        st["cont"] = st.get("cont", 0) + 1  # 진척이 있었으니 다음 동기화 때 이어서 깨운다
                 st["files"] = len(files)
             if j["kind"] == "answer":
                 state.setdefault("answers_used", []).append(j["ask"]["id"])
