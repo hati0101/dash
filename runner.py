@@ -328,7 +328,7 @@ def parse_actions(text: str) -> dict:
 WORK_PY = Path(r"D:\real-work\work.py")
 
 
-def apply(job: dict, result: dict) -> list[str]:
+def apply(job: dict, result: dict, data: dict | None = None) -> list[str]:
     agent, t = job["agent"], job.get("topic") or {}
     tid = t.get("id")
     done, work_touched = [], False
@@ -348,6 +348,16 @@ def apply(job: dict, result: dict) -> list[str]:
                 node.add_topic_record(CFG, tid, agent, "status", status=a["status"], body=body or f"상태 {a['status']}",
                                       linked_task_id=a.get("task") if a.get("task") and node.REF_RE.match(a["task"]) else None)
             elif typ == "ask" and (a.get("question") or "").strip():
+                answered = {x["id"] for x in (data or {}).get("decisions_answered", [])}
+                waiting = [q for q in (data or {}).get("decisions_needed", [])
+                           if q.get("_author") == agent and q.get("task_id") == tid and q["id"] not in answered]
+                local = [q for q in node.load_records(CFG).get("asks", []) if q.get("agent") == agent and q.get("topic") == tid
+                         and q["id"] not in answered and q["id"] not in {w["id"] for w in waiting}]
+                if (waiting or local) and tid:
+                    # 같은 주제에 답을 기다리는 질문이 이미 있으면 새로 쌓지 않고 메모로만 남긴다(아키텍트 대기열 중복 방지)
+                    node.add_topic_record(CFG, tid, agent, "question", body=f"(이전 질문에 덧붙임) {a['question'][:1500]}")
+                    done.append("ask→덧붙임")
+                    continue
                 node.add_ask(CFG, agent, tid, a["question"], a.get("options") or [])
             elif typ == "propose" and (a.get("title") or "").strip():
                 node.add_proposal(CFG, agent, a["title"], body, a.get("kind") or "기타", "P2", a.get("origin") or "")
@@ -436,7 +446,7 @@ def main():
                 st["last_error"] = f"답 해석 실패: {exc}"
                 st["last_sig"] = j["sig"]
                 continue
-            done = apply(j, result)
+            done = apply(j, result, data)
             if ws:  # 작업 공간 결과물 올리기(비밀값 검사 포함)
                 r = subprocess.run([sys.executable, str(WORK_PY), "sync", "--agent", j["agent"], "--message", f"작업 모드 {t.get('id')}"],
                                    capture_output=True, text=True, encoding="utf-8", errors="replace")
