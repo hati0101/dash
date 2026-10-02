@@ -970,3 +970,8 @@ body {
 .done-log ol { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
 .done-old { margin-top: 12px; }
 .done-old > summary { cursor: pointer; color: var(--ink-3); font-size: 12.5px; }
+/* 내 차례 검색(필터 옆) */
+.mine-search { margin-left: auto; display: flex; align-items: center; gap: 6px; padding: 0 10px; height: 34px; border: 1px solid var(--line-2); border-radius: 10px; background: var(--card); min-width: 220px; }
+.mine-search svg { width: 15px; height: 15px; color: var(--ink-3); flex: none; }
+.mine-search input { border: 0; background: none; outline: none; width: 100%; color: var(--ink); }
+@media (max-width: 880px) { .mine-search { margin-left: 0; min-width: 0; width: 100%; } }

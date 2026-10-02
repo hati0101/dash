@@ -53,9 +53,14 @@ SCHEMA = {
         "summary": {"type": "string"},
         "actions": {"type": "array", "items": {
             "type": "object", "additionalProperties": False,
-            "required": ["type", "kind", "body", "status", "plan", "work_id", "question", "options", "title", "origin", "task", "to"],
+            "required": ["type", "kind", "body", "status", "plan", "work_id", "question", "options", "title", "origin", "task", "to", "file", "edits", "cmd"],
             "properties": {
-                "type": {"type": "string", "enum": ["claim", "plan", "note", "state", "work_note", "ask", "propose", "handoff", "request", "reply"]},
+                "type": {"type": "string", "enum": ["claim", "plan", "note", "state", "work_note", "ask", "propose", "handoff", "request", "reply",
+                                                    "dev_edit", "dev_run", "dev_revert"]},
+                "file": {"type": ["string", "null"]},
+                "edits": {"type": ["array", "null"], "items": {"type": "object", "additionalProperties": False, "required": ["old", "new"],
+                                                                "properties": {"old": {"type": "string"}, "new": {"type": "string"}}}},
+                "cmd": {"type": ["string", "null"]},
                 "kind": {"type": ["string", "null"]},
                 "body": {"type": ["string", "null"]},
                 "status": {"type": ["string", "null"], "enum": ["triage", "ready", "active", "done", "parked", None]},
@@ -114,7 +119,7 @@ def load_data(pw: str) -> dict:
     return data
 
 
-def overlay_local(data: dict, rec: dict):
+def overlay_local(data: dict, rec: dict, only_after_gen: bool = False):
     """이 PC 기록 중 게시본에 아직 없는 것을 반영한다.
     상태는 '게시본이 상태를 정한 시각(status_at)'보다 나중 기록만 이긴다. 그래서 허브가 이 PC 기록을 받기 전에
     게시본을 만들었더라도, 이 PC에서 끝낸(done) 주제를 다시 깨우지 않는다."""
@@ -135,7 +140,7 @@ def overlay_local(data: dict, rec: dict):
         for r in rows:
             ts = r.get("ts") or ""
             when = to_dt(ts)
-            if r.get("status") in STATUSES and when > to_dt(t.get("status_at")) and t.get("status") != "dropped":
+            if r.get("status") in STATUSES and when > to_dt(t.get("status_at")) and t.get("status") != "dropped" and (not only_after_gen or when > gen):
                 t["status"], t["status_at"], changed = r["status"], ts, True
             if r.get("plan") and (not t.get("plan") or when > gen):
                 t["plan"], t["plan_by"], changed = r["plan"], r["agent"], True
@@ -233,6 +238,11 @@ def find_jobs(data: dict, state: dict, only: str | None = None) -> list[dict]:
     state["sig_v"] = SIG_V
     stamp = now().isoformat(timespec="seconds")
     jobs = []
+    from topics import to_dt
+    open_asks: dict[str, set] = {}  # 작업자별로 아키텍트 답을 기다리는 AI 질문이 걸린 주제
+    for q in data.get("decisions_needed", []):
+        if q.get("_author") and q["id"] not in answers and q.get("kind") not in ("gate", "stall"):
+            open_asks.setdefault(q["_author"], set()).add(q.get("task_id"))
 
     def limited(st: dict) -> bool:
         return (st.get("day") == today and st.get("count", 0) >= MAX_PER_TOPIC_PER_DAY) or (st.get("retry_after") or "") > stamp
@@ -253,10 +263,23 @@ def find_jobs(data: dict, state: dict, only: str | None = None) -> list[dict]:
         if migrate and st.get("last_sig") and st.get("last_sig") != sig:
             st["last_sig"], st["last_parts"] = sig, parts  # 계산 방식이 바뀐 첫 실행: 이미 처리한 주제를 한꺼번에 다시 깨우지 않는다
             continue
-        if st.get("last_sig") == sig or limited(st):
+        if limited(st):
             continue
-        jobs.append({"kind": "topic", "agent": who, "topic": t, "sig": sig, "mode": mode, "parts": parts,
-                     "reason": wake_reason(parts, st.get("last_parts"))})
+        reason = wake_reason(parts, st.get("last_parts"))
+        if st.get("last_sig") == sig:
+            # 이 단계를 이미 처리했는데 차례가 그대로다(아키텍트가 보류하지 않았다) → 멈추지 않고 간격을 두고 다시 깨운다.
+            # 아키텍트 답을 기다리는 질문이 있으면 그 답이 올 때까지는 기다린다(답이 오면 답 처리로 깨운다)
+            if t["id"] in open_asks.get(who, set()):
+                continue
+            seen = (st.get("last_result") or {}).get("at") or st.get("skip_since")
+            if not seen:
+                continue  # 언제 처리했는지 모르면(옛 상태 파일) 이번에는 두고 다음 실행 기록부터 판단한다
+            last = to_dt(seen)
+            wait = 30 if st.get("idle_runs", 0) <= 2 else 120
+            if (now() - last).total_seconds() < wait * 60:
+                continue
+            reason = f"이 단계를 처리한 뒤 변화 없이 차례가 그대로라 다시 깨움({wait}분 간격)"
+        jobs.append({"kind": "topic", "agent": who, "topic": t, "sig": sig, "mode": mode, "parts": parts, "reason": reason})
     # 내가 물었던 질문에 아키텍트가 답했으면 다시 깨운다(한 답에 한 번, 주제 하루 한도에 포함)
     used = state.setdefault("answers_used", [])
     for q in data.get("decisions_needed", []):
@@ -291,6 +314,273 @@ def find_jobs(data: dict, state: dict, only: str | None = None) -> list[dict]:
     if only:
         return jobs[:MAX_PER_RUN]
     return jobs
+
+
+# ---------------------------------------------------------------- 개발 트리 수정·빌드·시험(아키텍트 승인 2026-10-03, 개발컴 실행기만)
+# AI는 개발 트리에 직접 쓰지 않는다. dev_edit(바꿀 부분 old→new)·dev_run(정해진 이름의 명령)·dev_revert를 남기면 실행기가 검사 뒤 대신 한다.
+# 고칠 때마다 원본 대비 diff를 작업물 patch/에 남긴다(운영 패치용). 백업·로그는 scratch(F 드라이브)에 모으고 정리 규칙대로 지운다.
+# 운영 서버(서버컴)는 대상이 아니다. 설정: config agents[].dev = {root, write, scratch, scratch_cap_gb, commands{이름: [명령…]}, timeout_min}
+import difflib  # noqa: E402
+
+DEV_DENY = re.compile(r"(^|/)(\.git|\.vs|harness|bin)(/|$)|\.(exe|dll|pdb|lib|obj|ilk|idb|exp)$", re.I)
+
+
+def dev_cfg(agent_id: str | None) -> dict | None:
+    d = (node.my_agents(CFG).get(agent_id) or {}).get("dev") if agent_id else None
+    return d if d and d.get("root") and Path(d["root"]).is_dir() else None
+
+
+def dev_scratch(dev: dict) -> Path:
+    return Path(dev.get("scratch") or r"F:\real-dev-scratch")
+
+
+def _sha(b: bytes) -> str:
+    return hashlib.sha256(b).hexdigest()
+
+
+def _dev_json(path: Path, default):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return default
+
+
+def _dev_save(path: Path, obj):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    node.write_json(path, obj)
+
+
+def _decode(raw: bytes) -> tuple[str, str]:
+    if raw.startswith(b"\xef\xbb\xbf"):
+        return raw[3:].decode("utf-8"), "utf-8-sig"
+    try:
+        return raw.decode("utf-8"), "utf-8"
+    except UnicodeDecodeError:
+        return raw.decode("cp949"), "cp949"
+
+
+def _encode(text: str, enc: str) -> bytes:
+    return (b"\xef\xbb\xbf" + text.encode("utf-8")) if enc == "utf-8-sig" else text.encode(enc)
+
+
+def dev_edit(agent_id: str, tid: str, a: dict, ws: Path | None) -> str:
+    """바꿀 부분(old)을 정확히 한 곳에서 찾아 new로 바꾼다. 원래 인코딩·줄바꿈 유지, 처음 고칠 때 원본 백업, diff를 작업물에 남긴다."""
+    dev = dev_cfg(agent_id)
+    if not dev:
+        raise ValueError("이 작업자는 개발 트리를 고칠 수 없음")
+    rel = str(a.get("file") or "").replace("\\", "/").strip().lstrip("/")
+    parts = rel.split("/")
+    if not rel or ".." in parts or DEV_DENY.search(rel) or parts[0] not in dev.get("write", []):
+        raise ValueError(f"고칠 수 없는 경로: {rel or '(없음)'} (허용: {', '.join(dev.get('write', []))})")
+    root = Path(dev["root"]).resolve()
+    path = (root / rel).resolve()
+    if root not in path.parents:
+        raise ValueError(f"개발 트리 밖 경로: {rel}")
+    edits = a.get("edits") or []
+    if not edits or len(edits) > 30:
+        raise ValueError("edits는 1~30개")
+    exists = path.exists()
+    raw = path.read_bytes() if exists else b""
+    text, enc = _decode(raw) if exists else ("", "utf-8")
+    crlf = "\r\n" in text
+    work = text.replace("\r\n", "\n")
+    for e in edits:
+        old = str(e.get("old") or "").replace("\r\n", "\n")
+        new = str(e.get("new") or "").replace("\r\n", "\n")
+        if not exists and old == "" and len(edits) == 1:
+            work = new  # 새 파일
+            continue
+        n = work.count(old) if old else 0
+        if n != 1:
+            raise ValueError(f"{rel}: 바꿀 부분을 정확히 한 곳에서 찾지 못함({n}곳) — 앞뒤 줄을 더 넣어 유일하게: {old[:80]!r}")
+        work = work.replace(old, new, 1)
+    try:
+        out = _encode(work.replace("\n", "\r\n") if crlf else work, enc)
+    except UnicodeEncodeError:
+        raise ValueError(f"{rel}: 원래 인코딩({enc})으로 쓸 수 없는 글자가 있음")
+    sc = dev_scratch(dev)
+    locks = _dev_json(sc / "locks.json", {})
+    if locks.get(rel) and locks[rel] != tid:
+        raise ValueError(f"{rel}: 다른 주제({locks[rel]})가 고치는 중인 파일")
+    mpath = sc / tid / "manifest.json"
+    man = _dev_json(mpath, {"files": {}, "builds": [], "created": now().isoformat(timespec="seconds")})
+    f = man["files"].get(rel)
+    if f:
+        if _sha(raw) != f.get("last_sha"):
+            raise ValueError(f"{rel}: 이 주제가 마지막으로 고친 뒤 다른 곳에서 바뀜 — 대화 세션에서 확인 필요")
+    else:
+        if exists:
+            bk = sc / tid / "backup" / rel
+            bk.parent.mkdir(parents=True, exist_ok=True)
+            bk.write_bytes(raw)
+        f = man["files"][rel] = {"base_sha": _sha(raw) if exists else None, "created": not exists, "enc": enc}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".runner.tmp")
+    tmp.write_bytes(out)
+    os.replace(tmp, path)
+    f["last_sha"] = _sha(out)
+    _dev_save(mpath, man)
+    locks[rel] = tid
+    _dev_save(sc / "locks.json", locks)
+    # 원본 대비 diff(운영 패치용)를 작업물 patch/에
+    base = (sc / tid / "backup" / rel)
+    base_text = _decode(base.read_bytes())[0].replace("\r\n", "\n") if base.exists() else ""
+    lines = list(difflib.unified_diff(base_text.splitlines(True), work.splitlines(True), f"a/{rel}", f"b/{rel}"))
+    dest = (ws or (sc / tid)) / "patch" / (rel.replace("/", "__") + ".diff")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(f"# 원본 SHA256 {f['base_sha'] or '(새 파일)'}\n# 수정 SHA256 {f['last_sha']}\n# 인코딩 {enc} · 줄바꿈 {'CRLF' if crlf else 'LF'}\n" + "".join(lines), encoding="utf-8")
+    add = sum(1 for x in lines if x.startswith("+") and not x.startswith("+++"))
+    rem = sum(1 for x in lines if x.startswith("-") and not x.startswith("---"))
+    return f"{rel} 수정(원본 대비 +{add}/-{rem}줄) · diff patch/{dest.name}"
+
+
+def _build_dirs(dev: dict) -> set:
+    runs = Path(dev["root"]) / "harness" / "runs"
+    return {str(p) for p in runs.glob("build-*") if p.is_dir()} if runs.is_dir() else set()
+
+
+def dev_run(agent_id: str, tid: str, a: dict) -> str:
+    """정해진 이름의 명령만 실행한다(빌드·검사). 결과 꼬리를 돌려주고 전체 기록은 scratch/logs에. 실행기가 만든 빌드 사본만 관리한다."""
+    dev = dev_cfg(agent_id)
+    if not dev:
+        raise ValueError("이 작업자는 개발 명령을 돌릴 수 없음")
+    name = str(a.get("cmd") or "").strip()
+    argv = (dev.get("commands") or {}).get(name)
+    if not argv:
+        raise ValueError(f"없는 명령 '{name}' (가능: {', '.join(dev.get('commands') or {})})")
+    sc = dev_scratch(dev)
+    before = _build_dirs(dev)
+    t0 = now()
+    try:
+        r = subprocess.run(argv, cwd=dev["root"], capture_output=True, timeout=int(dev.get("timeout_min", 45)) * 60, env=child_env(), creationflags=NO_WINDOW)
+        rc, out = r.returncode, (r.stdout + b"\n" + r.stderr)
+    except subprocess.TimeoutExpired as exc:
+        rc, out = -1, (exc.stdout or b"") + "\n[시간 초과]".encode("utf-8")
+    text = _decode(out)[0] if out else ""
+    secs = int((now() - t0).total_seconds())
+    log_path = sc / tid / "logs" / f"{t0:%Y%m%d-%H%M%S}-{name}.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(text, encoding="utf-8")
+    new_dirs = sorted(_build_dirs(dev) - before)
+    mpath = sc / tid / "manifest.json"
+    man = _dev_json(mpath, {"files": {}, "builds": [], "created": now().isoformat(timespec="seconds")})
+    artifact = ""
+    for d in new_dirs:
+        res = _dev_json(Path(d) / "result.json", {})
+        ok = rc == 0 and res.get("status", "PASS") == "PASS"
+        man["builds"].append({"dir": d, "cmd": name, "ok": ok, "at": t0.isoformat(timespec="seconds"), "artifact": res.get("artifact"), "sha256": res.get("sha256")})
+        if ok and res.get("artifact"):
+            artifact = f"\n빌드 결과물: {res['artifact']} (SHA256 {str(res.get('sha256'))[:16]}…)"
+    # 정리: 실패했거나 더 새 성공 빌드로 대체된 사본은 바로 지운다(성공한 최신 하나만 실게임 시험용으로 남김)
+    oks = [b for b in man["builds"] if b.get("ok") and not b.get("removed")]
+    keep = oks[-1]["dir"] if oks else None
+    for b in man["builds"]:
+        if not b.get("removed") and b["dir"] != keep:
+            shutil.rmtree(b["dir"], ignore_errors=True)
+            b["removed"] = True
+    _dev_save(mpath, man)
+    tail = text.strip()[-2500:]
+    return f"[{name}] 종료 코드 {rc} · {secs}초{artifact}\n{tail}\n(전체 기록: {log_path})"
+
+
+def dev_revert(agent_id: str | None, tid: str, rel: str | None = None, force: bool = False) -> list[str]:
+    """이 주제가 고친 파일을 원본으로 되돌린다. 그 뒤 다른 곳에서 바뀐 파일은 건드리지 않는다(force가 아니면)."""
+    devs = [dev_cfg(agent_id)] if agent_id else [d for d in (a.get("dev") for a in node.my_agents(CFG).values()) if d]
+    msgs = []
+    for dev in [d for d in devs if d]:
+        sc = dev_scratch(dev)
+        mpath = sc / tid / "manifest.json"
+        man = _dev_json(mpath, None)
+        if not man:
+            continue
+        locks = _dev_json(sc / "locks.json", {})
+        for name, f in list(man["files"].items()):
+            if rel and name != rel:
+                continue
+            path = Path(dev["root"]) / name
+            cur = _sha(path.read_bytes()) if path.exists() else None
+            if cur != f.get("last_sha") and not force:
+                msgs.append(f"{name}: 다른 곳에서 바뀌어 되돌리지 않음")
+                continue
+            bk = sc / tid / "backup" / name
+            if f.get("created"):
+                path.unlink(missing_ok=True)
+            elif bk.exists():
+                path.write_bytes(bk.read_bytes())
+            msgs.append(f"{name}: 원본으로 되돌림")
+            man["files"].pop(name, None)
+            if locks.get(name) == tid:
+                locks.pop(name)
+        _dev_save(mpath, man)
+        _dev_save(sc / "locks.json", locks)
+    return msgs
+
+
+def dev_cleanup(data: dict) -> list[str]:
+    """정리 규칙(아키텍트 지시 2026-10-03: 시험 뒤에는 기술 문서와 diff만 남긴다).
+    - 주제가 ★4를 통과했거나(★5 이후) 완료되면: 개발 트리 변경은 그대로 두고 백업·로그·빌드 사본을 지운다
+    - 보류·삭제·사라진 주제: 그 뒤 손대지 않은 파일은 원본으로 되돌린 뒤 지운다
+    - 7일 지난 로그·빌드 사본은 지운다 · 전체가 상한(GB)을 넘으면 오래된 빌드부터 지운다"""
+    out = []
+    topics = {t["id"]: t for t in data.get("topics", [])}
+    for aid, a in node.my_agents(CFG).items():
+        dev = dev_cfg(aid)
+        if not dev:
+            continue
+        sc = dev_scratch(dev)
+        if not sc.is_dir():
+            continue
+        locks = _dev_json(sc / "locks.json", {})
+        cutoff = now() - timedelta(days=7)
+        for d in [p for p in sc.iterdir() if p.is_dir()]:
+            tid, man = d.name, _dev_json(d / "manifest.json", {"files": {}, "builds": []})
+            t = topics.get(tid)
+            passed = t and (t.get("status") == "done" or any(h.get("n") in (4, 40) and h.get("act") in ("open5", "done", "followup") for h in t.get("gate_history") or [])
+                            or (t.get("gate") or {}).get("n") in (5, 7, 9) or t.get("stage") in ("pack", "deploy"))
+            if not t:
+                continue  # 게시본에 없는 주제(읽기 오류 등)는 건드리지 않는다
+            gone = t.get("status") in ("parked", "dropped")
+            if gone:
+                out += [f"{tid} {m}" for m in dev_revert(aid, tid)]
+            if passed or gone:
+                for b in man.get("builds", []):
+                    if not b.get("removed"):
+                        shutil.rmtree(b["dir"], ignore_errors=True)
+                for name in list(man.get("files", {})):
+                    if locks.get(name) == tid:
+                        locks.pop(name)
+                shutil.rmtree(d, ignore_errors=True)
+                out.append(f"{tid} 정리({'완료·★4 통과' if passed else '보류·삭제'}): 백업·로그·빌드 사본 삭제, 문서·diff는 작업물에 남김")
+                continue
+            for b in man.get("builds", []):  # 7일 지난 빌드 사본
+                if not b.get("removed") and b.get("at", "") < cutoff.isoformat():
+                    shutil.rmtree(b["dir"], ignore_errors=True)
+                    b["removed"] = True
+            for lg in (d / "logs").glob("*.log") if (d / "logs").is_dir() else []:
+                if datetime.fromtimestamp(lg.stat().st_mtime, KST) < cutoff:
+                    lg.unlink(missing_ok=True)
+            _dev_save(d / "manifest.json", man)
+        _dev_save(sc / "locks.json", locks)
+        # 용량 상한: 오래된 빌드 사본부터
+        cap = float(dev.get("scratch_cap_gb", 20)) * 1024 ** 3
+        def size(p: Path) -> int:
+            return sum(f.stat().st_size for f in p.rglob("*") if f.is_file()) if p.exists() else 0
+        builds = sorted(((d.name, b) for d in sc.iterdir() if d.is_dir() for b in _dev_json(d / "manifest.json", {}).get("builds", []) if not b.get("removed")),
+                        key=lambda x: x[1].get("at", ""))
+        total = size(sc) + sum(size(Path(b["dir"])) for _, b in builds)
+        for tid, b in builds:
+            if total <= cap:
+                break
+            s = size(Path(b["dir"]))
+            shutil.rmtree(b["dir"], ignore_errors=True)
+            total -= s
+            m = _dev_json(sc / tid / "manifest.json", {})
+            for x in m.get("builds", []):
+                if x.get("dir") == b["dir"]:
+                    x["removed"] = True
+            _dev_save(sc / tid / "manifest.json", m)
+            out.append(f"{tid} 용량 상한으로 빌드 사본 삭제: {b['dir']}")
+    return out
 
 
 # ---------------------------------------------------------------- 작업물(real-work)
@@ -404,6 +694,26 @@ READ_HINT = {
 }
 
 
+def dev_section(job: dict) -> str:
+    """개발 트리 권한이 있는 작업자(개발컴 Claude)가 이 단계 담당일 때: 실제로 고치고 빌드·시험하는 방법."""
+    dev = dev_cfg(job["agent"])
+    if not dev or job["agent"] != stage_doer(job.get("topic") or {}):
+        return ""
+    cmds = "\n".join(f"  - `{k}`" for k in (dev.get("commands") or {}))
+    return f"""## 개발 트리 직접 수정·빌드·시험 (아키텍트 승인 2026-10-03, 개발컴 격리 개발 트리만)
+개발 트리: `{dev['root']}` (고칠 수 있는 폴더: {', '.join(dev.get('write', []))}). 운영 서버는 대상이 아니다.
+- 파일을 직접 쓰지 말고 행동으로 요청한다. 실행기가 검사 뒤 적용하고 결과를 이 주제 기록([실행기 …] 메모)으로 돌려준다.
+- `dev_edit`: file=개발 트리 기준 상대 경로(예: src/map/skill.cpp), edits=[{{"old": 바꿀 부분 원문(정확히 한 곳에만 있도록 앞뒤 줄 포함), "new": 바꾼 내용}}]. 새 파일은 edits=[{{"old": "", "new": 전체 내용}}].
+  원래 인코딩·줄바꿈은 실행기가 지킨다. 고칠 때마다 원본 대비 diff가 작업물 patch/에 자동으로 생긴다.
+- `dev_run`: cmd=아래 이름 중 하나만(다른 명령은 거부). C++을 고쳤으면 관련 타깃을 빌드한다.
+{cmds}
+- `dev_revert`: file=되돌릴 파일(비우면 이 주제가 고친 파일 전부)을 원본으로.
+- 한 번에 고치고(dev_edit) 이어서 빌드(dev_run)까지 같은 답에 넣어도 된다. 결과는 다음 실행에서 기록으로 보고 이어서 고친다.
+- 2 진행: 실제로 고친다. 3 자체 시험: 관련 빌드·검사를 돌려 통과시킨다(실패하면 고치고 다시). 같은 문제로 세 번 실패하면 ask.
+- 끝냄(state done) body와 작업물 DESIGN.md에는 정확한 기술 문서를 남긴다: 바꾼 파일·이유·영향, 빌드 결과(결과물 경로·SHA256), 시험 방법·체크리스트. 시험 뒤에는 이 문서와 diff만 남고 빌드 사본·백업은 정리된다.
+"""
+
+
 def impl_section(job: dict, ws: Path | None) -> str:
     if not ws:
         return ""
@@ -424,8 +734,8 @@ STAGE_GUIDE = {
     "work": "2 진행: 진행 베이스 → 작업 → 교차 검토. 결과물이 준비되면 끝냄(state done) → 3 AI 자체 시험으로 넘어간다"
             "(조사·분석·기획 주제, 또는 바꾼 파일이 없어 끝냄 요약에 '시험할 것 없음'이라고 적으면 시험 없이 ★결과 확인으로).",
     "test": "3 AI 자체 시험(관문 없음, 네가 스스로 한다): 개발컴 격리 환경(server-dev) 기준으로 결과물을 검증한다. "
-            "지금 자동 실행기에는 명령 실행·빌드·서버 기동 권한이 없다. 그래서 정적 검증(실제 파일·데이터·호출부 대조, 근거 경로·줄)과 "
-            "시험 절차·확인 체크리스트 작성까지 한다. 문제를 찾으면 스스로 고치고 다시 검증한다. 같은 문제로 세 번 실패하면 ask로 올린다. "
+            "아래에 '개발 트리 직접 수정·빌드·시험' 칸이 있으면 실제로 관련 빌드·검사(dev_run)를 돌려 통과시키고 결과물 경로·SHA256을 남긴다. "
+            "그 칸이 없으면(권한 없는 작업자) 정적 검증(실제 파일·데이터·호출부 대조, 근거 경로·줄)과 시험 절차·확인 체크리스트 작성까지 한다. 문제를 찾으면 스스로 고치고 다시 검증한다. 같은 문제로 세 번 실패하면 ask로 올린다. "
             "통과하면 끝냄(state done)의 body에 '실게임 시험 준비' 요약을 쓴다: 격리 서버에 반영할 빌드·파일, 실행 방법, "
             "아키텍트가 확인할 항목(체크리스트), 자체 검증 근거. 그러면 ★4 실게임 시험 관문이 열린다. 운영 서버에서는 이 단계를 하지 않는다. "
             "★4부터는 담당이 개발컴 Claude로 옮겨지고 아키텍트와 대화 세션에서 바로 시험·수정한다(자동 실행기는 손대지 않음).",
@@ -563,6 +873,7 @@ def build_prompt(job: dict, data: dict, workspace: Path | None, st: dict) -> str
 - 끝냄(done)은 이 단계 담당만 한다. 교차 검토자·요청받은 작업자는 `note`(review/memo)나 `reply`로 끝낸다(done을 남겨도 메모로 바뀐다).
 
 {impl_section(job, workspace)}
+{dev_section(job)}
 ## 단계 가이드
 1) 담당인데 착수 기록이 없으면 `claim`
 2) 진행 베이스가 없으면 `plan` (goal·scope·inputs·first_steps·risks·done_when)
@@ -572,7 +883,7 @@ def build_prompt(job: dict, data: dict, workspace: Path | None, st: dict) -> str
 6) 이 단계가 끝났으면 `state`(status="done", body=결과 요약) → 아키텍트 관문으로
 
 ## 답 형식 (이 JSON 하나만 출력. 다른 글 금지)
-{{"summary": "한 줄 요약", "actions": [{{"type": "claim|plan|note|state|work_note|ask|propose|handoff|request|reply", "kind": null, "body": null, "status": null, "plan": null, "work_id": null, "question": null, "options": null, "title": null, "origin": null, "task": null, "to": null}}]}}
+{{"summary": "한 줄 요약", "actions": [{{"type": "claim|plan|note|state|work_note|ask|propose|handoff|request|reply|dev_edit|dev_run|dev_revert", "kind": null, "body": null, "status": null, "plan": null, "work_id": null, "question": null, "options": null, "title": null, "origin": null, "task": null, "to": null, "file": null, "edits": null, "cmd": null}}]}}
 - 각 action의 쓰지 않는 칸은 null로 둔다.
 """
 
@@ -902,6 +1213,28 @@ def apply(job: dict, result: dict, data: dict | None = None) -> tuple[list[str],
                     done.append("ask→덧붙임")
                     continue
                 node.add_ask(CFG, agent, tid, a["question"], a.get("options") or [])
+            elif typ in ("dev_edit", "dev_run", "dev_revert") and tid:
+                # 개발 트리 수정·빌드·시험: 개발 권한이 있는 작업자가 이 단계 담당일 때만. 결과는 주제 기록으로 남겨 다음 실행이 읽는다
+                if not dev_cfg(agent):
+                    failed.append(f"{typ} 거부: 이 작업자는 개발 트리 권한이 없음")
+                    continue
+                if agent != stage_doer(job.get("topic") or {}):
+                    failed.append(f"{typ} 거부: 이 단계 담당만 할 수 있음")
+                    continue
+                try:
+                    if typ == "dev_edit":
+                        msg = dev_edit(agent, tid, a, job.get("ws"))
+                    elif typ == "dev_run":
+                        msg = dev_run(agent, tid, a)
+                    else:
+                        msg = "; ".join(dev_revert(agent, tid, a.get("file"))) or "되돌릴 것 없음"
+                    node.add_topic_record(CFG, tid, agent, "memo", body=f"[실행기 {typ}] {msg}"[:6000])
+                    done.append(typ)
+                    continue
+                except ValueError as exc:
+                    node.add_topic_record(CFG, tid, agent, "memo", body=f"[실행기 {typ} 거부] {exc}"[:2000])
+                    failed.append(f"{typ} 거부: {exc}")
+                    continue
             elif typ == "propose" and (a.get("title") or "").strip():
                 if not node.add_proposal(CFG, agent, a["title"], body, a.get("kind") or "기타", "P2", a.get("origin") or ""):
                     done.append("propose→이미 올림")
@@ -1106,12 +1439,15 @@ def run_job(j: dict, data: dict, state: dict) -> bool:
         if t["id"] in node.active_holds(CFG):
             note_skip(st, agent_id, t["id"], "대화 세션이 잡고 있음")
             return False
-        fresh = {"topics": [copy.deepcopy(t)], "meta": data.get("meta", {}), "agents": data.get("agents", [])}
-        overlay_local(fresh, node.load_records(CFG))
-        if fresh["topics"][0].get("status") in ("done", "parked", "dropped"):
-            note_skip(st, agent_id, t["id"], f"이 PC 기록상 이미 {fresh['topics'][0]['status']}")
-            mark_done(st, j)
-            return False
+        # 허브는 방금 같은 기록으로 판정했으니 다시 덮어 보지 않는다(엔진 규칙 없이 덮으면 이관·관문 판정을 거스른다).
+        # 노드는 게시본보다 나중에 이 PC에서 남긴 기록만 덮어 본다. 같은 사유로 3번 넘게 건너뛰면 허브 판정을 믿고 실행한다
+        if (CFG.get("pc") or {}).get("role") != "hub" and (st.get("skip_count") or 0) < 3:
+            fresh = {"topics": [copy.deepcopy(t)], "meta": data.get("meta", {}), "agents": data.get("agents", [])}
+            overlay_local(fresh, node.load_records(CFG), only_after_gen=True)
+            if fresh["topics"][0].get("status") in ("done", "parked", "dropped"):
+                note_skip(st, agent_id, t["id"], f"이 PC 기록상 이미 {fresh['topics'][0]['status']}")
+                mark_done(st, j)
+                return False
     for k in ("skip_reason", "skip_count", "skip_since"):  # 실제로 깨우면 건너뜀 기록은 지운다
         st.pop(k, None)
     if j["kind"] == "answer" and (j.get("ask") or {}).get("kind") == "stall":
@@ -1155,6 +1491,7 @@ def run_job(j: dict, data: dict, state: dict) -> bool:
     if health.get("state") != "ok":
         node.set_health(CFG, agent_id, "ok", "정상 실행")
     j["applied"] = True
+    j["ws"] = ws
     done, failed = apply(j, result, data)
     if blocked:
         failed.append("작업 공간의 설정·지시 파일을 무력화함: " + ", ".join(blocked[:5]))
@@ -1177,7 +1514,10 @@ def run_job(j: dict, data: dict, state: dict) -> bool:
     acts = [a for a in result.get("actions", []) if isinstance(a, dict)]
     settled = any(a.get("type") in ("ask", "handoff", "request", "reply") or (a.get("type") == "state" and a.get("status") in ("done", "parked")) for a in acts)
     backoff = None
-    if settled:
+    if any(x in ("dev_edit", "dev_run", "dev_revert") for x in done):
+        st["idle_runs"] = 0  # 실제로 고치거나 빌드했다: 결과를 보고 이어서 하도록 다음 동기화 때 바로 깨운다
+        st["cont"] = st.get("cont", 0) + 1
+    elif settled:
         st["idle_runs"] = 0
     else:
         st["idle_runs"] = st.get("idle_runs", 0) + 1
@@ -1229,11 +1569,7 @@ def queue_summary(aid: str, data: dict, state: dict) -> dict:
         elif t["id"] in asking:
             code = "waiting_answer"
         else:
-            code = "waiting_change"  # 이미 처리함 — 다른 작업자 기록·아키텍트 대화를 기다림
-            last = ((st.get("last_result") or {}).get("at")) or ""
-            if last and (now() - datetime.fromisoformat(last)).total_seconds() > 3600:
-                code = "stalled"  # 내 차례인데 같은 단계를 처리한 뒤 한 시간 넘게 아무 변화가 없음 → 다시 깨우지 않으므로 멈춤
-                stalled.append({"topic": t["id"], "reason": "같은 단계를 처리했는데 차례가 그대로라 다시 깨우지 않음", "since": last})
+            code = "waiting_change"  # 이미 처리함 — 변화가 없으면 30분(반복 시 2시간) 뒤 실행기가 다시 깨운다(find_jobs)
         items[t["id"]] = code
         out[code] = out.get(code, 0) + 1
     out["answers"] = sum(1 for j in find_jobs(data, copy.deepcopy(state), only=aid) if j["kind"] == "answer")
@@ -1309,6 +1645,11 @@ def main():
             pass
         if find_jobs(data, load_state(aid), only=aid):
             waiting.append(aid)
+    try:  # 개발 트리 작업 정리(백업·로그·빌드 사본): 매 회차 가볍게 확인
+        for m in dev_cleanup(data):
+            log(f"정리: {m}")
+    except Exception as exc:  # noqa: BLE001 — 정리가 실패해도 실행은 계속
+        log(f"정리 실패: {exc}")
     for aid in waiting:
         spawn(aid)
     print(f"띄움: {', '.join(waiting)}" if waiting else "깨울 일 없음")

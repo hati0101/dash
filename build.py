@@ -662,6 +662,22 @@ def live_actions(topics: list[dict], held: set) -> list[dict]:
             for t in topics if t.get("live_session") and t.get("status") == "active" and t["id"] not in held]
 
 
+def offline_actions(topics: list[dict], agents: list[dict], my_pc: str | None) -> list[dict]:
+    """다른 작업자에게 옮길 수 없는 서버컴 몫(8 운영 반영)인데 그 PC 신호가 끊겼으면 '할 일'로 알린다(서버컴을 켜야 풀림)."""
+    from topics import agent_alive
+    now = datetime.now(timezone(timedelta(hours=9)))
+    by_id = {a["id"]: a for a in agents}
+    out = []
+    for t in topics:
+        who = t.get("stage_owner") if t.get("stage") == "deploy" else None
+        a = by_id.get(who) if who else None
+        if t.get("status") == "active" and a and not agent_alive(a, my_pc, now):
+            out.append({"id": f"offline-{t['id']}-{a.get('pc_synced') or ''}", "title": f"{a.get('pc_label', '')} 꺼짐 — 운영 반영 대기: {t.get('title') or t['id']}",
+                        "detail": f"{a.get('pc_label', '')} 자동 동기화·실행기를 확인해 주세요(마지막 신호 {a.get('pc_synced') or '없음'}). 켜지면 운영 반영 단계가 이어집니다.",
+                        "since": a.get("pc_synced"), "kind": "offline", "task_id": t["id"]})
+    return out
+
+
 def load_topics(cfg: dict, log: SourceLog, node_records: list | None = None, known: set | None = None):
     from topics import merged_topics  # 같은 병합 규칙을 쓴다
     folder = (ROOT / cfg.get("topics_dir", "topics")).resolve()
@@ -762,7 +778,7 @@ def build_payload(cfg: dict, pw: str | None = None) -> dict:
     from topics import to_dt as _to_dt
     _now = datetime.now(timezone(timedelta(hours=9)))
     held = {h.get("topic") for h in (holds or []) if isinstance(h, dict) and h.get("until") and _to_dt(h["until"]) > _now}
-    curated["user_actions"] += live_actions(topics, held)
+    curated["user_actions"] += live_actions(topics, held) + offline_actions(topics, agents, (cfg.get("pc") or {}).get("id"))
     works = load_works(cfg, topics, log)
     from topics import load_routing
     routing = load_routing(cfg)

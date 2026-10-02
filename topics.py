@@ -669,12 +669,14 @@ def finish_counts(by: str, stage: str, live: bool, t: dict, known, ts) -> bool:
     """그 단계 담당의 끝냄만 다음 단계로 넘긴다(새 규칙). 교차 검토자·요청받은 작업자·남은 답 처리 작업의 done은 세지 않는다."""
     if to_dt(ts) < RULES_V2_FROM:
         return True  # 옛 기록은 그때 판정 그대로
+    # 담당이 나중에 바뀌어도(자동 이관·인계) 그때 담당이 남긴 끝냄은 그대로 인정한다: 지금 담당 + 이 주제를 맡았던 작업자(착수·인계 기록)
+    owners = {t.get("assignee"), t.get("live_from"), *(t.get("_owners") or ())} - {None}
     if live:
-        return by in (LIVE_AGENT, t.get("assignee"))
+        return by in (LIVE_AGENT, *owners)
     if stage == "work":
-        return by in (t.get("assignee"), t.get("live_from"))
+        return by in owners
     if stage in ("test", "pack"):
-        return by == stage_owner(stage, t, known)
+        return by == stage_owner(stage, t, known) or (by in owners and (str(by).startswith("dev-") or by == LEAD))
     if stage == "deploy":
         return str(by).startswith("server-")
     return False
@@ -877,7 +879,10 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
             if t["status"] == "new":
                 t["status"] = "triage"
         if finishes:  # 단계·관문: AI 끝냄은 다음 단계·관문으로, 완료는 아키텍트 ★9(조사·분석은 결과 확인)에서만
+            t["_owners"] = ({a for a, _ in claims} | ({handoff["from"], handoff["to"]} if handoff else set())
+                            | set((recs.get(LEAD) or {}).get("prev_assignees") or []))  # 이 주제를 맡았던 작업자(착수·인계·자동 이관 전 담당)
             g = run_gates(t, finishes, gate_answers, known or peers)
+            t.pop("_owners", None)
             t["gate_history"] = g["history"]
             if g["live"] and not g["final"]:  # 실게임 시험 단계: 담당을 개발컴 Claude로 옮기고 대화 세션에서 진행
                 live_to = LIVE_AGENT if (known is None or LIVE_AGENT in known) else t.get("assignee")
@@ -916,9 +921,12 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
         t["requests"] = sorted(reqs, key=lambda q: q["ts"] or "")[-10:]
         # 끝냄 이전에 보낸 요청은 그 단계와 함께 닫힌다(요청 받은 쪽을 계속 깨우지 않음)
         last_fin = max((to_dt(f[0]) for f in finishes), default=None)
+        hub_closed = {x.get("id"): x for x in (recs.get(LEAD) or {}).get("closed_requests", [])}  # 허브가 닫은 요청(대상 잠김·신호 끊김)
         for q in reqs:
             if q["status"] == "open" and last_fin and to_dt(q["ts"]) <= last_fin:
                 q["status"] = "closed"
+            if q["status"] == "open" and q["id"] in hub_closed:
+                q["status"], q["closed_reason"] = "closed", hub_closed[q["id"]].get("reason")
         opened = [q for q in reqs if q["status"] == "open"]
         t["open_request"] = max(opened, key=lambda q: q["ts"] or "") if opened else None
         t["reviewer"] = review_partner(t.get("assignee"), peers, locked)
@@ -1122,21 +1130,39 @@ def rebalance(cfg, topics: list[dict], agents: list[dict], loads: dict, routing:
 OFFLINE_SECONDS = 150 * 60  # 다른 PC는 바뀐 게 없으면 60분마다만 올리므로 넉넉히(2시간 30분)
 
 
+def agent_alive(a: dict, my_pc: str | None, now: datetime) -> bool:
+    """작업자 PC가 살아 있나: 이 PC(허브)의 작업자는 항상, 다른 PC는 마지막 업로드가 150분 안."""
+    if a.get("pc") == my_pc:
+        return True
+    seen = a.get("pc_synced") or a.get("last_seen")
+    return bool(seen) and (now - to_dt(seen)).total_seconds() < OFFLINE_SECONDS
+
+
 def rescue(cfg, topics: list[dict], all_list: list[dict], agents_ok: list[dict], loads: dict, routing: dict, labels: dict) -> int:
     """잠긴 작업자·신호가 끊긴 PC에 묶인 진행 중 주제를 다른 작업자에게 자동으로 넘긴다(아키텍트에게 묻지 않는다, 2026-10-03).
     실게임 시험 대화 단계·운영 반영 단계(서버컴 몫)는 옮기지 않는다."""
     now = datetime.now(KST)
     my_pc = (cfg.get("pc") or {}).get("id")
-    def alive(a):
-        if a.get("pc") == my_pc:
-            return True  # 이 PC(허브)의 작업자: 지금 이 명령이 돌고 있으니 살아 있다
-        seen = a.get("pc_synced") or a.get("last_seen")
-        return bool(seen) and (now - to_dt(seen)).total_seconds() < OFFLINE_SECONDS
+    alive = lambda a: agent_alive(a, my_pc, now)
     known = {a["id"]: a for a in all_list}
     locks = agent_locks(cfg)
     cands_all = [a for a in agents_ok if alive(a)]
     moved = 0
     for t in topics:
+        # 열린 요청의 대상이 잠겼거나 신호가 끊겼으면: 요청을 닫고 차례를 담당에게 돌린다(담당은 다른 방법·다른 작업자를 찾는다)
+        rq = t.get("open_request") or {}
+        to = rq.get("to")
+        if to and (to in locks or (to in known and not alive(known[to]))):
+            why = "배정 잠금" if to in locks else "PC 신호 끊김"
+            path, rec = author_file(cfg, t["id"], "claude")
+            if rq.get("id") not in {x.get("id") for x in rec.get("closed_requests", [])}:
+                rec.setdefault("closed_requests", []).append({"id": rq.get("id"), "reason": f"대상 {why}", "ts": now_iso()})
+                add_note(rec, "memo", f"요청 {rq.get('id')} → {labels.get(to, to)}: 대상이 {why}이라 답 없이 닫음. 담당이 다른 방법을 찾거나 다른 작업자에게 다시 요청한다.")
+                rec["updated_at"] = now_iso()
+                write_json(path, rec)
+                moved += 1
+                print(f"{t['id']} 요청 닫음({why}): → {to}")
+            continue
         cur = t.get("assignee")
         if not cur or t["status"] not in ("new", "triage", "ready", "active") or t.get("live_session") or t.get("stage") == "deploy":
             continue
@@ -1151,6 +1177,7 @@ def rescue(cfg, topics: list[dict], all_list: list[dict], agents_ok: list[dict],
         path, rec = author_file(cfg, t["id"], "claude")
         ts = now_iso()
         reason = f"자동 이관({why}): {labels.get(cur, cur)} → {labels.get(best, best)}"
+        rec["prev_assignees"] = sorted({*rec.get("prev_assignees", []), cur})  # 옛 담당이 남긴 끝냄·관문은 그대로 인정(엔진 _owners)
         rec.update({"assignee": best, "dispatch_reason": reason, "assigned_at": ts, "updated_at": ts})
         add_note(rec, "triage", reason)
         write_json(path, rec)

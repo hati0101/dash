@@ -908,7 +908,10 @@ function vMine() {
   const f = S.f.mine || 'all';
   const count = v => all.filter(i => i.type === v).length;
   const urgent = all.filter(i => i.type !== 'backlog');
-  const list = mineList(f, all);
+  // 검색: 제목·내용·주제 이름·주제 ID·질문한 작업자로 찾는다(띄어 쓴 낱말은 모두 들어 있어야 함)
+  const words = String(S.f.mineQ || '').trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const hay = i => [i.title, i.sub, i.topic?.title, i.topic?.id, i.taskId, person(i.who).name].join(' ').toLowerCase();
+  const list = mineList(f, all).filter(i => !words.length || words.every(w => hay(i).includes(w)));
   if (!list.some(i => i.key === S.mineSel)) {
     // 키보드로 보낸 뒤에는 같은 자리(=다음 항목)로, 아니면 맨 위
     S.mineSel = (S.kbNextIdx != null && list.length ? list[Math.min(S.kbNextIdx, list.length - 1)] : f === 'all' ? urgent[0] || list[0] : list[0])?.key || null;
@@ -920,7 +923,10 @@ function vMine() {
   const tabs = h('div', { class: 'mine-tabs', role: 'tablist', 'aria-label': '내 차례 소분류' },
     [['all', '전체', 'user', '', urgent.length], ...MINE_TYPES.map(([v, l, i, c]) => [v, l, i, c, count(v)])].map(([v, l, i, c, n]) =>
       h('button', { role: 'tab', 'aria-selected': String(f === v), class: `mine-tab${n && c ? ' ' + c : ''}`, onclick: () => { S.f.mine = v; S.mineSel = null; S.mineSelecting = false; S.editTopic = null; render(); } },
-        icon(i), h('span', null, l), h('b', null, n))));
+        icon(i), h('span', null, l), h('b', null, n))),
+    h('label', { class: 'mine-search' }, icon('search'),
+      h('input', { type: 'search', placeholder: '내 차례에서 찾기', 'aria-label': '내 차례에서 찾기', value: S.f.mineQ || '', 'data-draft': 'mine-search',
+        oninput: e => { S.f.mineQ = e.target.value; S.mineSel = null; S._keepScroll = true; render(); } })));
   // 착수 고르기: 여러 개 골라 한 번에 지우기
   const checked = S.mineChecked || (S.mineChecked = new Set());
   const selecting = f === 'backlog' && S.mineSelecting;
@@ -1964,7 +1970,7 @@ function topicPhase(t) {
 }
 // 실행기가 올린 주제별 판정(작업자 기록 queue.items). '다음' 문구를 실행기 실제 판정과 같게 한다
 const QUEUE_NEXT = { runnable: '다음 동기화 때 이어서', retry: '실패 뒤 재시도 대기(10~30분)', limit: '오늘 실행 한도(10회) 도달 — 내일 이어서',
-  waiting_answer: '아키텍트 답을 기다림', waiting_change: '이 단계는 처리함 — 다른 작업자 기록·아키텍트 답이 오면 이어서', held: '대화 세션이 처리 중' };
+  waiting_answer: '아키텍트 답을 기다림', waiting_change: '이 단계는 처리함 — 변화가 없으면 30분(반복 시 2시간) 뒤 자동으로 다시 깨움', held: '대화 세션이 처리 중' };
 function queueOf(t) { return ((S.data.agents || []).find(a => a.id === t.turn) || {}).queue || null; }
 function queueCode(t) { const q = queueOf(t); return q && q.items ? q.items[t.id] || null : null; }
 function stallOf(t) { const q = queueOf(t); return q && (q.stalled || []).find(x => x.topic === t.id) || null; }
