@@ -141,11 +141,11 @@ def overlay_local(data: dict, rec: dict):
             if r.get("kind") == "handoff" and r.get("to") in known and ts > max(gen, (t.get("handoff") or {}).get("ts") or ""):
                 t["assignee"], t["assign_by"], changed = r["to"], "handoff", True
                 t["handoff"] = {"from": r.get("agent"), "to": r["to"], "ts": ts, "reason": (r.get("body") or "")[:300]}
-            if r.get("kind") == "request" and r.get("to") in known and r.get("req_id") and ts > gen:
+            if r.get("kind") == "request" and r.get("to") in known and r.get("req_id") and r["req_id"] not in {x.get("id") for x in t.get("requests") or []}:
                 q = {"id": r["req_id"], "from": r.get("agent"), "to": r["to"], "ts": ts, "body": (r.get("body") or "")[:1500], "status": "open"}
                 t["requests"] = [x for x in t.get("requests") or [] if x.get("id") != q["id"]] + [q]
                 t["open_request"], changed = q, True
-            if r.get("kind") == "reply" and r.get("req_id") and ts > gen:
+            if r.get("kind") == "reply" and r.get("req_id") and any(x.get("id") == r["req_id"] and x.get("status") != "answered" for x in t.get("requests") or []):
                 for x in t.get("requests") or []:
                     if x.get("id") == r["req_id"]:
                         x.update(status="answered", reply_by=r.get("agent"), reply_ts=ts, reply=(r.get("body") or "")[:1500])
@@ -962,7 +962,7 @@ def run_job(j: dict, data: dict, state: dict) -> bool:
         else:
             failed.append(f"작업물 올리기 보류: {(r.stdout or r.stderr).strip()[-300:]}")
         files = [p for p in ws.rglob("*") if p.is_file() and p.name not in ("NOTES.md", "MANIFEST.md")]
-        stopped = any(isinstance(a, dict) and (a.get("type") in ("ask", "handoff") or (a.get("type") == "state" and a.get("status") in ("done", "parked")))
+        stopped = any(isinstance(a, dict) and (a.get("type") in ("ask", "handoff", "request", "reply") or (a.get("type") == "state" and a.get("status") in ("done", "parked")))
                       for a in result.get("actions", []))
         if len(files) > st.get("files", 0) and not stopped:
             st["cont"] = st.get("cont", 0) + 1  # 진척이 있었으니 다음 동기화 때 이어서 깨운다

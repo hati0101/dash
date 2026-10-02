@@ -738,6 +738,11 @@ def whose_turn(t: dict) -> str | None:
     a = t.get("assignee")
     if not a:
         return LEAD  # 배분 대기
+    # 내가 보낸 요청에 답이 왔는데 그 뒤로 아직 손대지 않았으면 내 차례(답을 받아 이어서 한다. 검토는 그다음)
+    for q in t.get("requests") or []:
+        if q.get("from") == a and q.get("status") == "answered" and \
+                not any(n.get("by") == a and (n.get("ts") or "") > (q.get("reply_ts") or "") for n in t.get("notes", [])):
+            return a
     ho = t.get("handoff")
     if ho and ho.get("to") == a and not (t.get("plan_by") == a and (t.get("plan_at") or "") > (ho.get("ts") or "")):
         return a  # 넘겨받은 쪽 차례. 받은 쪽이 새 진행 베이스를 쓰면 아래 교차 검토 단계로 돌아간다
