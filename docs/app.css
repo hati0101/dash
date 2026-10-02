@@ -203,7 +203,8 @@ button { cursor: pointer; }
 }
 .menu-btn { display: none; }
 
-.page { padding: 26px 28px 60px; max-width: 1360px; width: 100%; }
+/* 1920×1080 기준: 사이드바(236px)를 뺀 폭을 다 쓴다. 아주 넓은 화면에서만 2000px로 제한 */
+.page { padding: 24px 28px 48px; max-width: 2000px; width: 100%; }
 .page-head { display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap; margin-bottom: 20px; }
 .eyebrow { font-size: 11.5px; font-weight: 800; letter-spacing: .1em; color: var(--ink-3); }
 .page-head h1 { margin: 4px 0 0; font-size: 26px; letter-spacing: -.025em; display: flex; align-items: baseline; gap: 10px; }
@@ -319,8 +320,10 @@ button.item:hover, a.item:hover { background: var(--card-2); border-radius: 10px
 .wait { font-size: 11.5px; font-weight: 700; color: var(--ink-2); display: inline-flex; gap: 5px; align-items: center; white-space: nowrap; }
 
 /* 칸반 */
-.board { display: grid; grid-template-columns: repeat(6, minmax(220px, 1fr)); gap: 12px; overflow-x: auto; padding-bottom: 8px; }
-.board.topics { grid-template-columns: repeat(6, minmax(200px, 1fr)); }
+.board { display: grid; grid-template-columns: repeat(6, minmax(200px, 1fr)); gap: 12px; overflow-x: auto; padding-bottom: 8px; align-items: start; }
+.board .col { min-height: calc(100vh - 230px); }
+.board .col > .sel-wrap, .board .col > .proj { flex: none; }
+.board.topics { grid-template-columns: repeat(7, minmax(190px, 1fr)); }
 .col { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px; min-height: 160px; display: flex; flex-direction: column; gap: 10px; }
 .col-h { display: flex; align-items: center; gap: 8px; font-weight: 800; font-size: 13px; }
 .col-h .badge { margin-left: auto; }
@@ -352,8 +355,8 @@ button.item:hover, a.item:hover { background: var(--card-2); border-radius: 10px
 .member .stats span { font-size: 11px; color: var(--ink-3); }
 
 /* 메시지 2단 */
-.split { display: grid; grid-template-columns: minmax(300px, 420px) minmax(0, 1fr); gap: 14px; align-items: start; }
-.msg-list { max-height: calc(100vh - 210px); overflow-y: auto; padding: 6px; }
+.split { display: grid; grid-template-columns: minmax(320px, 520px) minmax(0, 1fr); gap: 14px; align-items: start; }
+.msg-list { max-height: calc(100vh - 200px); overflow-y: auto; padding: 6px; }
 .msg { display: flex; gap: 10px; padding: 10px; border-radius: 11px; border: 0; background: none; width: 100%; text-align: left; color: inherit; }
 .msg:hover { background: var(--card-2); }
 .msg[aria-selected="true"] { background: var(--card-3); }
@@ -482,6 +485,31 @@ mark { background: color-mix(in srgb, var(--st-user_test) 35%, transparent); col
   .side { padding-top: max(16px, env(safe-area-inset-top)); padding-bottom: max(14px, env(safe-area-inset-bottom)); }
   .page { padding-bottom: max(60px, env(safe-area-inset-bottom)); }
   .lock { padding-top: max(24px, env(safe-area-inset-top)); }
+}
+
+/* ---------------- 1920×1080 기준 넓은 화면 배치 */
+.stack { display: grid; gap: 14px; align-content: start; }
+.ov-main, .wide-2 { grid-template-columns: minmax(0, 1fr); }
+.team-rows { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 8px; }
+.team-row-item {
+  display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line);
+  background: var(--card-2); color: inherit; text-align: left; min-width: 0;
+}
+.team-row-item:hover { border-color: var(--line-2); }
+.team-row-item .av { border: 0; width: 30px; height: 30px; }
+.team-row-item .body { flex: 1; min-width: 0; }
+.team-row-item .t { font-weight: 700; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.team-row-item .s { font-size: 12px; color: var(--ink-3); }
+.scroll-card .tl, .scroll-card .list, .scroll-card .tbl-wrap { overflow-y: auto; }
+@media (min-width: 1500px) {
+  .wide-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: start; }
+  .ov-main { grid-template-columns: minmax(0, 1.9fr) minmax(360px, 1fr); align-items: stretch; }
+  .ov-main .scroll-card .tl { max-height: 560px; }
+  .wide-2 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; }
+  .wide-2 .scroll-card .list, .wide-2 .scroll-card .tbl-wrap { max-height: calc(100vh - 230px); }
+  /* 칸반: 칸 안에서 스크롤해서 보드 전체가 한 화면에 들어오게 */
+  .board .col { height: calc(100vh - 200px); min-height: 0; overflow-y: auto; }
+  .board.topics .col { height: calc(100vh - 140px); }
 }
 
 /* ---------------- 반응형 */

@@ -157,6 +157,7 @@ function stChip(stage) {
   return h('span', { class: `st ${STAGE[stage] ? stage : 'neutral'}` }, icon(s.icon), s.label);
 }
 const TOPIC_STATES = [
+  { id: 'backlog', label: '미처리', cls: 'neutral', icon: 'inbox' },
   { id: 'new', label: '새 주제', cls: 'request', icon: 'topics' },
   { id: 'triage', label: '검토 중', cls: 'validating', icon: 'eye' },
   { id: 'ready', label: '준비됨', cls: 'done', icon: 'file' },
@@ -350,7 +351,9 @@ function derive(data) {
     && REQ_RE.test((m.kind || '') + ' ' + m.title) && hoursSince(m.ts) > unansH && hoursSince(m.ts) < 72);
   const pendAssign = {};
   for (const p of pend.filter(p => p.type === 'assign')) pendAssign[p.topic] = p.agent;
+  const pendActivate = new Set(pend.filter(p => p.type === 'activate').map(p => p.topic));
   const topics = (data.topics || []).map(t => ({ ...t, _age: hoursSince(t.created_at),
+    ...(t.status === 'backlog' && pendActivate.has(t.id) ? { status: 'new' } : {}),
     ...(pendAssign[t.id] && pendAssign[t.id] !== t.assignee ? { assignee: pendAssign[t.id], assign_by: 'user', dispatch_reason: '사용자 지정(반영 대기)', status: t.status === 'new' ? 'triage' : t.status } : {}) }));
 
   const missed = [];
@@ -559,12 +562,14 @@ function vOverview() {
       collectedCard(),
       pipelineCard(tasks),
       missedCard()),
-    h('div', { class: 'grid g-2 section-gap' }, todayCard(), decisionsNeededCard()),
-    h('div', { class: 'section-gap' }, card('진행 중인 프로젝트', { big: tasks.filter(t => t.stage !== 'done').length, unit: '건' },
-      projGrid(tasks.filter(t => t.stage !== 'done').sort(taskSort)))),
-    h('div', { class: 'grid g-2 section-gap' }, blockedCard(tasks), weekCard(tasks)),
-    h('div', { class: 'section-gap' }, card('팀 현황', null, teamGrid())),
-    h('div', { class: 'section-gap' }, card('최근 활동', { right: h('button', { class: 'btn', onclick: () => go('messages') }, '메시지 전체', icon('arrow')) }, timeline(40))),
+    // 1920×1080: 둘째 줄은 할 일·결정·막힘/마감 3단, 셋째 줄은 프로젝트(넓게)+최근 활동(안에서 스크롤)
+    h('div', { class: 'grid g-3 wide-3 section-gap' }, todayCard(), decisionsNeededCard(),
+      h('div', { class: 'stack' }, blockedCard(tasks), weekCard(tasks))),
+    h('div', { class: 'grid ov-main section-gap' },
+      card('진행 중인 프로젝트', { big: tasks.filter(t => t.stage !== 'done').length, unit: '건' },
+        projGrid(tasks.filter(t => t.stage !== 'done').sort(taskSort))),
+      card('최근 활동', { cls: 'scroll-card', right: h('button', { class: 'btn', onclick: () => go('messages') }, '메시지 전체', icon('arrow')) }, timeline(40))),
+    h('div', { class: 'section-gap' }, card('팀 현황', { right: h('button', { class: 'btn', onclick: () => go('agents') }, 'PC별 전체', icon('arrow')) }, teamCompact())),
   ];
 }
 const PRI_ORDER = { P0: 0, P1: 1, P2: 2, P3: 3 };
@@ -705,6 +710,18 @@ function weekCard(tasks) {
         h('span', { class: 'body' }, h('div', { class: 't' }, t.title),
           h('div', { class: 'meta' }, h('span', { class: 'tag' }, fmtAbs(t.due, true) + (days < 0 ? ` · ${-days}일 지남` : days === 0 ? ' · 오늘' : ` · D-${days}`)), stChip(t.stage), av(t.owner, true))));
     })) : empty('마감일이 정해진 작업이 없습니다. 직접 기록 파일의 due로 지정할 수 있습니다.'));
+}
+function teamCompact() {
+  const agents = S.data.agents || [];
+  if (!agents.length) return teamGrid();
+  return h('div', { class: 'team-rows' }, agents.map(a => {
+    const st = agentState(a), s = agentStats(a.id);
+    return h('button', { class: 'team-row-item', onclick: () => go('agents') },
+      av(a.id), h('div', { class: 'body' }, h('div', { class: 't' }, `${a.pc_label} · ${a.label || a.id}`),
+        h('div', { class: 's clamp-2' }, a.current ? a.current.project : '지금 하는 일을 알리지 않음')),
+      h('span', { class: `st ${st.cls}` }, icon(st.icon), st.label),
+      h('span', { class: 'tag' }, `주제 ${s.assigned.length}`), s.turn.length ? h('span', { class: 'tag' }, `차례 ${s.turn.length}`) : null);
+  }));
 }
 function teamGrid() {
   const d = S.d, data = S.data;
@@ -994,7 +1011,8 @@ function vVerify() {
   const counts = Object.fromEntries(Object.keys(LEDGER_ST).map(k => [k, data.ledger.filter(e => e.status === k).length]));
   return [
     head('VERIFY', '검증과 기록', null),
-    card('QA 검증 결과', { big: data.validations.length, unit: '건' },
+    h('div', { class: 'grid wide-2' },
+    card('QA 검증 결과', { big: data.validations.length, unit: '건', cls: 'scroll-card' },
       data.validations.length ? h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' },
         h('thead', null, h('tr', null, ['시각', '결과', '검증', '검토자', '실게임', '원인'].map(x => h('th', null, x)))),
         h('tbody', null, data.validations.map(v => h('tr', { class: 'click', tabindex: '0', onclick: () => openValidation(v), onkeydown: e => e.key === 'Enter' && openValidation(v) },
@@ -1004,7 +1022,7 @@ function vVerify() {
           h('td', null, v.reviewer || '—'),
           h('td', null, v.live === 'pending' ? h('span', { class: 'st user_test' }, icon('flask'), '미실행') : '—'),
           h('td', null, v.root_cause || '—')))))) : empty('QA 결과가 없습니다.')),
-    h('div', { class: 'section-gap' }, card('감사 원장', { big: ledger.length, unit: '건',
+    card('감사 원장', { big: ledger.length, unit: '건', cls: 'scroll-card',
       right: chips([['all', '전체'], ['pending', `대기 ${counts.pending}`], ['fail', `실패 ${counts.fail}`], ['reverted', `되돌림 ${counts.reverted}`], ['pass', `통과 ${counts.pass}`]], f, v => { S.f.ledger = v; render(); }, '원장 필터') },
       h('div', { class: 'list' }, ledger.map(e => h('button', { class: 'item', onclick: () => openLedger(e) },
         h('span', { class: `lead-ico ${e.status === 'fail' || e.status === 'reverted' ? 'bad' : e.status === 'pending' ? 'warn' : e.status === 'pass' ? 'good' : ''}` }, icon(LEDGER_ST[e.status].icon)),
@@ -1172,6 +1190,16 @@ function agentOptions(selected, extra) {
   const list = S.data.agents || [];
   return [...(extra || []), ...list.map(a => h('option', { value: a.id, selected: a.id === selected ? true : null }, `${a.pc_label} · ${a.label || a.id}`))];
 }
+function activateControl(t) {
+  const pend = pending.all().find(p => p.type === 'activate' && p.topic === t.id);
+  if (pend) return h('div', { class: 'callout' }, h('b', null, '착수 지시 반영 대기 · '), '다음 PC 동기화 때 자동 배분으로 담당이 정해집니다.');
+  const btn = h('button', { class: 'btn primary', onclick: async () => {
+    btn.disabled = true;
+    try { await sendOps('activate', { topic: t.id }, `착수 지시: ${t.title}`); render(); openTopic(S.d.topics.find(x => x.id === t.id) || t); }
+    catch (e) { toast(e.message); } finally { btn.disabled = false; }
+  } }, icon('play'), '착수하기 (자동 배분)');
+  return h('div', { class: 'callout' }, h('div', { style: { 'margin-bottom': '8px' } }, h('b', null, '미처리 주제입니다. '), '착수를 지시하면 다음 동기화 때 규칙에 따라 담당이 정해집니다. 담당을 직접 고르려면 아래 "담당 바꾸기"를 쓰세요.'), btn);
+}
 function assignControl(t) {
   if (!(S.data.agents || []).length || t.status === 'done') return null;
   const pend = pending.all().find(p => p.type === 'assign' && p.topic === t.id);
@@ -1309,6 +1337,7 @@ function openTopic(t) {
     h('h3', null, t.title),
     (t.conflict || []).length ? h('div', { class: 'callout warn' }, h('b', null, '중복 착수: '), `담당은 ${person(t.assignee).full}인데 ${t.conflict.map(c => person(c).full).join(', ')}도 착수했습니다. 한쪽을 멈추거나 담당을 바꿔주세요.`) : null,
     t.dispatch_reason ? h('div', { class: 'reason' }, h('b', null, t.assign_by === 'user' ? '담당 지정: ' : '배분 근거: '), t.dispatch_reason) : null,
+    t.status === 'backlog' ? activateControl(t) : null,
     assignControl(t),
     h('dl', { class: 'fields' }, h('dt', null, '담당'), h('dd', null, t.assignee ? person(t.assignee).full : '미배정'),
       h('dt', null, '지금 차례'), h('dd', null, t.turn ? `${person(t.turn).full} · ${t.status === 'new' ? '분배' : !t.plan ? '진행 베이스 작성' : t.turn !== t.assignee ? '교차 검토' : '진행'}` : '—'),

@@ -59,6 +59,8 @@ try {
     $out = Py 'topics.py pull --close'
     if ($LASTEXITCODE) { Log "가져오기 실패: $out" } elseif ($out -notmatch '^새 주제·요청 없음') { Log "가져오기: $out" }
   }
+  $out = Py 'topics.py import-proposals'
+  if ($LASTEXITCODE) { Log "메모 가져오기 실패: $out" } elseif ($out -notmatch '메모 가져오기 0건') { Log "메모 가져오기: $out" }
   $out = Py 'topics.py dispatch'
   if ($LASTEXITCODE) { Log "자동 배분 실패: $out" } elseif ($out -notmatch '자동 배분 0건') { Log "자동 배분: $out" }
   $out = Py 'topics.py announce'
