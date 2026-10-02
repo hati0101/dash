@@ -535,11 +535,12 @@ mark { background: color-mix(in srgb, var(--st-user_test) 35%, transparent); col
 .mine-tab[aria-selected="true"] svg { color: var(--accent-ink); }
 .mine-split { display: grid; grid-template-columns: minmax(380px, 560px) minmax(0, 1fr); gap: 14px; align-items: start; }
 .mine-split.narrow { grid-template-columns: minmax(0, 1fr); }
-.mine-list { padding: 8px; max-height: calc(100vh - 222px); overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
-.mine-split.narrow .mine-list { max-height: none; }
+.mine-list { padding: 8px; height: calc(100vh - 222px); min-height: 420px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+.mine-split.narrow .mine-list { height: auto; min-height: 0; }
 .mine-group { display: flex; align-items: center; gap: 8px; padding: 10px 10px 6px; font-size: 11.5px; font-weight: 800; letter-spacing: .08em; color: var(--ink-3); }
 .mine-group b { color: var(--ink-2); }
 .mine-group:not(:first-child) { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 14px; }
+.mine-row, .mine-group { flex: none; }
 .mine-row { display: flex; gap: 12px; align-items: flex-start; padding: 11px 10px; border-radius: 12px; border: 1px solid transparent; background: none; width: 100%; text-align: left; color: inherit; }
 .mine-row:hover { background: var(--card-2); }
 .mine-row[aria-selected="true"] { background: var(--card-3); border-color: var(--line-2); box-shadow: inset 3px 0 0 var(--accent); }
@@ -553,7 +554,6 @@ mark { background: color-mix(in srgb, var(--st-user_test) 35%, transparent); col
 .mine-row .t { font-weight: 700; font-size: 13.5px; line-height: 1.45; overflow-wrap: anywhere; }
 .mine-row .s { font-size: 12.5px; color: var(--ink-3); line-height: 1.5; }
 .mine-row .meta { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; font-size: 12px; color: var(--ink-3); margin-top: 2px; }
-.mine-row .meta .av { width: 18px; height: 18px; font-size: 9px; }
 .mine-row .when { margin-left: auto; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .clamp-1 { display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; }
 .mine-detail { padding: 0; position: sticky; top: 72px; height: calc(100vh - 222px); min-height: 420px; display: flex; flex-direction: column; overflow: hidden; }
