@@ -598,6 +598,7 @@ mark { background: color-mix(in srgb, var(--st-user_test) 35%, transparent); col
 .run-fail { color: var(--st-blocked); }
 .hist-item.k-run .hist-body { background: var(--card-2); border-style: dashed; }
 .hist-item.k-run.r-fail .hist-body, .hist-item.k-run.r-partial .hist-body { border-color: color-mix(in srgb, var(--st-blocked) 50%, var(--line)); border-style: solid; }
+.hist-item.k-request .hist-body, .hist-item.k-reply .hist-body { border-color: color-mix(in srgb, var(--st-validating) 45%, var(--line)); }
 .hist-item.k-handoff .hist-body { border-color: color-mix(in srgb, var(--st-progress) 45%, var(--line)); }
 
 .reflect { --pc: var(--ink-3); display: flex; gap: 6px; align-items: flex-start; margin-top: 4px; font-size: 12px; color: var(--ink-2); }

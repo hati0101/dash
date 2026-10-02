@@ -199,7 +199,7 @@ function topicChip(state) {
   const s = TOPIC[state] || TOPIC.new;
   return h('span', { class: `st ${s.cls}` }, icon(s.icon), s.label);
 }
-const NOTE_KIND = { triage: '분배', memo: '메모', review: '검토', plan: '진행 베이스', question: '질문', answer: '답변', status: '상태', claim: '착수', handoff: '인계', work: '작업물' };
+const NOTE_KIND = { triage: '분배', memo: '메모', review: '검토', plan: '진행 베이스', question: '질문', answer: '답변', status: '상태', claim: '착수', handoff: '인계', work: '작업물', request: '요청', reply: '요청 답' };
 const HEALTH = { auth: '로그인 만료', tool: '실행 도구 없음', timeout: '시간 초과', encoding: '인코딩 오류', parse: '답 형식 오류', error: '실행 오류' };
 const LEDGER_ST = {
   pass: { label: '통과', cls: 'done', icon: 'done' }, pending: { label: '대기', cls: 'user_test', icon: 'clock' },
@@ -1655,6 +1655,9 @@ function topicPhase(t) {
   const hold = holdOf(t.id);
   if (hold) return { cls: 'progress', icon: 'user', label: `대화 세션 작업 중 · ${name(hold.agent)}`, detail: `${hold.note || ''} (${fmtAbs(hold.until)}까지 자동 실행 멈춤)` };
   const run = runsFor(t.id)[0];
+  const rq = t.open_request;
+  if (rq) return { cls: 'progress', icon: 'arrow', label: `요청 처리 중 · ${name(rq.to)}${isRunning(run) && run.agent === rq.to ? ' (실행 중)' : ''}`,
+    detail: `${name(rq.from)} → ${name(rq.to)}: ${rq.body || '-'}`, next: `${name(rq.to)} — 답하면 ${name(rq.from)}에게 자동으로 돌아감` };
   if (isRunning(run)) return { cls: 'progress', icon: 'play', label: `실행 중 · ${name(run.agent)}`, detail: `${fmtRel(run.started)} 시작 · 이유: ${run.reason || '-'}` };
   const ask = (S.data.decisions_needed || []).find(q => q.task_id === t.id && !S.d.answers[q.id]);
   if (ask) return { cls: 'user_test', icon: 'scale', label: '아키텍트 답 대기', detail: ask.question, next: '아키텍트 — 내 차례에서 결정', ask };
@@ -1713,6 +1716,10 @@ function historyEvents(topic, task) {
   };
   if (topic) {
     push({ key: 'created', ts: topic.created_at, by: 'user', kind: 'created', body: topic.body || topic.title });
+    for (const q of topic.requests || []) {  // 요청은 받는 사람까지 보이게(같은 내용의 기록 메모는 한 번만)
+      push({ ts: q.ts, by: q.from, to: q.to, kind: 'request', body: q.body });
+      if (q.status === 'answered') push({ ts: q.reply_ts, by: q.reply_by, to: q.from, kind: 'reply', body: q.reply });
+    }
     for (const n of topic.notes || []) push({ key: `note:${n.ts}`, ts: n.ts, by: n.by, kind: n.kind || 'memo', body: n.body });
     for (const c of commentsFor({ kind: 'topic', id: topic.id })) push({ ts: c.ts, by: c.by, to: c.to, kind: 'reply', body: c.body, pending: c.pending });
   }

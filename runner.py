@@ -55,7 +55,7 @@ SCHEMA = {
             "type": "object", "additionalProperties": False,
             "required": ["type", "kind", "body", "status", "plan", "work_id", "question", "options", "title", "origin", "task", "to"],
             "properties": {
-                "type": {"type": "string", "enum": ["claim", "plan", "note", "state", "work_note", "ask", "propose", "handoff"]},
+                "type": {"type": "string", "enum": ["claim", "plan", "note", "state", "work_note", "ask", "propose", "handoff", "request", "reply"]},
                 "kind": {"type": ["string", "null"]},
                 "body": {"type": ["string", "null"]},
                 "status": {"type": ["string", "null"], "enum": ["triage", "ready", "active", "done", "parked", None]},
@@ -141,6 +141,16 @@ def overlay_local(data: dict, rec: dict):
             if r.get("kind") == "handoff" and r.get("to") in known and ts > max(gen, (t.get("handoff") or {}).get("ts") or ""):
                 t["assignee"], t["assign_by"], changed = r["to"], "handoff", True
                 t["handoff"] = {"from": r.get("agent"), "to": r["to"], "ts": ts, "reason": (r.get("body") or "")[:300]}
+            if r.get("kind") == "request" and r.get("to") in known and r.get("req_id") and ts > gen:
+                q = {"id": r["req_id"], "from": r.get("agent"), "to": r["to"], "ts": ts, "body": (r.get("body") or "")[:1500], "status": "open"}
+                t["requests"] = [x for x in t.get("requests") or [] if x.get("id") != q["id"]] + [q]
+                t["open_request"], changed = q, True
+            if r.get("kind") == "reply" and r.get("req_id") and ts > gen:
+                for x in t.get("requests") or []:
+                    if x.get("id") == r["req_id"]:
+                        x.update(status="answered", reply_by=r.get("agent"), reply_ts=ts, reply=(r.get("body") or "")[:1500])
+                if (t.get("open_request") or {}).get("id") == r["req_id"]:
+                    t["open_request"], changed = None, True
             if (ts, r.get("agent"), r.get("kind")) not in seen:
                 t.setdefault("notes", []).append({"ts": ts, "kind": r.get("kind"), "body": r.get("body", ""), "by": r.get("agent")})
                 changed = True
@@ -159,7 +169,11 @@ def sig_parts(t: dict, who: str, mode: str, data: dict, st: dict) -> dict:
     - 다른 작업자 기록 수, 아키텍트·다른 작업자의 대화 수가 늘면 깨운다.
     - cont: 작업 모드에서 결과물이 늘었으면 실행기가 올려 이어서 깨운다(하루 한도 안에서)."""
     notes = t.get("notes", [])
-    if who == t.get("assignee"):
+    req = t.get("open_request") or {}
+    if req.get("to") == who and who != t.get("assignee"):
+        claimed = None
+        stage = f"req-{req.get('id')}"
+    elif who == t.get("assignee"):
         claimed = any(n.get("by") == who and n.get("kind") == "claim" for n in notes)
         stage = "planned" if t.get("plan") else "claimed" if claimed else "new"
     else:
@@ -167,7 +181,8 @@ def sig_parts(t: dict, who: str, mode: str, data: dict, st: dict) -> dict:
     others = sum(1 for n in notes if n.get("by") != who)
     talk = sum(1 for c in data.get("comments", [])
                if (c.get("target") or {}).get("id") == t["id"] and (c.get("_author") or c.get("by")) != who)
-    return {"stage": stage, "mode": mode, "others": others, "talk": talk, "cont": st.get("cont", 0)}
+    replies = sum(1 for q in t.get("requests") or [] if q.get("from") == who and q.get("status") == "answered")
+    return {"stage": stage, "mode": mode, "others": others, "talk": talk, "cont": st.get("cont", 0), "replies": replies}
 
 
 def topic_sig(t: dict, who: str, mode: str, data: dict, st: dict) -> str:
@@ -178,9 +193,13 @@ def topic_sig(t: dict, who: str, mode: str, data: dict, st: dict) -> str:
 
 def wake_reason(parts: dict, last: dict | None) -> str:
     """왜 깨우는지 사람이 읽을 수 있게."""
+    if str(parts["stage"]).startswith("req-") and parts["stage"] != (last or {}).get("stage"):
+        return "다른 작업자의 요청을 받음"
     if not last:
         return "처음 차례가 옴"
     out = []
+    if parts.get("replies", 0) > last.get("replies", 0):
+        out.append("내가 보낸 요청에 답이 옴")
     if parts["stage"] != last.get("stage"):
         out.append({"new": "착수 전", "claimed": "진행 베이스 작성", "planned": "진행", "review": "교차 검토"}.get(parts["stage"], parts["stage"]) + " 단계")
     if parts["mode"] != last.get("mode"):
@@ -220,7 +239,8 @@ def find_jobs(data: dict, state: dict, only: str | None = None) -> list[dict]:
         if t["id"] in holds:
             continue  # 대화 세션이 잡고 있다
         # 담당이고 진행 베이스가 있고 진행 중이면 '작업 모드'(작업물 저장소의 자기 폴더에 결과물을 직접 만든다)
-        mode = "impl" if (impl_allowed() and who == t.get("assignee") and t.get("plan") and t.get("status") == "active") else "plan"
+        req_to_me = (t.get("open_request") or {}).get("to") == who
+        mode = "impl" if (impl_allowed() and (req_to_me or (who == t.get("assignee") and t.get("plan") and t.get("status") == "active"))) else "plan"
         st = state.setdefault("topics", {}).setdefault(t["id"], {})
         parts = sig_parts(t, who, mode, data, st)
         sig = topic_sig(t, who, mode, data, st)
@@ -398,7 +418,19 @@ def build_prompt(job: dict, data: dict, workspace: Path | None, st: dict) -> str
     notes = "\n".join(f"- [{n.get('ts', '')[:16]}] {n.get('by')} ({n.get('kind')}): {str(n.get('body', ''))[:700]}" for n in t.get("notes", [])[-18:]) or "(없음)"
     convo = "\n".join(f"- [{str(c.get('ts', ''))[:16]}] {c.get('_author') or c.get('by')}: {str(c.get('body', ''))[:900]}" for c in comments[-10:]) or "(없음)"
     plan = json.dumps(t.get("plan"), ensure_ascii=False, indent=1) if t.get("plan") else "(아직 없음)"
-    role = "담당" if t.get("assignee") == job["agent"] else "교차 검토자"
+    req = t.get("open_request") if (t.get("open_request") or {}).get("to") == job["agent"] else None
+    role = "요청받은 작업자" if req else "담당" if t.get("assignee") == job["agent"] else "교차 검토자"
+    mine_reqs = [q for q in t.get("requests") or [] if q.get("from") == job["agent"]][-3:]
+    req_text = ""
+    if req:
+        req_text = (f"\n## 받은 요청 (이번에 깨운 이유) — 요청 ID {req.get('id')}\n요청한 작업자: {req.get('from')} (이 주제의 담당)\n요청 내용:\n{req.get('body')}\n"
+                    "할 일: 요청 범위만 처리한다(담당 일 전체를 대신하지 않는다). 필요한 자료·기획·확인 결과를 찾아 `reply`(body=요약·근거 경로·작업물 위치)로 답한다.\n"
+                    "자료 파일이 필요하면 작업 공간(있으면)에 두고 reply에 경로를 적는다. 답하면 차례가 요청한 작업자에게 자동으로 돌아간다.\n"
+                    "요청을 처리할 수 없으면 그 이유와 대신 누가·어디서 찾을 수 있는지를 reply로 답한다(답하지 않으면 흐름이 멈춘다).\n")
+    if mine_reqs:
+        req_text += "\n## 내가 보낸 요청과 답\n" + "\n".join(
+            f"- [{q.get('id')}] → {q.get('to')}: {q.get('body', '')[:300]}\n  " + (f"답({q.get('reply_by')}): {q.get('reply', '')[:1200]}" if q.get("status") == "answered" else "아직 답 없음")
+            for q in mine_reqs) + "\n"
     wid = job.get("work_id")
     last = st.get("last_result") or {}
     handed = t.get("handoff") if (t.get("handoff") or {}).get("to") == job["agent"] else None
@@ -444,7 +476,7 @@ def build_prompt(job: dict, data: dict, workspace: Path | None, st: dict) -> str
 
 ## 아키텍트와의 대화
 {convo}
-{ans}
+{ans}{req_text}
 ## 작업자 목록 (handoff 대상)
 {agent_directory(data)}
 
@@ -454,7 +486,9 @@ def build_prompt(job: dict, data: dict, workspace: Path | None, st: dict) -> str
 - `ask`는 실제 운영 변경 지점에서만 쓴다: 운영 서버 적용·재시작·DB 변경·배포·설치·공개, 또는 아키텍트만 정할 수 있는 기획 선택.
   완료 기준이 조금 모호하면 묻지 말고 합리적인 기준을 정해 note에 적고 진행한다.
 - 답을 기다리는 질문이 이미 있으면 새로 묻지 말고 그 질문과 무관한 할 일을 진행하거나 actions를 비운다.
-- 다른 PC·작업자의 일이 필요하면 `handoff`(to=작업자 ID, body=무엇을 해 달라는지·작업물 위치)로 차례를 넘긴다.
+- 담당은 내가 계속 하되 다른 작업자가 가진 자료·기획·확인이 필요하면 `request`(to=작업자 ID, body=무엇이 필요한지·어디쯤 있을지)로 요청한다.
+  답이 오면 차례가 나에게 돌아오고 그 답으로 이어서 한다. 답을 기다리는 동안 이 주제는 건드리지 않는다.
+- 일 자체를 다른 PC·작업자가 맡아야 하면 `handoff`(to=작업자 ID, body=무엇을 해 달라는지·작업물 위치)로 차례를 넘긴다.
   예: 운영 서버(서버컴)에서 조사한 버그 수정·격리 검증 → 개발컴 작업자, 개발컴에서 검증 끝난 핫픽스의 운영 적용 준비 → 서버컴 작업자.
 - 조사는 읽기 도구로 실제 파일을 읽고 근거(경로·줄)를 적는다. 추측은 추측이라고 적는다.
 - 작업물 기록은 `work_note`로 남긴다(work_id는 비워 둔다. 실행기가 이 주제의 작업물에 쓴다).
@@ -471,7 +505,7 @@ def build_prompt(job: dict, data: dict, workspace: Path | None, st: dict) -> str
 6) 끝났으면 `state`(status="done")
 
 ## 답 형식 (이 JSON 하나만 출력. 다른 글 금지)
-{{"summary": "한 줄 요약", "actions": [{{"type": "claim|plan|note|state|work_note|ask|propose|handoff", "kind": null, "body": null, "status": null, "plan": null, "work_id": null, "question": null, "options": null, "title": null, "origin": null, "task": null, "to": null}}]}}
+{{"summary": "한 줄 요약", "actions": [{{"type": "claim|plan|note|state|work_note|ask|propose|handoff|request|reply", "kind": null, "body": null, "status": null, "plan": null, "work_id": null, "question": null, "options": null, "title": null, "origin": null, "task": null, "to": null}}]}}
 - 각 action의 쓰지 않는 칸은 null로 둔다.
 """
 
@@ -663,6 +697,22 @@ def apply(job: dict, result: dict, data: dict | None = None) -> tuple[list[str],
                 if wid:
                     r = run_work("note", wid, "--agent", agent, "--kind", "메모", "--body", f"인계 → {to}: {body or '-'}"[:4000])
                     work_touched = work_touched or r.returncode == 0
+            elif typ == "request" and tid and body:
+                to = (a.get("to") or "").strip()
+                if to == agent or to not in known:
+                    failed.append(f"요청 거부: '{to}'는 작업자 목록에 없음")
+                    continue
+                if (t.get("open_request") or {}).get("from") == agent:
+                    node.add_topic_record(CFG, tid, agent, "memo", body=f"(답을 기다리는 요청에 덧붙임) {body[:1500]}")
+                    done.append("request→덧붙임")
+                    continue
+                node.add_topic_record(CFG, tid, agent, "request", to=to, req_id=node.new_req_id(agent), body=body[:4000])
+            elif typ == "reply" and tid and body:
+                req = t.get("open_request") or {}
+                if req.get("to") != agent:
+                    failed.append("답 거부: 나에게 온 열린 요청이 없음")
+                    continue
+                node.add_topic_record(CFG, tid, agent, "reply", req_id=req["id"], work_id=job.get("work_id"), body=body[:6000])
             elif typ == "ask" and (a.get("question") or "").strip():
                 answered = {x["id"] for x in (data or {}).get("decisions_answered", [])}
                 waiting = [q for q in (data or {}).get("decisions_needed", [])

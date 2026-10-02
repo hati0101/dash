@@ -38,7 +38,7 @@ AGENT_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,30}$")
 TOPIC_RE = re.compile(r"^T-\d{8}-[a-z0-9]{3,8}$")
 REF_RE = re.compile(r"^[A-Za-z0-9_.:\-]{1,200}$")
 STATUSES = ("triage", "ready", "active", "done", "parked")
-KINDS = ("claim", "plan", "memo", "review", "question", "answer", "status", "work", "handoff")
+KINDS = ("claim", "plan", "memo", "review", "question", "answer", "status", "work", "handoff", "request", "reply")
 WORK_ID_RE = re.compile(r"^[A-Z]{2,6}-\d{8}-[A-Za-z0-9]{1,12}$")
 
 
@@ -350,6 +350,35 @@ def cmd_notice_ack(args, cfg):
     print(f"{args.id}: {args.agent} 확인 — 다음 동기화 때 대시보드에 표시됩니다")
 
 
+def new_req_id(agent: str) -> str:
+    import secrets
+    return f"Q-{datetime.now(KST):%Y%m%d%H%M%S}-{secrets.token_hex(2)}"
+
+
+def cmd_request(args, cfg):
+    """담당은 그대로 두고 다른 작업자에게 자료·확인을 요청한다. 답(reply)이 오면 차례가 나에게 돌아온다."""
+    if not re.match(r"^[a-z0-9]+-[a-z0-9-]+$", args.to or "") or args.to == args.agent:
+        sys.exit("--to는 다른 작업자 ID (예: server-astra)")
+    body = body_arg(args)
+    if not body:
+        sys.exit("--body 또는 --body-file로 무엇이 필요한지 적어 주세요.")
+    rid = new_req_id(args.agent)
+    add_topic_record(cfg, args.id, args.agent, "request", to=args.to, req_id=rid, body=body[:4000])
+    print(f"{args.id}: {args.agent} → {args.to} 요청 {rid} — 답이 오면 {args.agent} 차례로 돌아옵니다")
+
+
+def cmd_reply(args, cfg):
+    if not re.match(r"^Q-\d{14}-[0-9a-f]{4}$", args.req or ""):
+        sys.exit("--req 형식 오류 (예: Q-20261002164500-ab12)")
+    body = body_arg(args)
+    if not body:
+        sys.exit("--body 또는 --body-file이 필요합니다.")
+    if args.work and not WORK_ID_RE.match(args.work):
+        sys.exit("--work 형식 오류")
+    add_topic_record(cfg, args.id, args.agent, "reply", req_id=args.req, work_id=args.work, body=body[:6000])
+    print(f"{args.id}: {args.agent} 요청 {args.req}에 답함 — 요청한 작업자 차례로 돌아갑니다")
+
+
 def cmd_link_work(args, cfg):
     if not WORK_ID_RE.match(args.work):
         sys.exit("--work 형식 오류 (예: FT-20261002-abc123)")
@@ -648,6 +677,12 @@ def main():
     p = sub.add_parser("handoff", help="다른 작업자(다른 PC 포함)에게 이 주제의 차례를 넘긴다(예: 서버컴 조사 → 개발컴 구현·검증)")
     p.add_argument("id"); p.add_argument("--agent", required=True); p.add_argument("--to", required=True); p.add_argument("--work")
     p.add_argument("--body", "--note", dest="body"); p.add_argument("--body-file")
+    p = sub.add_parser("request", help="담당은 그대로 두고 다른 작업자에게 자료·기획·확인을 요청(답이 오면 차례가 돌아옴)")
+    p.add_argument("id"); p.add_argument("--agent", required=True); p.add_argument("--to", required=True)
+    p.add_argument("--body"); p.add_argument("--body-file")
+    p = sub.add_parser("reply", help="받은 요청에 답하기(자료 위치·요약·작업물)")
+    p.add_argument("id"); p.add_argument("--agent", required=True); p.add_argument("--req", required=True); p.add_argument("--work")
+    p.add_argument("--body"); p.add_argument("--body-file")
     p = sub.add_parser("hold", help="대화 세션이 이 주제를 직접 처리하는 동안 자동 실행기가 건드리지 않게 잡는다")
     p.add_argument("id"); p.add_argument("--agent", required=True); p.add_argument("--minutes", type=int, default=120); p.add_argument("--note")
     p = sub.add_parser("release", help="잡기 풀기"); p.add_argument("id")
@@ -669,7 +704,7 @@ def main():
     cfg = load_cfg()
     {"init": cmd_init, "status": cmd_status, "mine": cmd_mine, "inbox": cmd_inbox, "pack": cmd_pack, "claim": cmd_claim, "propose": cmd_propose, "ask": cmd_ask,
      "plan": cmd_plan, "note": cmd_note, "state": cmd_state, "handoff": cmd_handoff, "hold": cmd_hold, "release": cmd_release,
-     "link-work": cmd_link_work, "notice-ack": cmd_notice_ack}[args.cmd](args, cfg)
+     "link-work": cmd_link_work, "notice-ack": cmd_notice_ack, "request": cmd_request, "reply": cmd_reply}[args.cmd](args, cfg)
 
 
 if __name__ == "__main__":

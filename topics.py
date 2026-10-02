@@ -628,12 +628,17 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
         claims = []
         handoff = None
         plan_ts: dict[str, str] = {}
+        requests: dict[str, dict] = {}  # 요청 ID → 요청(담당은 그대로 두고 다른 작업자에게 자료·확인을 부탁)
         for _ts, a, r in sorted(events, key=lambda e: e[0] or ""):
             if r.get("status") in STATUSES:
                 t["status"] = r["status"]
                 t["status_at"] = _ts  # 실행기가 '이 PC에서 더 나중에 바꾼 상태'를 판단하는 기준
             if r.get("work_id") and r.get("kind") in ("work", "handoff"):
                 t["work_id"] = r["work_id"]  # 주제 하나에 작업물 하나: 가장 최근 연결
+            if r.get("kind") == "request" and r.get("to") and r.get("req_id"):
+                requests[r["req_id"]] = {"id": r["req_id"], "from": a, "to": norm_agent(r["to"]), "ts": _ts, "body": (r.get("body") or "")[:1500], "status": "open"}
+            if r.get("kind") == "reply" and r.get("req_id") in requests:
+                requests[r["req_id"]].update(status="answered", reply_by=a, reply_ts=_ts, reply=(r.get("body") or "")[:1500], reply_work=r.get("work_id"))
             if r.get("kind") == "handoff" and r.get("to"):
                 handoff = {"from": a, "to": norm_agent(r["to"]), "ts": _ts, "reason": (r.get("body") or "")[:300]}
             if r.get("linked_task_id"):
@@ -677,6 +682,10 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
         planner = t["assignee"] if t["assignee"] in plans else (next(iter(plans)) if plans else None)
         if planner:
             t["plan"], t["plan_by"], t["plan_at"] = plans[planner], planner, plan_ts.get(planner)
+        reqs = [q for q in requests.values() if AGENT_RE.match(q["to"] or "") and (known is None or q["to"] in known)]
+        t["requests"] = sorted(reqs, key=lambda q: q["ts"] or "")[-10:]
+        opened = [q for q in reqs if q["status"] == "open"]
+        t["open_request"] = max(opened, key=lambda q: q["ts"] or "") if opened else None
         t["claims"] = sorted(set(claims))
         t["conflict"] = [a for a in t["claims"] if t.get("assignee") and a != t["assignee"]]
         t["updated_at"] = max([base.get("received_at", "")] + [e[0] or "" for e in events])
@@ -689,6 +698,9 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
 def whose_turn(t: dict) -> str | None:
     if t["status"] in ("done", "parked", "backlog", "dropped"):
         return None
+    req = t.get("open_request")
+    if req and req.get("to"):
+        return req["to"]  # 요청받은 쪽 차례. 답(reply)하면 담당에게 돌아간다
     a = t.get("assignee")
     if not a:
         return LEAD  # 배분 대기
