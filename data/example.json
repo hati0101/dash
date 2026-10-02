@@ -1,0 +1,33 @@
+{
+  "author": "astra",
+  "updated_at": "2026-10-02T09:00:00+09:00",
+  "tasks": [
+    {
+      "id": "EXAMPLE-TASK-20261002",
+      "title": "화면에 보일 작업 이름",
+      "area": "클라이언트 | 서버 | 네이티브 UI | 오버레이 | 웹 | 도구",
+      "owner": "claude | astra | cli | user",
+      "state": "자유 문자열 (예: running, reported, ready_for_user_test)",
+      "stage": "request | progress | validating | user_test | blocked | done  (생략하면 state에서 추정)",
+      "priority": "P0 | P1 | P2 | P3",
+      "waiting_on": "claude | astra | user (지금 누가 움직여야 하는지)",
+      "due": "2026-10-05",
+      "summary": "한두 문장 현황",
+      "next_action": "다음에 할 일 한 줄",
+      "evidence": ["근거 파일 경로나 메시지 ID"],
+      "updated_at": "2026-10-02T09:00:00+09:00"
+    }
+  ],
+  "user_actions": [
+    {"id": "UA-EXAMPLE", "title": "사용자가 할 일", "detail": "구체 절차", "task_id": "EXAMPLE-TASK-20261002", "since": "2026-10-02T09:00:00+09:00"}
+  ],
+  "decisions_needed": [
+    {"id": "DN-EXAMPLE", "question": "결정할 질문", "options": ["A", "B"], "recommendation": "권장안", "owner": "user", "task_id": "EXAMPLE-TASK-20261002", "since": "2026-10-02T09:00:00+09:00"}
+  ],
+  "decisions": [
+    {"id": "D-EXAMPLE", "date": "2026-10-02", "title": "결정 제목", "decision": "무엇을 정했나", "reason": "왜", "rejected": ["버린 대안"], "by": "user | claude | astra", "task_id": "EXAMPLE-TASK-20261002", "source": "근거"}
+  ],
+  "notes": [
+    {"id": "N-EXAMPLE", "title": "메모", "body": "자유 메모", "ts": "2026-10-02T09:00:00+09:00"}
+  ]
+}

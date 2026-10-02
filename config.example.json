@@ -1,0 +1,22 @@
+{
+  "_comment": "config.local.json으로 복사해 실제 경로를 적습니다. config.local.json은 커밋하지 않습니다.",
+  "project_name": "REAL 운영체제",
+  "bridge_dir": "C:/path/to/codex-claude-bridge",
+  "ledger_path": "C:/path/to/server-dev/AUDIT_LEDGER.md",
+  "ai_runs_dir": "C:/path/to/AI/runs",
+  "claude_memory_dir": "C:/Users/<user>/.claude/projects/<project>/memory",
+  "curated_files": ["data/claude.json", "data/astra.json"],
+  "topics_dir": "topics",
+  "github_repo": "owner/repo-name",
+  "output": "docs/data.enc.json",
+  "limits": {
+    "message_full_body_days": 3,
+    "message_body_chars": 6000,
+    "message_old_body_chars": 700,
+    "ledger_entries": 80,
+    "ledger_body_chars": 1800,
+    "stale_hours": 24,
+    "unanswered_hours": 6,
+    "recent_hours": 24
+  }
+}

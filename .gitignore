@@ -1,0 +1,16 @@
+# 허용 목록 방식: 아래에 명시한 파일만 커밋된다. 평문 데이터(data/*.json, topics/, out/, config.local.json)는 절대 올라가지 않는다.
+/*
+!/.gitignore
+!/README.md
+!/build.py
+!/topics.py
+!/encrypt.mjs
+!/config.example.json
+!/publish.ps1
+!/docs/
+!/tests/
+!/data/
+/data/*
+!/data/example.json
+*.tmp
+__pycache__/
