@@ -437,7 +437,7 @@ button.item:hover, a.item:hover { background: var(--card-2); border-radius: 10px
 .board { display: grid; grid-template-columns: repeat(6, minmax(200px, 1fr)); gap: 12px; overflow-x: auto; padding-bottom: 8px; align-items: start; }
 .board .col { min-height: calc(100vh - 230px); }
 .board .col > .sel-wrap, .board .col > .proj { flex: none; }
-.board.topics { grid-template-columns: repeat(8, minmax(150px, 1fr)); }
+.board.topics { grid-template-columns: repeat(7, minmax(160px, 1fr)); }
 .col { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px; min-height: 160px; display: flex; flex-direction: column; gap: 10px; }
 .col-h { display: flex; align-items: center; gap: 8px; font-weight: 800; font-size: 13px; }
 .col-h .badge { margin-left: auto; }
@@ -955,3 +955,18 @@ body {
 .card, .col { background: color-mix(in srgb, var(--card) 70%, transparent); backdrop-filter: blur(6px); }
 /* 주제 화면의 관문 바로 결정 */
 .gate-box { display: grid; gap: 10px; }
+
+/* 완료 메뉴: 완료한 주제 기록(펼치면 관문 기록) */
+.done-fit { display: grid; grid-template-rows: minmax(0, 1fr); }
+.done-list { display: grid; gap: 6px; overflow-y: auto; min-height: 0; }
+.done-row { border: 1px solid var(--line); border-radius: 12px; background: color-mix(in srgb, var(--card-2) 80%, transparent); }
+.done-row > summary { list-style: none; display: flex; align-items: center; gap: 12px; padding: 10px 12px; cursor: pointer; }
+.done-row > summary::-webkit-details-marker { display: none; }
+.done-row[open] > summary { border-bottom: 1px solid var(--line); }
+.done-row .body { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.done-row .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; color: var(--ink-3); font-size: 12px; }
+.done-row .when { color: var(--ink-3); font-size: 12px; white-space: nowrap; }
+.done-log { padding: 10px 14px 12px 50px; display: grid; gap: 8px; font-size: 13px; }
+.done-log ol { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+.done-old { margin-top: 12px; }
+.done-old > summary { cursor: pointer; color: var(--ink-3); font-size: 12.5px; }

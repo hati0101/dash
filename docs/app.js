@@ -193,7 +193,7 @@ const TOPIC_STATES = [
   { id: 'ready', label: '준비됨', cls: 'done', icon: 'file' },
   { id: 'active', label: '진행 중', cls: 'progress', icon: 'play' },
   { id: 'review_user', label: '아키텍트 관문', cls: 'user_test', icon: 'scale' },
-  { id: 'done', label: '완료', cls: 'done', icon: 'done' },
+  { id: 'done', label: '완료', cls: 'done', icon: 'done', hidden: true },  // 완료는 '완료' 메뉴에서(보드에서 뺌)
   { id: 'parked', label: '보류', cls: 'neutral', icon: 'pause' },
   { id: 'dropped', label: '삭제됨', cls: 'blocked', icon: 'x', hidden: true },
 ];
@@ -464,6 +464,7 @@ const NAV = [
   { id: 'agents', label: '작업자', icon: 'agents' },
   { id: 'topics', label: '주제', icon: 'topics' },
   { id: 'tasks', label: '업무', icon: 'tasks' },
+  { id: 'done', label: '완료', icon: 'done' },
   { id: 'messages', label: '메시지', icon: 'messages' },
   { id: 'verify', label: '검증', icon: 'verify' },
   { id: 'brain', label: '세컨드 브레인', icon: 'brain' },
@@ -616,7 +617,7 @@ function openMissedDrawer() {
 }
 
 function page() {
-  const views = { mine: vMine, overview: vOverview, agents: vAgents, topics: vTopics, tasks: vTasks, messages: vMessages, verify: vVerify, brain: vBrain, sources: vSources };
+  const views = { mine: vMine, overview: vOverview, agents: vAgents, topics: vTopics, tasks: vTasks, done: vDone, messages: vMessages, verify: vVerify, brain: vBrain, sources: vSources };
   return h('div', { class: 'page' }, (views[S.view] || vOverview)());
 }
 function head(eyebrow, title, small, ...tools) {
@@ -728,7 +729,7 @@ function completionCard(pct, started, owner) {
   const max = Math.max(1, ...rows.map(r => r.n));
   return card('완료율', { big: pct, unit: `% · 착수 ${started.length}건`, cls: 'sum-card', right: moreBtn(0, () => go('topics')) },
     h('div', { class: 'bars', title: `${owner === 'user' ? '아키텍트 담당 주제는 없어서 전체 기준으로 보여 줍니다.\n' : ''}착수한 주제 기준(미처리·보류·삭제 제외). 완료는 ★9 완료 확정(조사·기획은 ★결과 확인)에서만 셉니다. AI가 끝낸 주제는 'AI 끝남·★확인 대기'에 있습니다.` },
-      rows.map(r => h('button', { class: 'bar-row', onclick: () => go('topics'), 'aria-label': `${r.label} ${r.n}건` },
+      rows.map(r => h('button', { class: 'bar-row', onclick: () => go(r.label === '완료 확정' ? 'done' : 'topics'), 'aria-label': `${r.label} ${r.n}건` },
         h('span', { style: { color: `var(--${r.c})`, display: 'grid' } }, icon(r.ico)),
         h('span', { class: 'lbl' }, r.label),
         h('span', { class: 'track-bar' }, h('i', { style: { width: (r.n / max * 100) + '%', background: `var(--${r.c})` } })),
@@ -1356,8 +1357,7 @@ const FLOW = [
   { id: 'validating', label: '검증', icon: 'eye' },
   { id: 'progress', label: '진행', icon: 'play' },
   { id: 'request', label: '요청', icon: 'inbox' },
-  { id: 'done', label: '완료', icon: 'done' },
-];
+];  // 완료는 '완료' 메뉴에서 본다(보드가 길어지지 않게)
 const aiOfAgent = id => ((S.data.agents || []).find(a => a.id === id) || {}).ai || (/claude/.test(id || '') ? 'claude' : /astra|gpt/.test(id || '') ? 'gpt' : '');
 const pcOfAgent = id => ((S.data.agents || []).find(a => a.id === id) || {}).pc || String(id || '').split('-')[0];
 function topicFlow(t, asking) {
@@ -1396,6 +1396,45 @@ function flowItems(f = 'all', pcF = 'all') {
     items.push({ kind: 'task', t, col: FLOW.some(x => x.id === col) ? col : 'progress', why: col === 'blocked' ? [t._stale ? `${Math.round(t._age)}시간 멈춤` : '막힘'] : [], ts: t.updated_at });
   }
   return items;
+}
+// ------------------------------------------------------------ 완료(아키텍트 요청 2026-10-03: 보드에서 빼고 기록으로만 본다)
+const GATE_SHORT = { 4: '실게임 시험', 5: '배포본 결정', 7: '운영 반영 승인', 9: '완료 확정', 40: '결과 확인' };
+function vDone() {
+  const win = S.f.doneWin || '30d';
+  const days = { '7d': 7, '30d': 30, all: 1e5 }[win];
+  const doneAt = t => t.status_at || t.updated_at;
+  const all = S.d.topics.filter(t => t.status === 'done').sort((a, b) => toMs(doneAt(b)) - toMs(doneAt(a)));
+  const list = all.filter(t => Date.now() - toMs(doneAt(t)) <= days * 864e5);
+  const oldTasks = S.d.tasks.filter(t => t.stage === 'done');
+  const how = t => {
+    const last = (t.gate_history || []).at(-1);
+    if (!last) return '관문 이전 방식으로 완료';
+    return `★${last.n === 40 ? 4 : last.n} ${GATE_SHORT[last.n] || '관문'} · ${String(last.choice || '메모').replace(/\(.*\)/, '')}`;
+  };
+  const row = t => h('details', { class: 'done-row' },
+    h('summary', null,
+      h('span', { class: 'lead-ico good' }, icon('check')),
+      h('span', { class: 'body' }, h('b', { class: 'clamp-1' }, t.title),
+        h('span', { class: 'meta' }, t.kind ? h('span', { class: 'tag' }, t.kind) : null, h('span', null, how(t)),
+          t.assignee ? h('span', { class: 'wait' }, av(t.assignee, true), person(t.live_from || t.assignee).name) : null)),
+      h('span', { class: 'when', title: fmtAbs(doneAt(t)) }, fmtAbs(doneAt(t)))),
+    h('div', { class: 'done-log' },
+      (t.gate_history || []).length ? h('ol', null, t.gate_history.map(x => h('li', null,
+        h('b', null, `★${x.n === 40 ? 4 : x.n} ${GATE_SHORT[x.n] || ''}`), ` · ${x.choice || '메모'}`, x.note ? h('span', { class: 'muted' }, ` — ${x.note}`) : null,
+        h('span', { class: 'when' }, ` ${fmtAbs(x.answered_at)}`))))
+        : h('div', { class: 'hint' }, '관문 기록이 없습니다(9단계 흐름 이전에 끝난 주제).'),
+      h('button', { class: 'btn sm', onclick: () => openTopic(t) }, icon('topics'), '주제 전체 보기')));
+  return [
+    head('DONE', '완료', `완료 ${all.length}건`,
+      chips([['7d', '7일'], ['30d', '30일'], ['all', '전체']], win, v => { S.f.doneWin = v; render(); }, '완료 기간')),
+    h('div', { class: 'done-fit fit-page' },
+      card('완료한 주제', { big: list.length, unit: '건', cls: 'fill scroll-card' },
+        list.length ? h('div', { class: 'done-list' }, list.map(row)) : empty('이 기간에 완료한 주제가 없습니다.'),
+        oldTasks.length ? h('details', { class: 'done-old' }, h('summary', null, `옛 작업표 완료 ${oldTasks.length}건`),
+          h('div', { class: 'list' }, oldTasks.map(t => h('button', { class: 'item', onclick: () => openTask(t) },
+            h('span', { class: 'body' }, h('div', { class: 't clamp-1' }, t.title), h('div', { class: 's' }, fmtAbs(t.updated_at))))))) : null)),
+    h('p', { class: 'hint fit-hint' }, '완료한 주제는 주제 보드·업무 보드에서 빠지고 여기에 기록으로 남습니다. 항목을 펼치면 관문마다 언제 무엇을 골랐는지 보입니다.'),
+  ];
 }
 function vTasks() {
   const f = S.f.taskOwner || 'all', pcF = S.f.taskPc || 'all';
@@ -1853,8 +1892,13 @@ function topicPhase(t) {
   if (t.status === 'done') return { cls: 'done', icon: 'check', label: t.confirmed ? '완료 확정' : '완료' };
   if (t.status === 'parked') return { cls: 'neutral', icon: 'pause', label: '보류' };
   // 9단계 관문: 아키텍트 결정 차례(★4 실게임 시험 · ★5 배포본 결정 · ★7 운영 반영 승인 · ★9 완료 확정 · 조사·분석은 결과 확인)
+  if (t.status === 'review_user' && t.gate && S.d.answers[t.gate.id]) {  // 답은 보냈고 허브 반영(1~2분)을 기다리는 중
+    const a = S.d.answers[t.gate.id];
+    return { cls: 'progress', icon: 'clock', label: `★${t.gate.step || t.gate.n}/9 답함 · 반영 대기`, detail: `내 결정: ${a.choice || '메모'}${a.note ? ' — ' + a.note : ''}`,
+      next: '허브가 다음 동기화(1~2분) 때 반영합니다' };
+  }
   if (t.status === 'review_user' && t.gate) {
-    const open = (S.data.decisions_needed || []).filter(q => !S.d.answers[q.id]);
+    const open =(S.data.decisions_needed || []).filter(q => !S.d.answers[q.id]);
     const ask = open.find(q => q.id === t.gate.id) || open.find(q => q.task_id === t.id);
     return { cls: 'user_test', icon: 'scale', label: `★${t.gate.step || t.gate.n}/9 ${t.gate.label}${t.live_session ? ' · 개발컴 Claude 대화' : ''}`, detail: (t.gate.summary || '').slice(0, 300) || null,
       next: `아키텍트 — ${t.live_session ? '개발컴 Claude 대화를 열어 시험·수정, 그다음 ' : ''}내 차례에서 고르기: ${(t.gate.options || []).map(o => o.replace(/\(.*\)/, '')).join(' · ')}`, ask };
