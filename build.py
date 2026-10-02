@@ -730,6 +730,12 @@ def stamp_assets():
 
 
 def main():
+    # 콘솔 문자표(cp949)에 없는 글자가 있어도 출력 때문에 멈추지 않게
+    for s in (sys.stdout, sys.stderr):
+        try:
+            s.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", default=os.environ.get("REAL_OPS_CONFIG") or str(ROOT / "config.local.json"))
     ap.add_argument("--password-file", help="비밀번호를 담은 파일(로컬 시험용). 없으면 REAL_OPS_PASSWORD 또는 입력")
