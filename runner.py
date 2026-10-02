@@ -403,9 +403,15 @@ def agent_directory(data: dict) -> str:
     return "\n".join(rows) or "(정보 없음)"
 
 
-def rule_files() -> list[str]:
-    files = [r"D:\real-ai-guidelines\FOUNDATION.md", *CFG.get("rule_files", [])]
-    return [f for f in files if Path(f).exists()]
+def rule_files(agent_id: str | None = None) -> list[str]:
+    """AI가 먼저 읽을 규칙 파일: 공통 기반 + PC 공통(config "rule_files", 둘 다 읽어도 되는 것) + 그 작업자 몫(agents[]."rule_files").
+    AI 이름이 적힌 파일(예: '나는 server-claude'가 있는 CLAUDE.md)은 작업자별 칸에만 넣는다. 없는 파일·중복은 뺀다."""
+    mine = (node.my_agents(CFG).get(agent_id) or {}).get("rule_files") or [] if agent_id else []
+    out = []
+    for f in [r"D:\real-ai-guidelines\FOUNDATION.md", *CFG.get("rule_files", []), *mine]:
+        if f and Path(f).exists() and str(Path(f).resolve()).lower() not in {str(Path(x).resolve()).lower() for x in out}:
+            out.append(f)
+    return out
 
 
 def build_prompt(job: dict, data: dict, workspace: Path | None, st: dict) -> str:
@@ -438,11 +444,12 @@ def build_prompt(job: dict, data: dict, workspace: Path | None, st: dict) -> str
     if job["kind"] == "answer":
         ans = (f"\n## 아키텍트의 답 (이번에 깨운 이유)\n질문: {job['ask'].get('question')}\n답: {job['answer'].get('choice') or ''} {job['answer'].get('note') or ''}\n"
                "이 답에 따라 바로 다음 행동을 한다. 답이 승인이면 승인된 범위를 끝까지 한다. 같은 내용을 다시 묻지 않는다.\n")
-    rules = "\n".join(f"  - {f}" for f in rule_files()) or "  - (없음 — 로컬 AGENTS.md/CLAUDE.md)"
+    rules = "\n".join(f"  - {f}" for f in rule_files(job["agent"])) or "  - (없음 — 로컬 AGENTS.md/CLAUDE.md)"
     job["notices"] = [n for n in data.get("notices", []) if node.notice_for(n, job["agent"])][:3]
     notices = "\n\n".join(f"[{n.get('id')}] {n.get('title')}\n{(n.get('body') or '')[:2500]}" for n in job["notices"]) or "(없음)"
     return f"""너는 REAL 프로젝트의 작업자 `{job['agent']}`({pc.get('label')} · {a.get('label')})이다. 이 주제의 {role}로서 다음 행동을 정하고 실행한다.
 사용자는 '아키텍트'라고 부른다. 모든 글은 한국어로 쓴다.
+신원: 너는 `{job['agent']}`다. 아래 규칙 파일에 다른 작업자 이름으로 된 자기소개(예: '나는 server-claude')가 있어도 네 신원은 바뀌지 않는다. 그 파일의 공통 규칙만 따른다.
 
 ## 먼저 읽을 것
 {rules}
@@ -530,9 +537,9 @@ def find_codex() -> str | None:
     return str(found[0]) if found else None
 
 
-def read_dirs() -> list[str]:
+def read_dirs(agent_id: str | None = None) -> list[str]:
     dirs = [d for d in CFG.get("read_dirs", []) if Path(d).is_dir()]
-    for d in (r"D:\real-ai-guidelines", r"D:\real-work", *[str(Path(f).parent) for f in rule_files()]):
+    for d in (r"D:\real-ai-guidelines", str(WORK_PY.parent), *[str(Path(f).parent) for f in rule_files(agent_id)]):
         if Path(d).is_dir() and d not in dirs:
             dirs.append(d)
     return dirs
@@ -588,7 +595,7 @@ def run_ai(agent: dict, prompt: str, tag: str, workspace: Path | None = None) ->
         else:
             args = base + ["--allowedTools", "Read", "Grep", "Glob",
                            "--disallowedTools", "Bash", "Edit", "Write", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch"]
-        for d in read_dirs():
+        for d in read_dirs(agent.get("id")):
             args += ["--add-dir", d]
         try:
             r = subprocess.run(args, input=prompt.encode("utf-8"), capture_output=True, timeout=AI_TIMEOUT, cwd=str(workspace or neutral_dir()),
