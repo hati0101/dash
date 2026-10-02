@@ -136,6 +136,23 @@ READ_HINT = {
     "codex": "너는 읽기 전용 샌드박스에서 돈다. 읽기 명령(Get-Content, Get-ChildItem, Select-String, rg, type, dir 등)은 실행해도 된다. 쓰기·설치·네트워크·서비스 제어 명령은 막혀 있으니 시도하지 않는다.",
 }
 
+def impl_section(job: dict, ws: Path | None) -> str:
+    if not ws:
+        return ""
+    return f"""## 작업 모드 (지금 실제로 일을 한다)
+진행 베이스가 있고 진행 중이므로 이번에는 결과물을 직접 만든다.
+- 작업 공간: `{ws}` (현재 폴더). **이 폴더 안에서만** 파일을 만들고 고칠 수 있다. 위 규칙의 '파일 수정 금지'는 이 폴더에는 적용되지 않는다.
+- 실제 프로젝트 폴더(개발 서버·클라이언트·라운지 소스 등)는 읽기만 한다. 고칠 내용은 작업 공간에 만든다:
+  - 새 파일(스크립트·NPC·설정 초안·문서)은 원래 들어갈 상대 경로를 살려 `files/` 아래에
+  - 기존 파일 수정은 원본을 읽고 `patch/<파일이름>.diff`(통합 diff, 원본 경로 표기)로
+  - 설계·결정 근거·시험 방법은 `DESIGN.md`에
+- 한 번에 다 못 끝내면 진행한 만큼 만들고 `note`로 진척과 다음 할 일을 남긴다(다음 동기화 때 이어서 깨운다).
+- 결과물이 다 준비되면 `note`로 무엇을 만들었는지·적용 방법·시험 방법을 쓰고, `ask`로 적용 승인을 묻는다
+  (선택지 예: "개발 서버에 적용하고 시험" / "수정 요청" / "보류"). 적용은 승인 뒤 별도 단계다.
+- 작업 공간 파일은 실행기가 비밀값 검사 후 작업물 저장소(work_id={job.get('work_id')})에 올린다.
+"""
+
+
 def prepare_workspace(job: dict) -> Path | None:
     """작업물 저장소에 이 주제의 작업 폴더를 만든다(FT-날짜-번호/<작업자>/). 실패하면 None(읽기 모드로)."""
     t = job["topic"]
@@ -420,6 +437,15 @@ def main():
                 st["last_sig"] = j["sig"]
                 continue
             done = apply(j, result)
+            if ws:  # 작업 공간 결과물 올리기(비밀값 검사 포함)
+                r = subprocess.run([sys.executable, str(WORK_PY), "sync", "--agent", j["agent"], "--message", f"작업 모드 {t.get('id')}"],
+                                   capture_output=True, text=True, encoding="utf-8", errors="replace")
+                done.append("작업물 올림" if r.returncode == 0 else f"작업물 올리기 보류: {(r.stdout or r.stderr).strip()[-300:]}")
+                files = [p for p in ws.rglob("*") if p.is_file()]
+                if t.get("id") and len(files) != st.get("files", 0):  # 파일이 늘었을 때만 기록(같은 단계 반복 깨움 방지)
+                    node.add_topic_record(CFG, t["id"], j["agent"], "memo",
+                                          body=f"작업물: real-work/work/{j.get('work_id')}/{j['agent']}/ 에 파일 {len(files)}개")
+                st["files"] = len(files)
             if j["kind"] == "answer":
                 state.setdefault("answers_used", []).append(j["ask"]["id"])
             st["last_sig"] = j["sig"]

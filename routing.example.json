@@ -3,7 +3,7 @@
   "auto": true,
   "default_agent": "dev-claude",
   "stale_minutes": 120,
-  "load_penalty": 1.5,
+  "load_penalty": 3,
   "offline_penalty": 8,
   "unknown_penalty": 15,
   "pcs": {
