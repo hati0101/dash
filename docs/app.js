@@ -2277,7 +2277,8 @@ document.addEventListener('keydown', e => {
   if (e.isComposing || e.keyCode === 229) return;  // 한글 조합 중
   const sc = kbScope();
   if (!sc) return;
-  if (sc.help) { if (e.code === 'F1' || (e.code === 'Slash' && e.shiftKey)) { e.preventDefault(); closeDrawer(); } return; }
+  const isHelpKey = e.code === 'F1' || (e.code === 'Slash' && e.shiftKey) || e.key === '?';
+  if (sc.help) { if (isHelpKey) { e.preventDefault(); closeDrawer(); } return; }
   if (matchMedia('(max-width: 880px)').matches) return;  // 휴대폰·좁은 화면은 그대로
   const tgt = e.target;
   if (tgt && tgt.matches && tgt.matches('input, textarea, select, [contenteditable="true"]')) {
@@ -2287,7 +2288,7 @@ document.addEventListener('keydown', e => {
   if (e.altKey || ((e.ctrlKey || e.metaKey) && e.code !== 'Enter')) return;  // 브라우저·운영체제 단축키는 그대로
   const c = e.code, sh = e.shiftKey, act = fn => { e.preventDefault(); fn(); };
   const side = sc.el?.querySelector('.ms-side'), main = sc.el?.querySelector('.ms-main');
-  if (c === 'F1' || (c === 'Slash' && sh)) return act(kbHelp);
+  if (isHelpKey) return act(kbHelp);
   if (sh && c === 'ArrowUp') return act(() => kbHist(sc, -1));
   if (sh && c === 'ArrowDown') return act(() => kbHist(sc, 1));
   if (sh && c === 'Home') return act(() => { if (side) side.scrollTop = 0; });
