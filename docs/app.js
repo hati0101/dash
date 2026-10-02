@@ -1306,19 +1306,120 @@ function openDecisionNeeded(q) {
   const redraw = () => openDecisionNeeded(q);
   const ans = S.d.answers[q.id];
   const note = h('textarea', { placeholder: '선택지 말고 직접 적거나, 고른 선택지에 덧붙일 말 (선택)', rows: '3', 'aria-label': '결정 메모' });
-  const topic = q.task_id ? S.d.topics.find(t => t.id === q.task_id) : null;
-  modal('결정이 필요한 문제',
+  const topic = topicById(q.task_id);
+  const task = !topic && q.task_id ? S.d.tasks.find(t => t.id === q.task_id) : null;
+  modalSplit('결정이 필요한 문제', [
     h('div', { class: 'meta', style: { display: 'flex', gap: '8px', 'flex-wrap': 'wrap', 'align-items': 'center' } },
       h('span', { class: 'wait' }, av(q._author || 'claude', true), `${person(q._author || 'claude').full} 질문`),
-      topic ? h('button', { class: 'tag', style: { cursor: 'pointer' }, onclick: () => openTopic(topic) }, '주제: ' + topic.title) : null,
-      h('span', { class: 'when' }, fmtRel(q.since))),
+      h('span', { class: 'when' }, `${fmtAbs(q.since)} · ${fmtRel(q.since)}`)),
     questionText(q.question),
     q.recommendation ? h('div', { class: 'callout' }, h('b', null, '권장 '), q.recommendation) : null,
     ans ? h('div', { class: 'callout' }, h('b', null, '내 결정: '), ans.choice || '(메모)', ans.note ? ' — ' + ans.note : '', ' ', ans.pending ? h('span', { class: 'st user_test' }, icon('clock'), '반영 대기') : h('span', { class: 'st done' }, icon('check'), '반영됨')) : null,
     (q.options || []).length ? [h('h4', null, '선택지 — 누르면 바로 결정됩니다'), optionList(q, o => decide(q, o, note.value.trim(), redraw))] : null,
     h('h4', null, '직접 적기'),
     h('div', { class: 'composer' }, note, h('div', { class: 'row' }, h('button', { class: 'btn primary', onclick: () => { if (!note.value.trim()) { note.focus(); return; } decide(q, '', note.value.trim(), redraw); } }, icon('send'), '메모로 결정 보내기'))),
-    sendHint());
+    sendHint(),
+  ], historyPanel(topic, task, `ask:${q.id}`));
+}
+// AI 질문(주제 기록의 질문)을 가운데 모달로: 질문 본문 + 답 보내기 + 히스토리
+function openQuestion(topic, n) {
+  const t = topicById(topic.id) || topic;
+  const lastUser = Math.max(0, ...commentsFor({ kind: 'topic', id: t.id }).filter(c => c.by === 'user').map(c => toMs(c.ts) || 0));
+  const answered = lastUser > (toMs(n.ts) || 0);
+  const key = `mine-q:${t.id}:${n.ts}`;
+  const acked = S.acks.has(key) || S.serverAcks?.has(key);
+  modalSplit('AI 질문', [
+    h('div', { class: 'meta', style: { display: 'flex', gap: '8px', 'flex-wrap': 'wrap', 'align-items': 'center' } },
+      h('span', { class: 'wait' }, av(n.by, true), `${person(n.by).full} 질문`),
+      h('span', { class: 'when' }, `${fmtAbs(n.ts)} · ${fmtRel(n.ts)}`)),
+    questionText(n.body),
+    answered ? h('div', { class: 'callout' }, h('span', { class: 'st done' }, icon('check'), '답함'), ' 이 질문 뒤에 아키텍트 답이 있습니다. 오른쪽 히스토리에서 확인하세요.')
+      : acked ? h('div', { class: 'callout' }, h('span', { class: 'st done' }, icon('check'), '확인함'), ' 답 없이 확인 처리했습니다.') : null,
+    thread({ kind: 'topic', id: t.id, title: t.title }, () => openQuestion(t, n),
+      { compose: true, title: `${person(n.by).name}에게 답하기`, placeholder: '여기에 답을 적으면 질문한 AI에게 전달되고, 다음 동기화 때 그 답으로 이어서 진행합니다', to: n.by }),
+    answered || acked ? null : h('div', { class: 'choice-row' },
+      h('button', { class: 'btn', onclick: () => { ack(key); closeDrawer(); } }, icon('check'), '답 없이 확인함으로 처리')),
+  ], historyPanel(t, null, `note:${n.ts}`));
+}
+function topicById(id) { return id ? S.d.topics.find(t => t.id === id) || null : null; }
+
+// ------------------------------------------------------------ 히스토리 (모달 오른쪽: 이 주제에서 지금까지 있었던 일)
+const HIST_KIND = { ...NOTE_KIND, created: '등록', reply: '대화', ask: '결정 요청', decide: '결정', message: '메시지' };
+function historyEvents(topic, task) {
+  const ev = [], seen = new Set();
+  const push = e => {
+    const body = String(e.body || '').trim();
+    if (!body) return;
+    const sig = `${e.by}|${body.slice(0, 120)}`;
+    if (seen.has(sig)) return;   // 결정 요청이 질문 메모로도 남는 경우 한 번만 보인다
+    seen.add(sig); ev.push({ ...e, body });
+  };
+  if (topic) {
+    push({ key: 'created', ts: topic.created_at, by: 'user', kind: 'created', body: topic.body || topic.title });
+    for (const n of topic.notes || []) push({ key: `note:${n.ts}`, ts: n.ts, by: n.by, kind: n.kind || 'memo', body: n.body });
+    for (const c of commentsFor({ kind: 'topic', id: topic.id })) push({ ts: c.ts, by: c.by, to: c.to, kind: 'reply', body: c.body, pending: c.pending });
+  }
+  const taskId = task?.id || topic?.linked_task_id;
+  if (taskId) {
+    for (const c of commentsFor({ kind: 'task', id: taskId })) push({ ts: c.ts, by: c.by, to: c.to, kind: 'reply', body: c.body, pending: c.pending });
+    for (const m of S.data.messages.filter(m => m.task_id === taskId).slice(0, 30)) push({ ts: m.ts, by: m.sender, to: m.recipient, kind: 'message', body: m.title, msg: m });
+  }
+  const ids = new Set([topic?.id, taskId].filter(Boolean));
+  for (const q of S.data.decisions_needed || []) {
+    if (!ids.has(q.task_id)) continue;
+    push({ key: `ask:${q.id}`, ts: q.since, by: q._author || 'claude', kind: 'ask', body: q.question });
+    const a = S.d.answers[q.id];
+    if (a) push({ ts: a.ts || q.since, by: 'user', kind: 'decide', body: [a.choice, a.note].filter(Boolean).join(' — ') || '(메모)', pending: a.pending });
+  }
+  return ev.sort((a, b) => (toMs(a.ts) || 0) - (toMs(b.ts) || 0));
+}
+function historyPanel(topic, task, focusKey) {
+  const ev = historyEvents(topic, task);
+  const plan = topic?.plan || {};
+  const planRows = [['goal', '목표'], ['scope', '범위'], ['first_steps', '첫 단계'], ['risks', '위험·확인'], ['done_when', '완료 기준']]
+    .filter(([k]) => plan[k] && (!Array.isArray(plan[k]) || plan[k].length));
+  const head = topic ? [
+    h('div', { style: { display: 'flex', gap: '6px', 'flex-wrap': 'wrap', 'align-items': 'center' } }, topicChip(topic.status), priChip(topic.priority), topic.kind ? h('span', { class: 'tag' }, topic.kind) : null, h('span', { class: 'tag mono' }, topic.id)),
+    h('div', { class: 'hist-title' }, topic.title),
+    h('dl', { class: 'fields' }, h('dt', null, '담당'), h('dd', null, topic.assignee ? person(topic.assignee).full : '미배정'),
+      h('dt', null, '지금 차례'), h('dd', null, topic.turn ? person(topic.turn).full : '—'),
+      topic.dispatch_reason ? [h('dt', null, topic.assign_by === 'user' ? '담당 지정' : '배분 근거'), h('dd', null, topic.dispatch_reason)] : null),
+    planRows.length ? h('details', { class: 'hist-plan' }, h('summary', null, `진행 베이스 · ${person(topic.plan_by).name}`),
+      h('div', { class: 'plan' }, planRows.map(([k, l]) => h('div', null, h('h4', null, l), Array.isArray(plan[k]) ? h('ul', null, plan[k].map(x => h('li', null, x))) : h('div', null, plan[k]))))) : null,
+    h('button', { class: 'btn sm', onclick: () => openTopic(topic) }, icon('topics'), '주제 전체 보기'),
+  ] : task ? [
+    h('div', { style: { display: 'flex', gap: '6px', 'flex-wrap': 'wrap' } }, priChip(task.priority), stChip(task.stage), h('span', { class: 'tag mono' }, task.id)),
+    h('div', { class: 'hist-title' }, task.title),
+    task.summary ? h('p', { class: 'muted', style: { margin: 0, 'font-size': '13px' } }, task.summary) : null,
+    h('button', { class: 'btn sm', onclick: () => openTask(task) }, icon('tasks'), '작업 전체 보기'),
+  ] : [h('div', { class: 'hint' }, '연결된 주제가 없는 질문입니다.')];
+  const LIMIT = 12;
+  const list = h('ol', { class: 'hist' });
+  const row = e => h('li', { class: `hist-item k-${e.kind}${e.by === 'user' ? ' me' : ''}${e.key && e.key === focusKey ? ' focus' : ''}` },
+    h('span', { class: 'hist-dot' }, av(e.by, true)),
+    h('div', { class: 'hist-body' },
+      h('div', { class: 'h' }, h('b', null, person(e.by).name), e.to ? h('span', null, '→ ' + person(e.to).name) : null,
+        h('span', { class: 'tag' }, HIST_KIND[e.kind] || e.kind), e.key && e.key === focusKey ? h('span', { class: 'st user_test' }, '지금 보는 항목') : null,
+        e.pending ? h('span', { class: 'st user_test' }, icon('clock'), '반영 대기') : null,
+        h('span', { class: 'when', title: fmtAbs(e.ts) }, fmtAbs(e.ts))),
+      e.msg ? h('button', { class: 'linkish', onclick: () => openMessage(e.msg) }, e.body) : longText(e.body)));
+  const fill = all => { list.replaceChildren(...(all ? ev : ev.slice(-LIMIT)).map(row)); };
+  fill(false);
+  const more = ev.length > LIMIT ? h('button', { class: 'btn sm', onclick: () => { fill(true); more.remove(); } }, `이전 기록 ${ev.length - LIMIT}건 더 보기`) : null;
+  return [
+    h('div', { class: 'hist-head' }, head),
+    h('h4', null, `히스토리 ${ev.length}건 · 오래된 것부터`),
+    more,
+    ev.length ? list : empty('아직 기록이 없습니다.'),
+  ];
+}
+// 긴 기록은 접어두고 "펼치기"로 본다
+function longText(s) {
+  const p = h('p', { class: 'hist-text' }, s);
+  if (s.length < 360 && (s.match(/\n/g) || []).length < 6) return p;
+  p.classList.add('folded');
+  const b = h('button', { class: 'linkish', onclick: () => { const f = p.classList.toggle('folded'); b.textContent = f ? '펼치기' : '접기'; } }, '펼치기');
+  return [p, b];
 }
 // AI 질문은 "(1) … (2) …"처럼 한 줄로 오는 경우가 많아 번호마다 줄을 나눠 읽기 쉽게 한다
 function questionText(s) {
@@ -1361,6 +1462,10 @@ function tokenCard() {
 function drawer(eyebrow, ...content) { return openPanel('drawer', eyebrow, content); }
 // 가운데 모달: 결정·승인처럼 읽고 고르는 화면. 내용이 길어도 잘리지 않고 안에서 스크롤된다
 function modal(eyebrow, ...content) { return openPanel('drawer modal', eyebrow, content); }
+// 넓은 가운데 모달: 왼쪽은 읽고 답하는 곳, 오른쪽은 히스토리. 두 칸이 따로 스크롤된다(좁은 화면은 위아래로)
+function modalSplit(eyebrow, main, side) {
+  return openPanel('drawer modal split', eyebrow, [h('div', { class: 'ms-main' }, main), h('div', { class: 'ms-side' }, side)]);
+}
 function openPanel(cls, eyebrow, content) {
   closeDrawer(true);
   const scrim = h('div', { class: 'scrim', onclick: () => closeDrawer() });
