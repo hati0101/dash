@@ -220,7 +220,7 @@ def impl_allowed() -> bool:
 
 
 def find_jobs(data: dict, state: dict, only: str | None = None) -> list[dict]:
-    agents = node.my_agents(CFG)
+    agents = {k: v for k, v in node.my_agents(CFG).items() if ((data.get("agent_locks") or {}).get(k) or {}).get("mode") != "all"}
     today = f"{now():%Y%m%d}"
     answers = {a["id"]: a for a in data.get("decisions_answered", [])}
     holds = node.active_holds(CFG)
@@ -477,8 +477,9 @@ def build_prompt(job: dict, data: dict, workspace: Path | None, st: dict) -> str
 ## 아키텍트와의 대화
 {convo}
 {ans}{req_text}
-## 작업자 목록 (handoff 대상)
+## 작업자 목록 (handoff·request 대상)
 {agent_directory(data)}
+{('- 배정 잠금(인계·요청 금지): ' + ', '.join(sorted(data.get('agent_locks') or {}))) if data.get('agent_locks') else ''}
 
 ## 규칙
 - {READ_HINT[job['runner']]}
@@ -669,6 +670,7 @@ def apply(job: dict, result: dict, data: dict | None = None) -> tuple[list[str],
     tid = t.get("id")
     done, failed, work_touched = [], list(job.get("failed") or []), False
     known = {a.get("id") for a in (data or {}).get("agents", [])} | set(node.my_agents(CFG))
+    locked = set((data or {}).get("agent_locks") or {})
     for a in result.get("actions", [])[:12]:
         if not isinstance(a, dict):
             failed.append("형식이 틀린 행동 건너뜀")
@@ -695,6 +697,9 @@ def apply(job: dict, result: dict, data: dict | None = None) -> tuple[list[str],
                 if to == agent or to not in known:
                     failed.append(f"넘기기 거부: '{to}'는 작업자 목록에 없음")
                     continue
+                if to in locked:
+                    failed.append(f"넘기기 거부: '{to}'는 아키텍트가 배정을 잠갔음")
+                    continue
                 wid = job.get("work_id") or topic_work_id(t)
                 node.add_topic_record(CFG, tid, agent, "handoff", to=to, work_id=wid, body=(body or f"{to}에게 넘김")[:2000])
                 if wid:
@@ -704,6 +709,9 @@ def apply(job: dict, result: dict, data: dict | None = None) -> tuple[list[str],
                 to = (a.get("to") or "").strip()
                 if to == agent or to not in known:
                     failed.append(f"요청 거부: '{to}'는 작업자 목록에 없음")
+                    continue
+                if to in locked:
+                    failed.append(f"요청 거부: '{to}'는 아키텍트가 배정을 잠갔음")
                     continue
                 if (t.get("open_request") or {}).get("from") == agent:
                     node.add_topic_record(CFG, tid, agent, "memo", body=f"(답을 기다리는 요청에 덧붙임) {body[:1500]}")

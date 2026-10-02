@@ -50,7 +50,7 @@ ACTION_ID_RE = re.compile(r"^A-\d{8}-[a-z0-9]{3,10}$")
 REF_RE = re.compile(r"^[A-Za-z0-9_.:\-]{1,200}$")
 TARGET_KINDS = ("task", "message", "topic", "decision", "general")
 STAGES = ("request", "progress", "validating", "user_test", "blocked", "done")
-ACTION_TYPES = ("reply", "ack", "task-state", "decide", "assign", "activate", "topic-edit", "topic-drop")
+ACTION_TYPES = ("reply", "ack", "task-state", "decide", "assign", "activate", "topic-edit", "topic-drop", "agent-lock")
 AGENT_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,30}$")
 
 
@@ -299,6 +299,12 @@ def clean_action(raw: dict) -> dict:
         kd = raw.get("kind")
         a.update(topic=topic, title=title, body=str(raw.get("body", "")).strip()[:8000],
                  priority=pri if pri in ("P0", "P1", "P2", "P3") else None, kind=kd if kd in KINDS else None)
+    elif kind == "agent-lock":
+        agent = norm_agent(str(raw.get("agent", "")))
+        mode = raw.get("mode") or "assign"
+        if not AGENT_RE.match(agent or "") or mode not in ("assign", "all"):
+            raise ValueError("배정 잠금 형식 오류")
+        a.update(agent=agent, lock=bool(raw.get("lock")), mode=mode)
     elif kind == "topic-drop":
         ids = raw.get("topics") or []
         if not isinstance(ids, list) or not ids or len(ids) > 300 or not all(isinstance(x, str) and ID_RE.match(x) for x in ids):
@@ -404,6 +410,13 @@ def apply_action(cfg, a: dict, source: str) -> str:
         rec["topic_edit"].append({"topic": a["topic"], "title": a["title"], "body": a["body"], "priority": a["priority"],
                                   "kind": a["kind"], "ts": a["created_at"] or ts})
         result = f"주제 수정 {a['topic']}"
+    elif a["type"] == "agent-lock":
+        locks = rec.setdefault("agent_locks", {})
+        if a["lock"]:
+            locks[a["agent"]] = {"mode": a["mode"], "ts": a["created_at"] or ts}
+        else:
+            locks.pop(a["agent"], None)
+        result = f"작업자 {a['agent']} " + (("배정 잠금" if a["mode"] == "assign" else "배정 잠금 + 자동 실행 멈춤") if a["lock"] else "잠금 풀림")
     elif a["type"] == "topic-drop":
         # 지우기 = 목록에서 빼기. 주제 폴더는 지우지 않으므로 '되살리기'로 복구된다
         drop = set(a["topics"])
@@ -597,6 +610,9 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
     out = []
     if not folder.is_dir():
         return out
+    # 검토자 짝 계산용 작업자 목록(작업자 목록을 넘기지 않은 호출에서도 같은 짝이 나오게). 인계·요청 검증은 known만 쓴다
+    peers = set(known) if known else ({a.get("id") for a in (cfg or {}).get("agents", []) if a.get("id")}
+                                      | {r.get("agent") for r in node_records or [] if r.get("agent")})
     assigns = user_assigns(cfg)
     urec = (read_json(data_dir(cfg) / "user.json", None) or {}) if cfg else {}
     activations = {r.get("topic") for r in urec.get("topic_activate", [])}
@@ -689,6 +705,7 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
         t["requests"] = sorted(reqs, key=lambda q: q["ts"] or "")[-10:]
         opened = [q for q in reqs if q["status"] == "open"]
         t["open_request"] = max(opened, key=lambda q: q["ts"] or "") if opened else None
+        t["reviewer"] = review_partner(t.get("assignee"), peers)
         t["claims"] = sorted({a for a, _ in claims})
         # 중복 착수 = 지금 담당이 정해진 뒤에 담당이 아닌 작업자가 착수한 경우만.
         # 인계·담당 변경 전에 남은 이전 담당의 착수 기록은 충돌이 아니다(거짓 경보 방지).
@@ -699,6 +716,17 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
         t["turn"] = whose_turn(t)
         out.append(t)
     return out
+
+
+def review_partner(a: str | None, known: set | None) -> str | None:
+    """교차 검토자: 같은 PC의 다른 작업자(검토가 한 사람에게 몰리지 않게). 없으면 사령탑, 사령탑 일이면 개발컴 Astra."""
+    if not a:
+        return None
+    pc = a.split("-", 1)[0]
+    mates = sorted(x for x in (known or set()) if x != a and x.split("-", 1)[0] == pc)
+    if mates:
+        return mates[0]
+    return LEAD if a != LEAD else "dev-astra"
 
 
 def whose_turn(t: dict) -> str | None:
@@ -715,7 +743,7 @@ def whose_turn(t: dict) -> str | None:
         return a  # 넘겨받은 쪽 차례. 받은 쪽이 새 진행 베이스를 쓰면 아래 교차 검토 단계로 돌아간다
     if not t.get("plan"):
         return a  # 진행 베이스 작성 대기
-    reviewer = LEAD if a != LEAD else "dev-astra"
+    reviewer = t.get("reviewer") or (LEAD if a != LEAD else "dev-astra")
     # 인계받은 쪽이 새로 쓴 진행 베이스는 그 뒤의 검토만 인정한다(넘기기 전 검토로 건너뛰지 않게)
     since = (t.get("plan_at") or "") if ho and ho.get("to") == a else ""
     if not any(n.get("kind") == "review" and n.get("by") != a and (n.get("ts") or "") >= since for n in t.get("notes", [])):
@@ -748,7 +776,7 @@ def load_routing(cfg) -> dict:
 
 
 def score_agents(topic: dict, agents: list[dict], loads: dict, routing: dict) -> list[tuple[float, str, list[str]]]:
-    text = " ".join(str(topic.get(k, "")) for k in ("title", "body", "kind")).lower()
+    text = " ".join(str(topic.get(k, "")) for k in ("title", "body")).lower()
     now = datetime.now(KST)
     stale = routing.get("stale_minutes", 120)
     rows = []
@@ -757,10 +785,14 @@ def score_agents(topic: dict, agents: list[dict], loads: dict, routing: dict) ->
         if a.get("accept_topics") is False:
             continue
         # 운영 서버처럼 '명시적으로 걸린 일만 받는' PC: 그 PC를 가리키는 규칙이 맞았거나 사용자가 직접 고른 경우만 후보
-        if (pcs.get(a["pc"]) or {}).get("only_when_matched"):
+        pcfg = pcs.get(a["pc"]) or {}
+        if pcfg.get("only_when_matched"):
             pointed = any(r.get("prefer_pc") == a["pc"] and any(w.lower() in text for w in r.get("match", []))
                           for r in routing.get("rules", []))
-            if not pointed and norm_agent(topic.get("prefer") or "") != a["id"]:
+            also = pcfg.get("also_accept") or {}
+            title = str(topic.get("title", "")).lower()  # 기획·조사 여부는 제목으로 판단(본문의 흔한 단어로 잘못 걸리지 않게)
+            readable = any(w.lower() in title for w in also.get("match", [])) and not any(w.lower() in text for w in also.get("unless", []))
+            if not pointed and not readable and norm_agent(topic.get("prefer") or "") != a["id"]:
                 continue
         s, why = 0.0, []
         for rule in routing.get("rules", []):
@@ -806,6 +838,57 @@ def score_agents(topic: dict, agents: list[dict], loads: dict, routing: dict) ->
     return rows
 
 
+def rebalance(cfg, topics: list[dict], agents: list[dict], loads: dict, routing: dict, labels: dict) -> int:
+    """부하 재분배: 자동 배분됐지만 담당이 아직 손대지 않은 주제(착수·진행 베이스·메모 없음, 30분 지남)를
+    점수가 확실히 더 높은 한가한 작업자에게 옮긴다. 아키텍트 지정·인계·진행 중인 일은 건드리지 않는다. 한 번에 최대 3건."""
+    margin = float(routing.get("rebalance_margin", 6))
+    if routing.get("rebalance") is False:
+        return 0
+    now = datetime.now(KST)
+    moved = 0
+    for t in sorted(topics, key=lambda x: x.get("created_at") or ""):
+        if moved >= 3:
+            break
+        cur = t.get("assignee")
+        if not cur or t["status"] not in ("new", "triage") or t.get("assign_by") in ("user", "handoff") or t.get("plan") or t.get("open_request"):
+            continue
+        if any(n.get("by") == cur and n.get("kind") not in ("triage",) for n in t.get("notes", [])):
+            continue  # 담당이 이미 손댔다
+        if norm_agent(t.get("prefer") or "") == cur:
+            continue  # 아키텍트가 고른 작업자
+        path, rec = author_file(cfg, t["id"], "claude")
+        if (now - to_dt(rec.get("assigned_at"))).total_seconds() < 30 * 60:
+            continue
+        others = {k: v for k, v in loads.items()}
+        others[cur] = max(0, others.get(cur, 0) - 1)  # 이 주제를 뺀 부하로 비교
+        rows = score_agents(t, agents, others, routing)
+        if not rows:
+            continue
+        best = rows[0]
+        cur_score = next((r[0] for r in rows if r[1] == cur), None)
+        # 지금 담당이 후보에서 빠졌으면(배정 잠금·받을 수 없는 일) 점수 차와 상관없이 옮긴다
+        if best[1] == cur or (cur_score is not None and best[0] < cur_score + margin):
+            continue
+        ts = now_iso()
+        reason = (f"부하 재분배: {labels.get(cur, cur)}(맡은 주제 {loads.get(cur, 0)}건) → {labels.get(best[1], best[1])}"
+                  f"(맡은 주제 {loads.get(best[1], 0)}건) · 점수 {best[0]:g} vs " + (f"{cur_score:g}" if cur_score is not None else "담당 불가(잠금·대상 아님)")
+                  + f" ({', '.join(best[2])})")
+        rec.update({"assignee": best[1], "dispatch_reason": reason, "dispatch_scores": {r[1]: r[0] for r in rows},
+                    "assigned_at": ts, "status_at": ts, "updated_at": ts})
+        add_note(rec, "triage", reason)
+        write_json(path, rec)
+        loads[cur] = max(0, loads.get(cur, 0) - 1)
+        loads[best[1]] = loads.get(best[1], 0) + 1
+        moved += 1
+        print(f"{t['id']} {reason}")
+    return moved
+
+
+def agent_locks(cfg) -> dict:
+    """아키텍트가 잠근 작업자: {작업자: {mode: assign|all, ts}}. assign=새 배정·재분배·인계·요청 안 받음, all=자동 실행도 멈춤."""
+    return (read_json(data_dir(cfg) / "user.json", None) or {}).get("agent_locks", {}) if cfg else {}
+
+
 def cmd_dispatch(args, cfg):
     """분배되지 않은 새 주제를 규칙 점수로 작업자 한 명에게 배정하고 근거를 사령탑 기록에 남긴다."""
     from node import collect_nodes, all_agents  # 같은 폴더의 PC 도구
@@ -817,16 +900,21 @@ def cmd_dispatch(args, cfg):
         return
     pw = os.environ.get("REAL_OPS_PASSWORD") or (Path(args.password_file).read_text(encoding="utf-8").strip() if args.password_file else None)
     nodes = collect_nodes(cfg, pw)
-    agents = all_agents(nodes)
-    if not agents:
+    all_list = all_agents(nodes)
+    if not all_list:
         sys.exit("등록된 작업자가 없습니다. node.py init으로 이 PC 작업자를 등록하세요.")
+    locks = agent_locks(cfg)
+    agents = [a for a in all_list if a["id"] not in locks]  # 잠긴 작업자는 새 배정·재분배 대상에서 뺀다
     node_recs = [r for n in nodes for r in n.get("topic_records", [])]
-    topics = merged_topics(topics_dir(cfg), cfg, node_recs, {a["id"] for a in agents})
+    topics = merged_topics(topics_dir(cfg), cfg, node_recs, {a["id"] for a in all_list})
     loads: dict[str, int] = {}
     for t in topics:
         if t.get("assignee") and t["status"] not in ("done", "parked", "dropped"):
             loads[t["assignee"]] = loads.get(t["assignee"], 0) + 1
-    labels = {a["id"]: f"{a['pc_label']} {a.get('label', a['id'])}" for a in agents}
+    labels = {a["id"]: f"{a['pc_label']} {a.get('label', a['id'])}" for a in all_list}
+    if not agents:
+        print("모든 작업자가 배정 잠금 상태 — 자동 배분 0건")
+        return
     done = 0
     for t in topics:
         if t.get("assignee") or t["status"] in ("done", "parked", "backlog", "dropped"):
@@ -848,7 +936,8 @@ def cmd_dispatch(args, cfg):
         loads[best[1]] = loads.get(best[1], 0) + 1
         done += 1
         print(f"{t['id']} → {best[1]} · {reason}")
-    print(f"자동 배분 {done}건")
+    moved = rebalance(cfg, topics, agents, loads, routing, labels)
+    print(f"자동 배분 {done}건" + (f" · 재분배 {moved}건" if moved else ""))
 
 
 # ---------------------------------------------------------------- 알림 (수신함 메시지, 중복 없음)

@@ -752,6 +752,7 @@ def build_payload(cfg: dict, pw: str | None = None) -> dict:
         "holds": holds,
         "works": works,
         "notices": notices,
+        "agent_locks": (json.loads(read_text(Path(cfg.get("data_dir") and (ROOT / cfg["data_dir"]) or ROOT / "data") / "user.json")) if (Path(cfg.get("data_dir") and (ROOT / cfg["data_dir"]) or ROOT / "data") / "user.json").exists() else {}).get("agent_locks", {}),
         "sources": log.rows,
         "tasks": tasks,
         "messages": messages,
