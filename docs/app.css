@@ -202,7 +202,8 @@ button.card-foot:hover { color: var(--ink); }
   .src-fit > .card:nth-child(3) { grid-area: 2 / 1 / 3 / 3; }
   .src-fit > .card:nth-child(5) { grid-area: 2 / 3; }
   .board.fit-page { align-items: stretch; grid-template-rows: minmax(0, 1fr); overflow-y: hidden; }
-  .board.fit-page .col { height: auto; min-height: 0; overflow-y: auto; }
+  .board.fit-page .col, .board.topics.fit-page .col { height: auto !important; min-height: 0 !important; overflow-y: auto; }
+  .fit-page.grid, .fit-page.g-2, .fit-page.wide-2 { align-items: stretch !important; }
   .mine-split.fit-page { align-items: stretch; }
   .mine-split.fit-page .mine-list, .mine-split.fit-page .mine-detail { height: auto; min-height: 0; }
   .split.fit-page { align-items: stretch; }
@@ -219,7 +220,7 @@ button.card-foot:hover { color: var(--ink); }
 .team-row-item .t .pc-chip { font-size: 10.5px; }
 .team-strip .team-row-item { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; }
 .team-strip .team-row-item .t { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.team-strip .team-row-item .side { display: grid; justify-items: end; gap: 4px; }
+.team-strip .team-row-item .tr-side { display: grid; justify-items: end; gap: 4px; }
 .team-strip .team-row-item .cnt { font-size: 11.5px; color: var(--ink-3); white-space: nowrap; }
 .team-row-item.pc-dev, .team-row-item.pc-server { --pc: var(--pc-other); border-left: 3px solid var(--pc); }
 .team-row-item.pc-dev { --pc: var(--pc-dev); } .team-row-item.pc-server { --pc: var(--pc-server); }
@@ -880,4 +881,18 @@ mark { background: color-mix(in srgb, var(--st-user_test) 35%, transparent); col
 }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
+}
+
+/* 메시지 목록 칩: 좁은 화면에서 칸 밖으로 나가지 않게 */
+.msg .s { min-width: 0; }
+.msg .s .tag { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 넓은 화면 배치가 아닐 때(1366 등)도 보드 칸·기록 목록이 내용만큼 끝없이 늘지 않게 */
+@media (min-width: 881px) {
+  .board.fit-page .col { max-height: calc(100vh - 210px); overflow-y: auto; }
+  .fit-page .fill > .list, .fit-page .fill > .tbl-wrap { max-height: calc(100vh - 240px); overflow-y: auto; }
+}
+@media (max-width: 880px) {
+  .board.fit-page .col { max-height: 70vh; overflow-y: auto; }
+  .fit-page .fill > .list, .fit-page .fill > .tbl-wrap { max-height: 70vh; overflow-y: auto; }
 }

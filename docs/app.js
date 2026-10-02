@@ -668,7 +668,7 @@ function teamStrip() {
       const now = run && isRunning(run) ? `자동 실행 중 · ${tt(run)}` : a.current ? a.current.project : run ? `마지막 자동 실행 · ${tt(run)} · ${fmtRel(run.ended || run.started)}` : '아직 실행 기록 없음';
       return h('button', { class: `team-row-item pc-${a.pc}`, onclick: () => go('agents') },
         av(a.id), h('div', { class: 'body' }, h('div', { class: 't' }, h('span', { class: 'pc-chip' }, a.pc_label), a.label || a.id), h('div', { class: 's clamp-2' }, now)),
-        h('div', { class: 'side' }, h('span', { class: `st ${st.cls}` }, icon(st.icon), st.label),
+        h('div', { class: 'tr-side' }, h('span', { class: `st ${st.cls}` }, icon(st.icon), st.label),
           h('span', { class: 'cnt' }, `주제 ${s.assigned.length}${s.turn.length ? ` · 차례 ${s.turn.length}` : ''}`)));
     })) : empty('작업자 정보가 없습니다.'));
 }
@@ -1113,7 +1113,7 @@ function noticesCard(agents) {
   const list = S.data.notices || [];
   if (!list.length) return null;
   const targets = n => agents.filter(a => (n.to || ['all']).includes('all') || (n.to || []).includes(a.id));
-  return h('div', { class: 'section-gap' }, card('허브 공지', { big: list.length, unit: '건' },
+  return card('허브 공지', { big: list.length, unit: '건' },
     h('div', { class: 'list' }, list.slice(0, 3).map((n, i) => {
       const tg = targets(n), acked = tg.filter(a => (n.acks || {})[a.id]);
       return h('details', { class: 'notice' },
@@ -1121,7 +1121,7 @@ function noticesCard(agents) {
         h('div', { class: 'notice-acks' }, tg.map(a => { const k = (n.acks || {})[a.id];
           return h('span', { class: `tag ${k ? '' : 'muted'}` }, av(a.id, true), `${a.pc_label} ${a.label || a.id}: `, k ? `${k.via === 'session' ? '확인' : '실행기 반영'} ${fmtRel(k.ts)}` : '미확인'); })),
         longText(n.body || ''));
-    }))));
+    })));
 }
 function runRow(r) {
   return h('div', { class: `run-row r-${r.result}` }, h('span', { class: 'st ' + ({ ok: 'done', partial: 'user_test', fail: 'blocked', running: 'progress' }[r.result] || 'neutral') }, RUN_RESULT[r.result] || r.result),
@@ -1142,8 +1142,8 @@ function vAgents() {
         h('span', { class: 'pc-role' }, (r.pcs?.[g.pc]?.['역할'] || '').split(/[.(]/)[0] || (g.role === 'hub' ? '허브 · 배분 담당' : '작업 노드')),
         g.error ? h('span', { class: 'st blocked' }, icon('alert'), g.error) : h('span', { class: 'pc-sync' }, `마지막 동기화 ${fmtRel(g.synced_at)}`)),
       g.list.length ? h('div', { class: 'agent-grid' }, g.list.map(agentCard)) : empty('이 PC의 작업자 정보가 없습니다.')))),
-    noticesCard(agents),
-    h('details', { class: 'card section-gap rules-fold' }, h('summary', null, h('b', null, '자동 배분 규칙 · PC 연결 안내'), h('span', { class: 'hint' }, ' 펼쳐 보기')),
+    h('div', { class: 'grid g-2 section-gap agents-foot' }, noticesCard(agents),
+    h('details', { class: 'card rules-fold' }, h('summary', null, h('b', null, '자동 배분 규칙 · PC 연결 안내'), h('span', { class: 'hint' }, ' 펼쳐 보기')),
      h('div', { class: 'grid g-2', style: { 'margin-top': '12px' } },
       card('자동 배분 규칙', { right: h('span', { class: `st ${r.auto === false ? 'neutral' : 'done'}` }, icon(r.auto === false ? 'pause' : 'check'), r.auto === false ? '꺼짐' : '켜짐') },
         h('div', { class: 'hint', style: { display: 'grid', gap: '6px' } },
@@ -1155,7 +1155,7 @@ function vAgents() {
       card('PC 연결', null, h('div', { class: 'hint', style: { display: 'grid', gap: '6px' } },
         h('div', null, '다른 PC를 연결하려면 그 PC에서 저장소를 받고, ', h('span', { class: 'mono' }, '서버컴-연결.md'), ' 안내를 그 PC의 AI에게 따르게 하면 됩니다.'),
         h('div', null, '각 PC는 자기 기록만 암호화해서 올리고(docs/nodes/<PC>.enc.json), 배분된 주제는 그 PC 작업자의 수신 폴더로 들어갑니다.'),
-        h('div', null, '작업자는 일을 시작할 때 ', h('span', { class: 'mono' }, 'node.py status'), '로 지금 하는 일을 알려야 이 화면에 보입니다.'))))),
+        h('div', null, '작업자는 일을 시작할 때 ', h('span', { class: 'mono' }, 'node.py status'), '로 지금 하는 일을 알려야 이 화면에 보입니다.')))))),
   ];
 }
 
