@@ -941,3 +941,15 @@ select.kb-picked { border-color: var(--accent); box-shadow: 0 0 0 2px var(--acce
 .ov-top .foot-note { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 8px; }
 .flow-card { --pc: var(--line-2); border-left: 3px solid var(--pc); }
 .flow-card.pc-dev { --pc: var(--pc-dev); } .flow-card.pc-server { --pc: var(--pc-server); }
+
+/* 배경 그림(아키텍트 지정 2026-10-03): 화면 뒤에 고정하고, 글이 잘 읽히게 어둡게 덮는다. 판(사이드·카드·칸)은 살짝 비치게 */
+body {
+  background: linear-gradient(90deg, rgba(10, 11, 14, .72) 0%, rgba(10, 11, 14, .45) 45%, rgba(10, 11, 14, .22) 100%),
+    url(bg.webp) right bottom / cover no-repeat fixed, var(--bg);
+}
+:root[data-theme="light"] body {
+  background: linear-gradient(rgba(242, 242, 239, .86), rgba(242, 242, 239, .86)), url(bg.webp) right bottom / cover no-repeat fixed, var(--bg);
+}
+.side { background: color-mix(in srgb, var(--side) 78%, transparent); backdrop-filter: blur(14px); }
+.top { background: color-mix(in srgb, var(--bg) 55%, transparent); }
+.card, .col { background: color-mix(in srgb, var(--card) 70%, transparent); backdrop-filter: blur(6px); }
