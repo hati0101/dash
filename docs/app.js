@@ -407,6 +407,7 @@ function filterTasks(list, owner) {
 
 // ------------------------------------------------------------ 앱 골격
 const NAV = [
+  { id: 'mine', label: '내 차례', icon: 'user' },
   { id: 'overview', label: '개요', icon: 'overview' },
   { id: 'agents', label: '작업자', icon: 'agents' },
   { id: 'topics', label: '주제', icon: 'topics' },
@@ -462,12 +463,13 @@ function render() {
 function sidebar() {
   const d = S.d, data = S.data;
   const badges = {
+    mine: myQueue().total || null,
     topics: d.topics.filter(t => t.status === 'new').length || null,
     tasks: d.tasks.filter(t => t.stage !== 'done').length,
     messages: d.unprocessed.length || null,
     sources: data.sources.filter(s => !s.ok && !/선택/.test(s.error || '')).length || null,
   };
-  const hot = { topics: true, messages: true, sources: true };
+  const hot = { mine: true, topics: true, messages: true, sources: true };
   // 출처는 한 줄 요약만 두고, 문제가 있는 출처만 아래에 따로 보여 준다(목록이 길어 스크롤이 생기지 않게)
   const srcs = data.sources.filter(s => !/선택/.test(s.error || '') || s.count);
   const srcState = s => (!s.ok ? 'bad' : s.last_modified && hoursSince(s.last_modified) > 48 ? 'warn' : '');
@@ -514,6 +516,7 @@ function topbar() {
     h('span', { class: `live${age > 1.5 ? ' stale' : ''}`, title: '데이터 생성 ' + fmtAbs(gen) },
       h('span', { class: 'dot' }), h('span', { class: 'lbl' }, age > 1.5 ? fmtRel(gen) + ' 갱신' : 'live')),
     h('button', { class: 'icon-btn', title: '새 데이터 확인', 'aria-label': '새 데이터 확인', onclick: () => refresh(true) }, icon('refresh')),
+    (() => { const n = myQueue().total; return h('button', { class: `btn mine-btn${n ? ' hot' : ''}`, onclick: () => go('mine'), title: '아키텍트가 답하거나 확인할 것' }, icon('user'), n ? `내 차례 ${n}` : '내 차례 없음'); })(),
     h('button', { class: 'icon-btn bell', title: `놓친 항목 ${missed}`, 'aria-label': `놓친 항목 ${missed}건 보기`, onclick: openMissedDrawer },
       icon('bell'), missed ? h('span', { class: 'count' }, missed) : null));
 }
@@ -530,7 +533,7 @@ function openMissedDrawer() {
 }
 
 function page() {
-  const views = { overview: vOverview, agents: vAgents, topics: vTopics, tasks: vTasks, messages: vMessages, verify: vVerify, brain: vBrain, sources: vSources };
+  const views = { mine: vMine, overview: vOverview, agents: vAgents, topics: vTopics, tasks: vTasks, messages: vMessages, verify: vVerify, brain: vBrain, sources: vSources };
   return h('div', { class: 'page' }, (views[S.view] || vOverview)());
 }
 function head(eyebrow, title, small, ...tools) {
@@ -563,6 +566,7 @@ function vOverview() {
 
   return [
     head('OVERVIEW', '전체 현황', `${pad(now.getMonth() + 1)}.${pad(now.getDate())} (${DAY[now.getDay()]})`, ownerChips),
+    mineBanner(),
     h('div', { class: 'grid g-4' },
       completionCard(pct, done, total - done, tasks),
       collectedCard(),
@@ -665,6 +669,86 @@ function todayCard() {
         h('div', { class: 'meta' }, h('span', { class: 'wait' }, av(i.who, true), person(i.who).name), h('span', { class: 'when' }, fmtRel(i.when)))))))
       : empty('오늘 확인할 일이 없습니다.'));
 }
+// ------------------------------------------------------------ 내 차례 (아키텍트가 답하거나 확인할 것을 한곳에)
+function myQueue() {
+  const d = S.d, data = S.data;
+  const done = k => S.acks.has(k) || S.serverAcks?.has(k);
+  const decisions = (data.decisions_needed || []).filter(q => !d.answers[q.id]);
+  const tests = d.tasks.filter(t => t.stage !== 'done' && (t.stage === 'user_test' || t.waiting_on === 'user') && !done(`mine-test:${t.id}:${t.updated_at}`));
+  const actions = (data.user_actions || []).filter(a => !done(`ua:${a.id}`));
+  const questions = [];
+  for (const t of d.topics) {
+    const lastUser = Math.max(0, ...commentsFor({ kind: 'topic', id: t.id }).filter(c => c.by === 'user').map(c => toMs(c.ts) || 0));
+    for (const n of t.notes || []) {
+      if (n.kind === 'question' && n.by !== 'user' && toMs(n.ts) > lastUser && !done(`mine-q:${t.id}:${n.ts}`)) questions.push({ topic: t, note: n });
+    }
+  }
+  const backlog = d.topics.filter(t => t.status === 'backlog');
+  return { decisions, tests, actions, questions, backlog, total: decisions.length + tests.length + actions.length + questions.length };
+}
+function mineBanner() {
+  const q = myQueue();
+  if (!q.total) return null;
+  const parts = [q.decisions.length && `결정·승인 ${q.decisions.length}`, q.questions.length && `AI 질문 ${q.questions.length}`,
+    q.tests.length && `실게임·확인 ${q.tests.length}`, q.actions.length && `할 일 ${q.actions.length}`].filter(Boolean);
+  return h('button', { class: 'mine-banner', onclick: () => go('mine') }, icon('user'),
+    h('b', null, `아키텍트 차례 ${q.total}건`), h('span', null, parts.join(' · ')), h('span', { class: 'go' }, '바로 보기', icon('arrow')));
+}
+function mineSection(title, sub, count, body) {
+  return card(title, { big: count, unit: '건' }, sub ? h('p', { class: 'hint', style: { margin: '0 0 10px' } }, sub) : null, body);
+}
+function vMine() {
+  const q = myQueue();
+  const redraw = () => { S._keepScroll = true; render(); };
+  const decisions = q.decisions.length ? h('div', { class: 'list' }, q.decisions.map(x => h('div', { class: 'item' },
+    h('span', { class: 'lead-ico warn' }, icon('scale')),
+    h('div', { class: 'body' }, h('div', { class: 't' }, x.question),
+      x.recommendation ? h('div', { class: 's' }, h('b', null, '권장 '), x.recommendation) : null,
+      h('div', { class: 'meta' }, h('span', { class: 'wait' }, av(x._author || 'claude', true), `${person(x._author || 'claude').name} 질문`),
+        x.task_id ? h('button', { class: 'tag', style: { cursor: 'pointer' }, onclick: () => { const t = S.d.topics.find(y => y.id === x.task_id); t ? openTopic(t) : openTaskById(x.task_id); } }, x.task_id) : null,
+        h('span', { class: 'when' }, fmtRel(x.since))),
+      h('div', { class: 'choice-row' }, (x.options || []).map(o => h('button', { class: 'btn sm', onclick: () => decide(x, o, '', redraw) }, o)),
+        h('button', { class: 'btn sm', onclick: () => openDecisionNeeded(x) }, icon('messages'), '직접 적기')))))) : empty('답할 결정이 없습니다.');
+  const questions = q.questions.length ? h('div', { class: 'list' }, q.questions.map(({ topic, note }) => h('div', { class: 'item' },
+    h('span', { class: 'lead-ico warn' }, icon('messages')),
+    h('div', { class: 'body' }, h('div', { class: 't' }, note.body), h('div', { class: 'meta' }, h('span', { class: 'wait' }, av(note.by, true), person(note.by).name),
+      h('span', { class: 'tag' }, topic.title), h('span', { class: 'when' }, fmtRel(note.ts))),
+      h('div', { class: 'choice-row' }, h('button', { class: 'btn sm primary', onclick: () => openTopic(topic) }, icon('send'), '답하기'),
+        h('button', { class: 'btn sm', onclick: () => ack(`mine-q:${topic.id}:${note.ts}`) }, icon('check'), '확인함')))))) : empty('AI가 아키텍트에게 물은 것이 없습니다.');
+  const tests = q.tests.length ? h('div', { class: 'list' }, q.tests.map(t => h('div', { class: 'item' },
+    h('span', { class: 'lead-ico warn' }, icon('flask')),
+    h('div', { class: 'body' }, h('div', { class: 't' }, t.title), h('div', { class: 's' }, t.next_action || t.summary || ''),
+      h('div', { class: 'meta' }, priChip(t.priority), stChip(t.stage), h('span', { class: 'when' }, fmtRel(t.updated_at))),
+      h('div', { class: 'choice-row' },
+        h('button', { class: 'btn sm primary', onclick: () => setStages([t.id], 'done', redraw) }, icon('check'), '확인 완료'),
+        h('button', { class: 'btn sm', onclick: () => { setStages([t.id], 'blocked', redraw); openTask(t); } }, icon('alert'), '문제 있음'),
+        h('button', { class: 'btn sm', onclick: () => openTask(t) }, icon('messages'), '자세히·답하기'),
+        h('button', { class: 'btn sm', onclick: () => ack(`mine-test:${t.id}:${t.updated_at}`) }, '나중에')))))) : empty('확인할 작업이 없습니다.');
+  const actions = q.actions.length ? h('div', { class: 'list' }, q.actions.map(a => h('div', { class: 'item' },
+    h('span', { class: 'lead-ico' }, icon('user')),
+    h('div', { class: 'body' }, h('div', { class: 't' }, a.title), a.detail ? h('div', { class: 's' }, a.detail) : null,
+      h('div', { class: 'choice-row' }, h('button', { class: 'btn sm primary', onclick: () => ack(`ua:${a.id}`) }, icon('check'), '했음'),
+        a.task_id ? h('button', { class: 'btn sm', onclick: () => openTaskById(a.task_id) }, '관련 작업') : null))))) : empty('할 일이 없습니다.');
+  const backlog = q.backlog.length ? h('div', { class: 'list' }, q.backlog.slice(0, 8).map(t => h('div', { class: 'item' },
+    h('span', { class: 'lead-ico' }, icon('inbox')),
+    h('div', { class: 'body' }, h('div', { class: 't' }, t.title), h('div', { class: 's clamp-2' }, t.body || '')),
+    h('div', { class: 'choice-row', style: { 'margin-top': '0' } },
+      h('button', { class: 'btn sm', onclick: () => sendOps('activate', { topic: t.id }, `착수 지시: ${t.title}`).then(redraw).catch(e => toast(e.message)) }, icon('play'), '착수'),
+      h('button', { class: 'btn sm', onclick: () => openTopic(t) }, '열기')))),
+    q.backlog.length > 8 ? h('button', { class: 'btn', style: { 'margin-top': '8px' }, onclick: () => go('topics') }, `미처리 ${q.backlog.length}건 전체 보기`, icon('arrow')) : null) : empty('미처리 주제가 없습니다.');
+  return [
+    head('MY TURN', '내 차례', q.total ? `대응할 것 ${q.total}건` : '지금 대응할 것 없음'),
+    h('div', { class: 'grid wide-2' },
+      h('div', { class: 'stack' },
+        mineSection('결정·승인 요청', 'AI가 승인이나 선택을 기다리는 것입니다. 버튼을 누르면 다음 동기화 때 그 답대로 진행합니다.', q.decisions.length, decisions),
+        mineSection('AI 질문', '작업 중 AI가 아키텍트에게 물은 것입니다.', q.questions.length, questions)),
+      h('div', { class: 'stack' },
+        mineSection('실게임·확인 대기', '아키텍트 확인을 기다리는 작업입니다.', q.tests.length, tests),
+        mineSection('할 일', null, q.actions.length, actions),
+        mineSection('착수 고르기 (미처리 주제)', '착수를 누르면 자동 배분으로 담당이 정해집니다.', q.backlog.length, backlog))),
+  ];
+}
+
 function decisionsNeededCard() {
   const list = S.data.decisions_needed;
   const open = list.filter(q => !S.d.answers[q.id]);

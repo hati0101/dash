@@ -433,6 +433,21 @@ mark { background: color-mix(in srgb, var(--st-user_test) 35%, transparent); col
 .plan ul { margin: 0; padding-left: 18px; font-size: 13px; }
 .plan li { margin-bottom: 3px; }
 
+/* 내 차례 */
+.mine-btn { height: 32px; font-size: 12.5px; padding: 0 12px; }
+.mine-btn.hot { background: color-mix(in srgb, var(--st-user_test) 18%, var(--card)); border-color: color-mix(in srgb, var(--st-user_test) 55%, transparent); color: var(--ink); }
+.mine-btn.hot svg { color: var(--st-user_test); }
+.mine-banner {
+  display: flex; align-items: center; gap: 12px; width: 100%; margin: 0 0 14px; padding: 14px 18px; border-radius: 14px; text-align: left; color: var(--ink);
+  background: color-mix(in srgb, var(--st-user_test) 14%, var(--card)); border: 1px solid color-mix(in srgb, var(--st-user_test) 45%, transparent);
+}
+.mine-banner:hover { border-color: var(--st-user_test); }
+.mine-banner svg { width: 20px; height: 20px; color: var(--st-user_test); flex: none; }
+.mine-banner b { font-size: 15px; white-space: nowrap; }
+.mine-banner span { color: var(--ink-2); font-size: 13px; min-width: 0; }
+.mine-banner .go { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-weight: 700; color: var(--ink); white-space: nowrap; }
+.mine-banner .go svg { width: 15px; height: 15px; color: inherit; }
+
 /* 대화·일괄 처리 */
 .btn.sm { height: 30px; padding: 0 10px; font-size: 12.5px; }
 .choice-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
@@ -537,6 +552,9 @@ mark { background: color-mix(in srgb, var(--st-user_test) 35%, transparent); col
   .msg-list { max-height: none; }
   .fields { grid-template-columns: 110px minmax(0, 1fr); }
   .card-h { flex-wrap: wrap; row-gap: 8px; }
+  .mine-btn { padding: 0 8px; }
+  .mine-banner { flex-wrap: wrap; }
+  .mine-banner .go { margin-left: 0; }
   .card-h .right { max-width: 100%; min-width: 0; }
 }
 @media (max-width: 560px) {
