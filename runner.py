@@ -28,7 +28,7 @@ import node  # noqa: E402
 
 KST = timezone(timedelta(hours=9))
 MAX_PER_RUN = 3
-MAX_PER_TOPIC_PER_DAY = 6
+MAX_PER_TOPIC_PER_DAY = 10
 AI_TIMEOUT = 20 * 60
 ACTIVE = ("new", "triage", "ready", "active")
 STATUSES = ("triage", "ready", "active", "done", "parked")
@@ -109,14 +109,18 @@ def find_jobs(data: dict, state: dict) -> list[dict]:
         who = t.get("turn")
         if who not in agents or t.get("status") not in ACTIVE:
             continue
-        sig = hashlib.sha1(json.dumps([t["id"], who, t.get("status"), len(t.get("notes", [])), bool(t.get("plan"))],
+        # 담당이고 진행 베이스가 있고 진행 중이면 '작업 모드'(작업물 저장소의 자기 폴더에 결과물을 직접 만든다).
+        # 개발 PC(허브)는 기본 허용, 다른 PC는 config "implement": true일 때만(운영 서버 보호).
+        impl_ok = CFG.get("implement", (CFG.get("pc") or {}).get("role") == "hub")
+        mode = "impl" if (impl_ok and who == t.get("assignee") and t.get("plan") and t.get("status") == "active" and WORK_PY.exists()) else "plan"
+        sig = hashlib.sha1(json.dumps([t["id"], who, t.get("status"), len(t.get("notes", [])), bool(t.get("plan")), mode],
                                       ensure_ascii=False).encode()).hexdigest()[:12]
         st = state.setdefault("topics", {}).setdefault(t["id"], {})
         if st.get("last_sig") == sig:
             continue
         if st.get("day") == today and st.get("count", 0) >= MAX_PER_TOPIC_PER_DAY:
             continue
-        jobs.append({"kind": "topic", "agent": who, "topic": t, "sig": sig})
+        jobs.append({"kind": "topic", "agent": who, "topic": t, "sig": sig, "mode": mode})
     # 내가 물었던 질문에 아키텍트가 답했으면 다시 깨운다
     for q in data.get("decisions_needed", []):
         if q.get("_author") in agents and q["id"] in answers and q["id"] not in state.setdefault("answers_used", []):
@@ -132,7 +136,25 @@ READ_HINT = {
     "codex": "너는 읽기 전용 샌드박스에서 돈다. 읽기 명령(Get-Content, Get-ChildItem, Select-String, rg, type, dir 등)은 실행해도 된다. 쓰기·설치·네트워크·서비스 제어 명령은 막혀 있으니 시도하지 않는다.",
 }
 
-def build_prompt(job: dict, data: dict) -> str:
+def prepare_workspace(job: dict) -> Path | None:
+    """작업물 저장소에 이 주제의 작업 폴더를 만든다(FT-날짜-번호/<작업자>/). 실패하면 None(읽기 모드로)."""
+    t = job["topic"]
+    wid = "FT-" + t["id"][2:]
+    base = WORK_PY.parent / "work" / wid
+    if not (base / "README.md").exists():
+        r = subprocess.run([sys.executable, str(WORK_PY), "new", wid, "--agent", job["agent"], "--kind", "기능",
+                            "--title", (t.get("title") or wid)[:120], "--topic", t["id"]],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if r.returncode != 0:
+            log(f"  작업 폴더 만들기 실패: {r.stdout.strip() or r.stderr.strip()}")
+            return None
+    ws = base / job["agent"]
+    ws.mkdir(parents=True, exist_ok=True)
+    job["work_id"] = wid
+    return ws
+
+
+def build_prompt(job: dict, data: dict, workspace: Path | None = None) -> str:
     a = node.my_agents(CFG)[job["agent"]]
     pc = CFG.get("pc", {})
     pcs = (data.get("meta", {}).get("routing", {}).get("pcs") or {})
@@ -179,6 +201,7 @@ def build_prompt(job: dict, data: dict) -> str:
 - 메모 수집 주제라면 찾은 메모를 한 건씩 `propose`로 올린다(비밀값은 [가림]).
 - 이미 끝낸 단계는 다시 하지 않는다. 할 일이 없으면 actions를 비워도 된다.
 
+{impl_section(job, workspace)}
 ## 단계 가이드
 1) 담당인데 착수 기록이 없으면 `claim`
 2) 진행 베이스가 없으면 `plan` (goal·scope·inputs·first_steps·risks·done_when)
@@ -220,8 +243,9 @@ def read_dirs() -> list[str]:
     return dirs
 
 
-def run_ai(agent: dict, prompt: str, tag: str) -> tuple[str, str]:
-    """(결과 JSON 텍스트, 오류) — 오류가 있으면 결과는 빈 문자열."""
+def run_ai(agent: dict, prompt: str, tag: str, workspace: Path | None = None) -> tuple[str, str]:
+    """(결과 JSON 텍스트, 오류) — 오류가 있으면 결과는 빈 문자열.
+    workspace가 있으면 '작업 모드': 그 폴더 안에서만 파일을 만들고 고칠 수 있다(실제 프로젝트 폴더는 읽기만)."""
     kind = agent.get("runner") or ("codex" if agent.get("ai") == "gpt" else "claude")
     out_dir = node.node_dir(CFG) / "runner"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -230,12 +254,17 @@ def run_ai(agent: dict, prompt: str, tag: str) -> tuple[str, str]:
         exe = find_claude()
         if not exe:
             return "", "claude 명령을 찾지 못함"
-        args = exe + ["-p", "--output-format", "json", "--allowedTools", "Read", "Grep", "Glob",
-                      "--disallowedTools", "Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch"]
+        if workspace:
+            # 작업 공간(현재 폴더) 안에서만 쓰기 허용. 명령 실행·웹은 막는다.
+            args = exe + ["-p", "--output-format", "json", "--allowedTools", "Read", "Grep", "Glob", "Edit(./**)", "Write(./**)", "MultiEdit(./**)",
+                          "--disallowedTools", "Bash", "NotebookEdit", "WebFetch", "WebSearch"]
+        else:
+            args = exe + ["-p", "--output-format", "json", "--allowedTools", "Read", "Grep", "Glob",
+                          "--disallowedTools", "Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch"]
         for d in read_dirs():
             args += ["--add-dir", d]
         try:
-            r = subprocess.run(args, input=prompt.encode("utf-8"), capture_output=True, timeout=AI_TIMEOUT, cwd=str(ROOT), env=env)
+            r = subprocess.run(args, input=prompt.encode("utf-8"), capture_output=True, timeout=AI_TIMEOUT, cwd=str(workspace or ROOT), env=env)
         except subprocess.TimeoutExpired:
             return "", "시간 초과"
         raw = r.stdout.decode("utf-8", errors="replace")
@@ -253,9 +282,10 @@ def run_ai(agent: dict, prompt: str, tag: str) -> tuple[str, str]:
         schema = out_dir / "schema.json"
         schema.write_text(json.dumps(SCHEMA, ensure_ascii=False), encoding="utf-8")
         last = out_dir / f"{tag}.codex.txt"
-        args = [exe, "exec", "-s", "read-only", "-C", str(ROOT), "--skip-git-repo-check", "--output-schema", str(schema), "-o", str(last), "-"]
+        mode = ["-s", "workspace-write", "-C", str(workspace)] if workspace else ["-s", "read-only", "-C", str(ROOT)]
+        args = [exe, "exec", *mode, "--skip-git-repo-check", "--output-schema", str(schema), "-o", str(last), "-"]
         try:
-            r = subprocess.run(args, input=prompt.encode("utf-8"), capture_output=True, timeout=AI_TIMEOUT, cwd=str(ROOT), env=env)
+            r = subprocess.run(args, input=prompt.encode("utf-8"), capture_output=True, timeout=AI_TIMEOUT, cwd=str(workspace or ROOT), env=env)
         except subprocess.TimeoutExpired:
             return "", "시간 초과"
         (out_dir / f"{tag}.codex.log").write_text(r.stdout.decode("utf-8", errors="replace")[-20000:] + "\n--- stderr ---\n" +
@@ -369,7 +399,8 @@ def main():
             tag = f"{now():%Y%m%d-%H%M%S}-{j['agent']}-{t.get('id') or 'answer'}"
             log(f"깨움 {j['agent']} ← {t.get('id')} {t.get('title')}")
             j["runner"] = agent.get("runner") or ("codex" if agent.get("ai") == "gpt" else "claude")
-            text, err = run_ai(agent, build_prompt(j, data), tag)
+            ws = prepare_workspace(j) if j.get("mode") == "impl" else None
+            text, err = run_ai(agent, build_prompt(j, data, ws), tag, ws)
             st = state.setdefault("topics", {}).setdefault(t.get("id") or j["sig"], {})
             today = f"{now():%Y%m%d}"
             st["count"] = (st.get("count", 0) + 1) if st.get("day") == today else 1
