@@ -500,7 +500,22 @@ function enterApp() {
   // 보고 있을 때는 1분마다, 창을 내려 두었을 때도 5분마다 확인한다(새 관문 알림이 늦지 않게)
   if (!S.timer) { let tick = 0; S.timer = setInterval(() => { tick++; if (!document.hidden || tick % 5 === 0) refresh(); }, 60 * 1000); }
 }
+// 새 화면 판 알아채기: 게시 서버가 시작 파일을 10분까지 캐시해서 열린 창이 예전 화면에 머무르는 문제(2026-10-03).
+// 1분마다 시작 파일의 화면 파일 버전 표시를 캐시 없이 읽어, 바뀌었으면 안전할 때 스스로 새로 고친다
+const myVer = () => ($('script[src*="app.js?v="]')?.getAttribute('src') || '').split('v=')[1] || '';
+async function checkAppVersion() {
+  try {
+    const html = await (await fetch(`./index.html?r=${Date.now()}`, { cache: 'no-store' })).text();
+    const live = (html.match(/app\.js\?v=([0-9a-zA-Z]+)/) || [])[1];
+    if (!live || !myVer() || live === myVer()) return;
+    const typing = document.activeElement?.matches?.('input, textarea, select');
+    const busy = typing || document.querySelector('.drawer') || !store.get('key');
+    if (!busy) { location.reload(); return; }
+    if (!S.newVersion) { S.newVersion = live; S._keepScroll = true; render(); }
+  } catch { /* 오프라인 등 */ }
+}
 async function refresh(manual) {
+  checkAppVersion();
   try {
     const env = await fetchEnvelope();
     // 바뀐 게 없으면 다시 그리지 않는다(쓰던 글·스크롤이 흔들리지 않게)
@@ -599,6 +614,7 @@ function topbar() {
     h('span', { class: `live${age > 1.5 ? ' stale' : ''}`, title: '데이터 생성 ' + fmtAbs(gen) },
       h('span', { class: 'dot' }), h('span', { class: 'lbl' }, age > 1.5 ? fmtRel(gen) + ' 갱신' : 'live')),
     h('button', { class: 'icon-btn', title: '새 데이터 확인', 'aria-label': '새 데이터 확인', onclick: () => refresh(true) }, icon('refresh')),
+    S.newVersion ? h('button', { class: 'btn mine-btn hot', title: '대시보드 화면이 새로 게시됐습니다. 쓰던 글은 저장되어 있습니다.', onclick: () => location.reload() }, icon('refresh'), '새 화면 반영') : null,
     (() => { const n = newGates().length; return n ? h('button', { class: 'btn mine-btn hot gate-new', title: '새로 도착한 ★ 관문 — 누르면 내 차례 관문 목록', onclick: () => { S.f.mine = 'gate'; S.mineSel = null; go('mine'); } }, icon('scale'), `새 관문 ${n}`) : null; })(),
     (() => { const n = myQueue().total; return h('button', { class: `btn mine-btn${n ? ' hot' : ''}`, onclick: () => go('mine'), title: '아키텍트가 답하거나 확인할 것' }, icon('user'), n ? `내 차례 ${n}` : '내 차례 없음'); })(),
     h('button', { class: 'icon-btn bell', title: `놓친 항목 ${missed}`, 'aria-label': `놓친 항목 ${missed}건 보기`, onclick: openMissedDrawer },
