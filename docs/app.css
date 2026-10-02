@@ -584,7 +584,7 @@ mark { background: color-mix(in srgb, var(--st-user_test) 35%, transparent); col
 .edit-form .row { display: flex; gap: 10px; flex-wrap: wrap; }
 .edit-form .row label { flex: 1 1 160px; }
 .edit-form input, .edit-form textarea, .edit-form select, .start-opt select {
-  width: 100%; border: 1px solid var(--line-2); background: var(--card); border-radius: 10px; padding: 9px 12px; outline: none; font-size: 13.5px; color: var(--ink);
+  width: 100%; border: 1px solid var(--line-2); background: var(--card); border-radius: 10px; padding: 9px 12px; outline: none; font-size: 13.5px; font-weight: 500; color: var(--ink);
 }
 .edit-form textarea { min-height: 180px; resize: vertical; line-height: 1.6; }
 .edit-form input:focus, .edit-form textarea:focus, .edit-form select:focus, .start-opt select:focus { border-color: var(--accent); }
