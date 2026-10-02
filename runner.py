@@ -677,6 +677,9 @@ def apply(job: dict, result: dict, data: dict | None = None) -> tuple[list[str],
         body = (a.get("body") or "").strip()
         try:
             if typ == "claim" and tid:
+                if t.get("assignee") != agent:  # 담당만 착수한다(검토·요청 처리 중인 작업자의 착수는 중복 착수가 된다)
+                    done.append("착수 건너뜀(담당 아님)")
+                    continue
                 node.add_topic_record(CFG, tid, agent, "claim", status="active", body=body or "자동 실행기: 착수")
             elif typ == "plan" and tid and isinstance(a.get("plan"), dict):
                 p = {k: v for k, v in a["plan"].items() if k in ("goal", "scope", "inputs", "first_steps", "risks", "done_when") and v}

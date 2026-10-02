@@ -649,20 +649,23 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
                 plans[a] = r["plan"]
                 plan_ts[a] = _ts
             if r.get("kind") == "claim":
-                claims.append(a)
+                claims.append((a, _ts or ""))
         lead = recs.get(LEAD) or {}
         t["assignee"] = norm_agent(lead.get("assignee") or (recs.get("dev-astra") or {}).get("assignee"))
         t["dispatch_reason"] = lead.get("dispatch_reason")
         t["dispatch_scores"] = lead.get("dispatch_scores")
         ua = assigns.get(t["id"])
+        assigned_at = lead.get("assigned_at")  # 지금 담당이 정해진 시각(중복 착수 판정 기준)
         if ua and to_dt(ua.get("ts")) >= to_dt(lead.get("assigned_at")):
             t["assignee"], t["assign_by"], t["dispatch_reason"] = ua["agent"], "user", "사용자가 대시보드에서 지정"
+            assigned_at = ua.get("ts")
         # 작업자끼리 차례 넘기기(예: 서버컴 조사 → 개발컴 구현·검증 → 서버컴 적용 준비). 그 뒤에 사용자가 다시 지정하면 사용자 지정이 이긴다.
         if handoff and AGENT_RE.match(handoff["to"] or "") and (known is None or handoff["to"] in known) and to_dt(handoff["ts"]) >= to_dt(lead.get("assigned_at")) \
                 and (not ua or to_dt(handoff["ts"]) >= to_dt(ua.get("ts"))):
             t["assignee"], t["assign_by"] = handoff["to"], "handoff"
             t["dispatch_reason"] = f"{handoff['from']}이(가) 넘김: {handoff['reason'] or '-'}"
             t["handoff"] = handoff
+            assigned_at = handoff["ts"]
         # 미처리(백로그): 착수 지시·담당 지정·작업 기록이 없으면 배분하지 않고 '미처리'로 둔다
         if base.get("backlog") and not t.get("assignee") and t["status"] == "new" and t["id"] not in activations:
             t["status"] = "backlog"
@@ -686,8 +689,11 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
         t["requests"] = sorted(reqs, key=lambda q: q["ts"] or "")[-10:]
         opened = [q for q in reqs if q["status"] == "open"]
         t["open_request"] = max(opened, key=lambda q: q["ts"] or "") if opened else None
-        t["claims"] = sorted(set(claims))
-        t["conflict"] = [a for a in t["claims"] if t.get("assignee") and a != t["assignee"]]
+        t["claims"] = sorted({a for a, _ in claims})
+        # 중복 착수 = 지금 담당이 정해진 뒤에 담당이 아닌 작업자가 착수한 경우만.
+        # 인계·담당 변경 전에 남은 이전 담당의 착수 기록은 충돌이 아니다(거짓 경보 방지).
+        since = to_dt(assigned_at)
+        t["conflict"] = sorted({a for a, ts in claims if t.get("assignee") and a != t["assignee"] and to_dt(ts) > since})
         t["updated_at"] = max([base.get("received_at", "")] + [e[0] or "" for e in events])
         t["authors"] = sorted(set(list(recs) + [r.get("agent") for r in by_topic.get(t["id"], [])]))
         t["turn"] = whose_turn(t)
