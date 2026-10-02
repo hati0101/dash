@@ -636,7 +636,7 @@ function vOverview() {
     head('OVERVIEW', '전체 현황', `${pad(now.getMonth() + 1)}.${pad(now.getDate())} (${DAY[now.getDay()]})`, ownerChips),
     // 넓고 높은 화면(1500×860 이상)에서는 한 화면에 스크롤 없이: 윗줄 요약 5칸 + 아랫줄 4칸(칸마다 최대 3건)
     h('div', { class: 'ov-fit' },
-      h('div', { class: 'ov-top' }, completionCard(pct, started, S.f.owner), collectedCard(), pipelineCard(tasks), missedCard()),
+      h('div', { class: 'ov-top' }, completionCard(pct, started, S.f.owner), collectedCard(), pipelineCard(), missedCard()),
       h('div', { class: 'ov-bottom' }, todayCard(), decisionsNeededCard(), projectsCard(tasks), activityCard()),
       teamStrip()),
   ];
@@ -722,16 +722,18 @@ function collectedCard() {
       h('span', { class: 'track-bar' }, h('i', { style: { width: (r.n / max * 100) + '%', background: `var(--${r.c})` } })),
       h('span', { class: 'n' }, r.n)))));
 }
-function pipelineCard(tasks) {
-  const active = tasks.filter(t => t.stage !== 'done').length;
-  const max = Math.max(1, ...STAGES.map(s => tasks.filter(t => t.stage === s.id).length));
-  return card('진행 단계', { big: active, accent: true, unit: '진행 중', cls: 'sum-card', right: moreBtn(0, () => go('tasks')) },
-    h('div', { class: 'bars' }, STAGES.map(s => {
-      const n = tasks.filter(t => t.stage === s.id).length;
-      return h('button', { class: 'bar-row', onclick: () => go('tasks', { stage: s.id }), 'aria-label': `${s.label} ${n}건` },
-        h('span', { style: { color: `var(--st-${s.id})`, display: 'grid' } }, icon(s.icon)),
-        h('span', { class: 'lbl' }, s.label),
-        h('span', { class: 'track-bar' }, h('i', { style: { width: (n / max * 100) + '%', background: `var(--st-${s.id})` } })),
+// 업무 보드(진행 흐름)와 같은 칸·같은 건수
+function pipelineCard() {
+  const items = flowItems(S.f.owner || 'all', 'all');
+  const cnt = id => items.filter(i => i.col === id).length;
+  const max = Math.max(1, ...FLOW.map(c => cnt(c.id)));
+  return card('진행 흐름', { big: items.filter(i => i.col !== 'done').length, accent: true, unit: '진행 중', cls: 'sum-card', right: moreBtn(0, () => go('tasks')) },
+    h('div', { class: 'bars' }, FLOW.map(c => {
+      const n = cnt(c.id);
+      return h('button', { class: 'bar-row', onclick: () => go('tasks'), 'aria-label': `${c.label} ${n}건` },
+        h('span', { style: { color: `var(--st-${c.id})`, display: 'grid' } }, icon(c.icon)),
+        h('span', { class: 'lbl' }, c.label),
+        h('span', { class: 'track-bar' }, h('i', { style: { width: (n / max * 100) + '%', background: `var(--st-${c.id})` } })),
         h('span', { class: 'n' }, n));
     })));
 }
@@ -1272,11 +1274,11 @@ function topicFlow(t, asking) {
   if (t.plan && t.turn === t.assignee && ['ready', 'active'].includes(t.status)) return { col: 'progress', why: [] };
   return { col: 'request', why: [] };
 }
-function vTasks() {
-  const f = S.f.taskOwner || 'all', pcF = S.f.taskPc || 'all';
+// 업무 보드와 개요 '진행 단계' 칸이 같은 기준으로 세도록 한곳에서 만든다(주제 흐름 + 옛 작업표)
+function flowItems(f = 'all', pcF = 'all') {
   // 아키텍트에게 물은 AI 질문(내 차례와 같은 기준)이 걸린 주제
   const asking = new Set(myQueue().questions.map(x => x.topic.id));
-  const passOwner = (ai, pc, isUser) => (f === 'all' || f === 'user' || (f === 'claude' && ai === 'claude') || (f === 'astra' && ai === 'gpt')) && (pcF === 'all' || pc === pcF) && (f !== 'user' || true);
+  const passOwner = (ai, pc) => (f === 'all' || f === 'user' || (f === 'claude' && ai === 'claude') || (f === 'astra' && ai === 'gpt')) && (pcF === 'all' || pc === pcF);
   const items = [];
   for (const t of S.d.topics) {
     if (['backlog', 'parked', 'dropped'].includes(t.status)) continue;
@@ -1290,6 +1292,11 @@ function vTasks() {
     const col = t.stage === 'done' ? 'done' : t.stage === 'user_test' || t.waiting_on === 'user' ? 'user_test' : (t.stage === 'blocked' || t._stale) ? 'blocked' : t.stage;
     items.push({ kind: 'task', t, col: FLOW.some(x => x.id === col) ? col : 'progress', why: col === 'blocked' ? [t._stale ? `${Math.round(t._age)}시간 멈춤` : '막힘'] : [], ts: t.updated_at });
   }
+  return items;
+}
+function vTasks() {
+  const f = S.f.taskOwner || 'all', pcF = S.f.taskPc || 'all';
+  const items = flowItems(f, pcF);
   const staleKeys = S.d.missed.filter(i => i.key.startsWith('stale:') && !S.acks.has(i.key) && !S.serverAcks.has(i.key)).map(i => i.key);
   const card = it => {
     const t = it.t, who = it.kind === 'topic' ? t.assignee : (LEGACY[t.owner] || t.owner);
