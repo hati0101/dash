@@ -521,7 +521,66 @@ mark { background: color-mix(in srgb, var(--st-user_test) 35%, transparent); col
 .hist-count svg { width: 13px; height: 13px; }
 .tag-btn { cursor: pointer; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tag-btn:hover { border-color: var(--accent); }
+/* 내 차례: 소분류 탭 + 왼쪽 목록 · 오른쪽 상세(내용 | 히스토리) */
+.mine-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin: -6px 0 14px; }
+.mine-tab {
+  display: inline-flex; align-items: center; gap: 8px; height: 40px; padding: 0 14px; border-radius: 12px;
+  border: 1px solid var(--line); background: var(--card); color: var(--ink-2); font-weight: 700; font-size: 13.5px;
+}
+.mine-tab svg { width: 16px; height: 16px; color: var(--ink-3); }
+.mine-tab b { min-width: 24px; height: 22px; padding: 0 7px; border-radius: 11px; display: inline-grid; place-items: center; background: var(--card-3); color: var(--ink-2); font-size: 12px; font-variant-numeric: tabular-nums; }
+.mine-tab:hover { border-color: var(--line-2); color: var(--ink); }
+.mine-tab.warn b { background: color-mix(in srgb, var(--st-user_test) 22%, transparent); color: var(--st-user_test); }
+.mine-tab[aria-selected="true"] { background: var(--card-3); border-color: var(--accent); color: var(--ink); box-shadow: 0 0 0 1px var(--accent) inset; }
+.mine-tab[aria-selected="true"] svg { color: var(--accent-ink); }
+.mine-split { display: grid; grid-template-columns: minmax(380px, 560px) minmax(0, 1fr); gap: 14px; align-items: start; }
+.mine-split.narrow { grid-template-columns: minmax(0, 1fr); }
+.mine-list { padding: 8px; max-height: calc(100vh - 222px); overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+.mine-split.narrow .mine-list { max-height: none; }
+.mine-group { display: flex; align-items: center; gap: 8px; padding: 10px 10px 6px; font-size: 11.5px; font-weight: 800; letter-spacing: .08em; color: var(--ink-3); }
+.mine-group b { color: var(--ink-2); }
+.mine-group:not(:first-child) { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 14px; }
+.mine-row { display: flex; gap: 12px; align-items: flex-start; padding: 11px 10px; border-radius: 12px; border: 1px solid transparent; background: none; width: 100%; text-align: left; color: inherit; }
+.mine-row:hover { background: var(--card-2); }
+.mine-row[aria-selected="true"] { background: var(--card-3); border-color: var(--line-2); box-shadow: inset 3px 0 0 var(--accent); }
+.mine-row .lead-ico { width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center; flex: none; background: var(--card-3); color: var(--ink-2); }
+.mine-row .lead-ico svg { width: 15px; height: 15px; }
+.mine-row .lead-ico.warn { background: color-mix(in srgb, var(--st-user_test) 16%, transparent); color: var(--st-user_test); }
+.mine-row .body { flex: 1; min-width: 0; display: grid; gap: 3px; }
+.mine-row .kind { display: flex; gap: 8px; align-items: center; font-size: 11.5px; color: var(--ink-3); min-width: 0; }
+.mine-row .kind b { color: var(--ink-2); flex: none; }
+.mine-row .kind .topic { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.mine-row .t { font-weight: 700; font-size: 13.5px; line-height: 1.45; overflow-wrap: anywhere; }
+.mine-row .s { font-size: 12.5px; color: var(--ink-3); line-height: 1.5; }
+.mine-row .meta { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; font-size: 12px; color: var(--ink-3); margin-top: 2px; }
+.mine-row .meta .av { width: 18px; height: 18px; font-size: 9px; }
+.mine-row .when { margin-left: auto; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.clamp-1 { display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; }
+.mine-detail { padding: 0; position: sticky; top: 72px; height: calc(100vh - 222px); min-height: 420px; display: flex; flex-direction: column; overflow: hidden; }
+.mine-detail-h { display: flex; align-items: center; gap: 10px; padding: 12px 18px; border-bottom: 1px solid var(--line); }
+.mine-detail-h .eyebrow { flex: 1; }
+.mine-detail-b { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1.08fr) minmax(0, 1fr); }
+.mine-detail-b .ms-main { padding: 18px 22px 26px; }
+.mine-detail-empty { flex: 1; display: grid; place-items: center; }
+.mine-detail .btn, .ms-main .btn { white-space: normal; height: auto; min-height: 36px; padding-top: 6px; padding-bottom: 6px; }
+.ms-main h4, .ms-side h4 { margin: 4px 0 0; font-size: 11.5px; letter-spacing: .1em; color: var(--ink-3); }
+.ms-main .d-title { margin: 0; font-size: 19px; line-height: 1.4; letter-spacing: -.015em; overflow-wrap: anywhere; }
+.ms-main .d-text { margin: 0; font-size: 13.5px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink-2); }
+.ms-main .d-list { margin: 0; padding-left: 18px; font-size: 12.5px; overflow-wrap: anywhere; }
+.ms-main .when, .ms-side .when { color: var(--ink-3); font-size: 12px; }
+.start-box { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+.start-opt { display: grid; gap: 8px; align-content: start; padding: 14px; border-radius: 12px; border: 1px solid var(--line-2); background: var(--card-2); }
+.start-opt b { font-size: 14px; }
+.start-opt .row { display: flex; gap: 8px; flex-wrap: wrap; }
+.start-opt select { flex: 1 1 160px; min-width: 0; }
+@media (max-width: 1500px) and (min-width: 1101px) {
+  .mine-split { grid-template-columns: minmax(340px, 440px) minmax(0, 1fr); }
+  .mine-detail-b { grid-template-columns: minmax(0, 1fr); overflow-y: auto; }
+  .mine-detail-b .ms-main, .mine-detail-b .ms-side { overflow: visible; }
+  .mine-detail-b .ms-side { border-left: 0; border-top: 1px solid var(--line); }
+}
 @media (max-width: 880px) {
+  .mine-tab { height: 36px; padding: 0 10px; font-size: 12.5px; }
   .drawer.modal.split { height: auto; max-height: calc(100vh - 32px); }
   .drawer.modal.split .drawer-b { grid-template-columns: minmax(0, 1fr); overflow-y: auto; }
   .ms-main, .ms-side { overflow: visible; }

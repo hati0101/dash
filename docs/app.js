@@ -705,59 +705,147 @@ function histCount(topic, taskId) {
   const n = historyEvents(topic, !topic && taskId ? S.d.tasks.find(t => t.id === taskId) : null).length;
   return n ? h('span', { class: 'hist-count' }, icon('clock'), `기록 ${n}`) : null;
 }
-function mineSection(title, sub, count, body) {
-  return card(title, { big: count, unit: '건' }, sub ? h('p', { class: 'hint', style: { margin: '0 0 10px' } }, sub) : null, body);
+// 내 차례 소분류: [값, 이름, 아이콘, 강조]
+const MINE_TYPES = [
+  ['decision', '결정·승인', 'scale', 'warn'],
+  ['question', 'AI 질문', 'messages', 'warn'],
+  ['test', '실게임·확인', 'flask', 'warn'],
+  ['action', '할 일', 'user', ''],
+  ['backlog', '착수 고르기', 'inbox', ''],
+];
+const MINE_TYPE = Object.fromEntries(MINE_TYPES.map(([v, l, i, c]) => [v, { label: l, icon: i, cls: c }]));
+function mineItems() {
+  const q = myQueue(), items = [];
+  for (const x of q.decisions) items.push({ key: `d:${x.id}`, type: 'decision', title: x.question, who: x._author || 'claude', when: x.since, topic: topicById(x.task_id), taskId: x.task_id, ref: x,
+    sub: x.recommendation ? '권장 ' + x.recommendation : (x.options || []).length ? `선택지 ${x.options.length}개` : '' });
+  for (const { topic, note } of q.questions) items.push({ key: `q:${topic.id}:${note.ts}`, type: 'question', title: note.body, who: note.by, when: note.ts, topic, ref: note });
+  for (const t of q.tests) items.push({ key: `t:${t.id}`, type: 'test', title: t.title, sub: t.next_action || t.summary || '', who: t.owner, when: t.updated_at, topic: S.d.topics.find(x => x.linked_task_id === t.id) || null, taskId: t.id, ref: t });
+  for (const a of q.actions) items.push({ key: `a:${a.id}`, type: 'action', title: a.title, sub: a.detail || '', who: 'user', when: a.since, topic: S.d.topics.find(x => a.task_id && x.linked_task_id === a.task_id) || null, taskId: a.task_id, ref: a });
+  for (const t of q.backlog) items.push({ key: `b:${t.id}`, type: 'backlog', title: t.title, sub: t.body || '', who: t.proposed_by || 'user', when: t.created_at, topic: t, ref: t });
+  return items;
 }
 function vMine() {
-  const q = myQueue();
-  const redraw = () => { S._keepScroll = true; render(); };
-  const decisions = q.decisions.length ? h('div', { class: 'list' }, q.decisions.map(x => h('div', { class: 'item' },
-    h('span', { class: 'lead-ico warn' }, icon('scale')),
-    h('div', { class: 'body' }, h('button', { class: 't clamp-3 linkless', onclick: () => openDecisionNeeded(x) }, x.question),
-      x.recommendation ? h('div', { class: 's' }, h('b', null, '권장 '), x.recommendation) : null,
-      h('div', { class: 'meta' }, h('span', { class: 'wait' }, av(x._author || 'claude', true), `${person(x._author || 'claude').name} 질문`),
-        topicTag(x.task_id), histCount(topicById(x.task_id), x.task_id),
-        h('span', { class: 'when' }, fmtRel(x.since))),
-      h('div', { class: 'choice-row' }, h('button', { class: 'btn sm primary', onclick: () => openDecisionNeeded(x) }, icon('scale'), `열어서 결정${(x.options || []).length ? ` (선택지 ${x.options.length}개)` : ''}`)))))) : empty('답할 결정이 없습니다.');
-  const questions = q.questions.length ? h('div', { class: 'list' }, q.questions.map(({ topic, note }) => h('div', { class: 'item' },
-    h('span', { class: 'lead-ico warn' }, icon('messages')),
-    h('div', { class: 'body' }, h('button', { class: 't clamp-3 linkless', onclick: () => openQuestion(topic, note) }, note.body),
-      h('div', { class: 'meta' }, h('span', { class: 'wait' }, av(note.by, true), person(note.by).name),
-        topicTag(topic.id), histCount(topic), h('span', { class: 'when' }, fmtRel(note.ts))),
-      h('div', { class: 'choice-row' }, h('button', { class: 'btn sm primary', onclick: () => openQuestion(topic, note) }, icon('send'), '열어서 답하기'),
-        h('button', { class: 'btn sm', onclick: () => ack(`mine-q:${topic.id}:${note.ts}`) }, icon('check'), '확인함')))))) : empty('AI가 아키텍트에게 물은 것이 없습니다.');
-  const tests = q.tests.length ? h('div', { class: 'list' }, q.tests.map(t => h('div', { class: 'item' },
-    h('span', { class: 'lead-ico warn' }, icon('flask')),
-    h('div', { class: 'body' }, h('div', { class: 't' }, t.title), h('div', { class: 's' }, t.next_action || t.summary || ''),
-      h('div', { class: 'meta' }, priChip(t.priority), stChip(t.stage), h('span', { class: 'when' }, fmtRel(t.updated_at))),
-      h('div', { class: 'choice-row' },
-        h('button', { class: 'btn sm primary', onclick: () => setStages([t.id], 'done', redraw) }, icon('check'), '확인 완료'),
-        h('button', { class: 'btn sm', onclick: () => { setStages([t.id], 'blocked', redraw); openTask(t); } }, icon('alert'), '문제 있음'),
-        h('button', { class: 'btn sm', onclick: () => openTask(t) }, icon('messages'), '자세히·답하기'),
-        h('button', { class: 'btn sm', onclick: () => ack(`mine-test:${t.id}:${t.updated_at}`) }, '나중에')))))) : empty('확인할 작업이 없습니다.');
-  const actions = q.actions.length ? h('div', { class: 'list' }, q.actions.map(a => h('div', { class: 'item' },
-    h('span', { class: 'lead-ico' }, icon('user')),
-    h('div', { class: 'body' }, h('div', { class: 't' }, a.title), a.detail ? h('div', { class: 's' }, a.detail) : null,
-      h('div', { class: 'choice-row' }, h('button', { class: 'btn sm primary', onclick: () => ack(`ua:${a.id}`) }, icon('check'), '했음'),
-        a.task_id ? h('button', { class: 'btn sm', onclick: () => openTaskById(a.task_id) }, '관련 작업') : null))))) : empty('할 일이 없습니다.');
-  const backlog = q.backlog.length ? h('div', { class: 'list' }, q.backlog.slice(0, 8).map(t => h('div', { class: 'item' },
-    h('span', { class: 'lead-ico' }, icon('inbox')),
-    h('div', { class: 'body' }, h('div', { class: 't' }, t.title), h('div', { class: 's clamp-2' }, t.body || '')),
-    h('div', { class: 'choice-row', style: { 'margin-top': '0' } },
-      h('button', { class: 'btn sm', onclick: () => sendOps('activate', { topic: t.id }, `착수 지시: ${t.title}`).then(redraw).catch(e => toast(e.message)) }, icon('play'), '착수'),
-      h('button', { class: 'btn sm', onclick: () => openTopic(t) }, '열기')))),
-    q.backlog.length > 8 ? h('button', { class: 'btn', style: { 'margin-top': '8px' }, onclick: () => go('topics') }, `미처리 ${q.backlog.length}건 전체 보기`, icon('arrow')) : null) : empty('미처리 주제가 없습니다.');
+  const all = mineItems();
+  const f = S.f.mine || 'all';
+  const count = v => all.filter(i => i.type === v).length;
+  const urgent = all.filter(i => i.type !== 'backlog');
+  const list = f === 'all' ? all : all.filter(i => i.type === f);
+  if (!list.some(i => i.key === S.mineSel)) S.mineSel = (f === 'all' ? urgent[0] || list[0] : list[0])?.key || null;
+  const sel = list.find(i => i.key === S.mineSel) || null;
+  const narrow = matchMedia('(max-width: 1100px)').matches;
+  const pick = it => { if (narrow) return openMineItem(it); S.mineSel = it.key; S._keepScroll = true; render(); };
+  const tabs = h('div', { class: 'mine-tabs', role: 'tablist', 'aria-label': '내 차례 소분류' },
+    [['all', '전체', 'user', '', urgent.length], ...MINE_TYPES.map(([v, l, i, c]) => [v, l, i, c, count(v)])].map(([v, l, i, c, n]) =>
+      h('button', { role: 'tab', 'aria-selected': String(f === v), class: `mine-tab${n && c ? ' ' + c : ''}`, onclick: () => { S.f.mine = v; S.mineSel = null; render(); } },
+        icon(i), h('span', null, l), h('b', null, n))));
+  const row = it => {
+    const ty = MINE_TYPE[it.type];
+    return h('button', { class: 'mine-row', role: 'option', 'aria-selected': String(!narrow && it.key === S.mineSel), onclick: () => pick(it) },
+      h('span', { class: `lead-ico ${ty.cls}` }, icon(ty.icon)),
+      h('span', { class: 'body' },
+        h('span', { class: 'kind' }, h('b', null, ty.label), it.topic && it.type !== 'backlog' ? h('span', { class: 'topic' }, it.topic.title) : null),
+        h('span', { class: 't clamp-2' }, it.title),
+        it.sub && it.type !== 'backlog' ? h('span', { class: 's clamp-1' }, it.sub) : null,
+        h('span', { class: 'meta' }, av(it.who, true), h('span', null, person(it.who).name), histCount(it.topic, it.taskId), h('span', { class: 'when' }, fmtRel(it.when)))));
+  };
+  const group = (title, items) => items.length ? [h('div', { class: 'mine-group' }, title, h('b', null, items.length)), items.map(row)] : null;
+  const listBody = !list.length ? empty(f === 'all' ? '지금 대응할 것이 없습니다.' : `${MINE_TYPE[f].label} 항목이 없습니다.`)
+    : f === 'all' ? [group('대응할 것', urgent), group('착수 고르기 · 미처리 주제', all.filter(i => i.type === 'backlog'))] : list.map(row);
+  const detail = sel ? mineDetail(sel, null) : null;
   return [
-    head('MY TURN', '내 차례', q.total ? `대응할 것 ${q.total}건` : '지금 대응할 것 없음'),
-    h('div', { class: 'grid wide-2' },
-      h('div', { class: 'stack' },
-        mineSection('결정·승인 요청', 'AI가 승인이나 선택을 기다리는 것입니다. 버튼을 누르면 다음 동기화 때 그 답대로 진행합니다.', q.decisions.length, decisions),
-        mineSection('AI 질문', '작업 중 AI가 아키텍트에게 물은 것입니다.', q.questions.length, questions)),
-      h('div', { class: 'stack' },
-        mineSection('실게임·확인 대기', '아키텍트 확인을 기다리는 작업입니다.', q.tests.length, tests),
-        mineSection('할 일', null, q.actions.length, actions),
-        mineSection('착수 고르기 (미처리 주제)', '착수를 누르면 자동 배분으로 담당이 정해집니다.', q.backlog.length, backlog))),
+    head('MY TURN', '내 차례', urgent.length ? `대응할 것 ${urgent.length}건 · 미처리 주제 ${count('backlog')}건` : `지금 대응할 것 없음 · 미처리 주제 ${count('backlog')}건`),
+    tabs,
+    h('div', { class: `mine-split${narrow ? ' narrow' : ''}` },
+      h('div', { class: 'card mine-list', role: 'listbox', 'aria-label': '내 차례 목록' }, listBody),
+      narrow ? null : h('section', { class: 'card mine-detail', 'aria-label': '선택한 항목' },
+        detail ? [h('div', { class: 'mine-detail-h' }, h('span', { class: 'eyebrow' }, detail.eyebrow),
+            h('button', { class: 'btn sm', title: '크게 보기', onclick: () => openMineItem(sel) }, icon('arrow'), '크게 보기')),
+          h('div', { class: 'mine-detail-b' }, h('div', { class: 'ms-main' }, detail.main), h('div', { class: 'ms-side' }, detail.side))]
+          : h('div', { class: 'mine-detail-empty' }, empty('왼쪽에서 항목을 고르면 내용과 히스토리가 여기에 보입니다.')))),
   ];
+}
+// 좁은 화면·"크게 보기": 같은 내용을 가운데 모달로
+function openMineItem(it) {
+  const d = mineDetail(it, () => { const again = mineItems().find(x => x.key === it.key); again ? openMineItem(again) : closeDrawer(); });
+  modalSplit(d.eyebrow, d.main, d.side);
+}
+function mineDetail(it, redraw) {
+  if (it.type === 'decision') return { eyebrow: '결정·승인 요청', ...decisionParts(it.ref, redraw) };
+  if (it.type === 'question') return { eyebrow: 'AI 질문', ...questionParts(it.topic, it.ref, redraw) };
+  if (it.type === 'test') return { eyebrow: '실게임·확인 대기', ...testParts(it.ref, it.topic, redraw) };
+  if (it.type === 'action') return { eyebrow: '할 일', ...actionParts(it.ref, it.topic, redraw) };
+  return { eyebrow: '착수 고르기 · 미처리 주제', ...backlogParts(it.ref, redraw) };
+}
+function testParts(t, topic, redraw) {
+  const after = () => { if (redraw) redraw(); };
+  return {
+    main: [
+      h('div', { style: { display: 'flex', gap: '6px', 'flex-wrap': 'wrap', 'align-items': 'center' } }, priChip(t.priority), stChip(t.stage), t.area ? h('span', { class: 'tag' }, t.area) : null, h('span', { class: 'when' }, `${fmtAbs(t.updated_at)} · ${fmtRel(t.updated_at)}`)),
+      h('h3', { class: 'd-title' }, t.title),
+      t.next_action ? [h('h4', null, '확인할 것'), h('div', { class: 'callout warn' }, t.next_action)] : null,
+      t.live_test ? [h('h4', null, '실게임'), h('p', { class: 'd-text' }, t.live_test)] : null,
+      t.summary ? [h('h4', null, '현황'), h('p', { class: 'd-text' }, t.summary)] : null,
+      (t.evidence || []).length ? [h('h4', null, '근거'), h('ul', { class: 'd-list' }, [].concat(t.evidence).map(e => h('li', { class: 'mono' }, e)))] : null,
+      h('h4', null, '확인 결과'),
+      h('div', { class: 'choice-row' },
+        h('button', { class: 'btn primary', onclick: () => setStages([t.id], 'done', after) }, icon('check'), '확인 완료'),
+        h('button', { class: 'btn', onclick: () => setStages([t.id], 'blocked', after) }, icon('alert'), '문제 있음'),
+        h('button', { class: 'btn', onclick: () => { ack(`mine-test:${t.id}:${t.updated_at}`); after(); } }, icon('clock'), '나중에'),
+        h('button', { class: 'btn', onclick: () => openTask(t) }, icon('tasks'), '작업 전체 보기')),
+      thread({ kind: 'task', id: t.id, title: t.title }, redraw, { compose: true, title: '담당에게 전할 말', placeholder: '문제가 있었다면 어떤 화면·상황이었는지 적어 보내세요', to: t.owner === 'astra' ? 'dev-astra' : 'dev-claude' }),
+    ],
+    side: historyPanel(topic, t, null),
+  };
+}
+function actionParts(a, topic, redraw) {
+  const task = a.task_id ? S.d.tasks.find(t => t.id === a.task_id) : null;
+  return {
+    main: [
+      h('div', { class: 'when' }, a.since ? `${fmtAbs(a.since)} · ${fmtRel(a.since)}` : ''),
+      h('h3', { class: 'd-title' }, a.title),
+      a.detail ? h('div', { class: 'callout' }, a.detail) : null,
+      h('div', { class: 'choice-row' },
+        h('button', { class: 'btn primary', onclick: () => { ack(`ua:${a.id}`); if (redraw) redraw(); } }, icon('check'), '했음'),
+        task ? h('button', { class: 'btn', onclick: () => openTask(task) }, icon('tasks'), '관련 작업 보기') : null),
+      task ? thread({ kind: 'task', id: task.id, title: task.title }, redraw, { compose: true, title: '담당에게 전할 말', placeholder: '해 본 결과나 막힌 점을 적어 보내세요', to: task.owner === 'astra' ? 'dev-astra' : 'dev-claude' }) : null,
+    ],
+    side: historyPanel(topic, task, null),
+  };
+}
+// 미처리 주제: 내용·히스토리를 보고 자동 배분 또는 담당을 골라 착수, 착수 전에 전할 말
+function backlogParts(t, redraw) {
+  const pendAct = pending.all().find(p => p.type === 'activate' && p.topic === t.id);
+  const pendAsg = pending.all().find(p => p.type === 'assign' && p.topic === t.id);
+  const sel = h('select', { 'aria-label': '담당 고르기' }, agentOptions(pendAsg ? pendAsg.agent : '', [h('option', { value: '' }, '담당 고르기')]));
+  const busy = b => { b.disabled = true; return () => { b.disabled = false; }; };
+  const auto = h('button', { class: 'btn primary', onclick: async () => {
+    const done = busy(auto);
+    try { await sendOps('activate', { topic: t.id }, `착수 지시: ${t.title}`); render(); if (redraw) redraw(); } catch (e) { toast(e.message); } finally { done(); }
+  } }, icon('play'), '자동 배분으로 착수');
+  const mine = h('button', { class: 'btn', onclick: async () => {
+    if (!sel.value) { toast('담당을 먼저 고르세요'); sel.focus(); return; }
+    const done = busy(mine);
+    try {
+      await sendOps('assign', { topic: t.id, agent: sel.value, note: '' }, `주제 담당 → ${person(sel.value).name}`);
+      await sendOps('activate', { topic: t.id }, `착수 지시: ${t.title}`);
+      render(); if (redraw) redraw();
+    } catch (e) { toast(e.message); } finally { done(); }
+  } }, icon('agents'), '이 담당으로 착수');
+  return {
+    main: [
+      h('div', { style: { display: 'flex', gap: '6px', 'flex-wrap': 'wrap', 'align-items': 'center' } }, topicChip(t.status), priChip(t.priority), t.kind ? h('span', { class: 'tag' }, t.kind) : null, h('span', { class: 'when' }, `등록 ${fmtAbs(t.created_at)}`)),
+      h('h3', { class: 'd-title' }, t.title),
+      t.body ? [h('h4', null, '원래 메모'), longText(t.body)] : null,
+      h('h4', null, '착수 정하기'),
+      pendAct || pendAsg ? h('div', { class: 'callout' }, h('span', { class: 'st user_test' }, icon('clock'), '반영 대기'),
+        ' ', pendAsg ? `${person(pendAsg.agent).full}에게 배정했습니다. ` : '', pendAct ? '착수 지시를 보냈습니다. 다음 동기화 때 진행됩니다.' : '') : null,
+      h('div', { class: 'start-box' },
+        h('div', { class: 'start-opt' }, h('b', null, '자동 배분'), h('span', { class: 'hint' }, '규칙(PC·AI 역할, 부하)에 따라 담당이 정해집니다.'), auto),
+        h('div', { class: 'start-opt' }, h('b', null, '담당 직접 선정'), h('span', { class: 'hint' }, '고른 작업자에게 바로 배정하고 착수합니다.'), h('div', { class: 'row' }, sel, mine))),
+      thread({ kind: 'topic', id: t.id, title: t.title }, redraw, { compose: true, title: '착수 전에 전할 말 (선택)', placeholder: '범위·우선순위·주의할 점을 적으면 담당에게 같이 전달됩니다' }),
+    ],
+    side: historyPanel(t, null, null),
+  };
 }
 
 function decisionsNeededCard() {
@@ -1316,43 +1404,57 @@ function assignControl(t) {
     pend ? h('div', { class: 'hint' }, `담당 변경 반영 대기: ${person(pend.agent).full}`) : null);
 }
 function openDecisionNeeded(q) {
-  const redraw = () => openDecisionNeeded(q);
+  const p = decisionParts(q, () => openDecisionNeeded(q));
+  modalSplit('결정이 필요한 문제', p.main, p.side);
+}
+// 결정 화면 내용: 오른쪽 칸(내 차례)과 가운데 모달이 같이 쓴다
+function decisionParts(q, redraw) {
   const ans = S.d.answers[q.id];
   const note = h('textarea', { placeholder: '선택지 말고 직접 적거나, 고른 선택지에 덧붙일 말 (선택)', rows: '3', 'aria-label': '결정 메모' });
   const topic = topicById(q.task_id);
   const task = !topic && q.task_id ? S.d.tasks.find(t => t.id === q.task_id) : null;
-  modalSplit('결정이 필요한 문제', [
-    h('div', { class: 'meta', style: { display: 'flex', gap: '8px', 'flex-wrap': 'wrap', 'align-items': 'center' } },
-      h('span', { class: 'wait' }, av(q._author || 'claude', true), `${person(q._author || 'claude').full} 질문`),
-      h('span', { class: 'when' }, `${fmtAbs(q.since)} · ${fmtRel(q.since)}`)),
-    questionText(q.question),
-    q.recommendation ? h('div', { class: 'callout' }, h('b', null, '권장 '), q.recommendation) : null,
-    ans ? h('div', { class: 'callout' }, h('b', null, '내 결정: '), ans.choice || '(메모)', ans.note ? ' — ' + ans.note : '', ' ', ans.pending ? h('span', { class: 'st user_test' }, icon('clock'), '반영 대기') : h('span', { class: 'st done' }, icon('check'), '반영됨')) : null,
-    (q.options || []).length ? [h('h4', null, '선택지 — 누르면 바로 결정됩니다'), optionList(q, o => decide(q, o, note.value.trim(), redraw))] : null,
-    h('h4', null, '직접 적기'),
-    h('div', { class: 'composer' }, note, h('div', { class: 'row' }, h('button', { class: 'btn primary', onclick: () => { if (!note.value.trim()) { note.focus(); return; } decide(q, '', note.value.trim(), redraw); } }, icon('send'), '메모로 결정 보내기'))),
-    sendHint(),
-  ], historyPanel(topic, task, `ask:${q.id}`));
+  return {
+    main: [
+      h('div', { class: 'meta', style: { display: 'flex', gap: '8px', 'flex-wrap': 'wrap', 'align-items': 'center' } },
+        h('span', { class: 'wait' }, av(q._author || 'claude', true), `${person(q._author || 'claude').full} 질문`),
+        h('span', { class: 'when' }, `${fmtAbs(q.since)} · ${fmtRel(q.since)}`)),
+      questionText(q.question),
+      q.recommendation ? h('div', { class: 'callout' }, h('b', null, '권장 '), q.recommendation) : null,
+      ans ? h('div', { class: 'callout' }, h('b', null, '내 결정: '), ans.choice || '(메모)', ans.note ? ' — ' + ans.note : '', ' ', ans.pending ? h('span', { class: 'st user_test' }, icon('clock'), '반영 대기') : h('span', { class: 'st done' }, icon('check'), '반영됨')) : null,
+      (q.options || []).length ? [h('h4', null, '선택지 — 누르면 바로 결정됩니다'), optionList(q, o => decide(q, o, note.value.trim(), redraw))] : null,
+      h('h4', null, '직접 적기'),
+      h('div', { class: 'composer' }, note, h('div', { class: 'row' }, h('button', { class: 'btn primary', onclick: () => { if (!note.value.trim()) { note.focus(); return; } decide(q, '', note.value.trim(), redraw); } }, icon('send'), '메모로 결정 보내기'))),
+      sendHint(),
+    ],
+    side: historyPanel(topic, task, `ask:${q.id}`),
+  };
 }
 // AI 질문(주제 기록의 질문)을 가운데 모달로: 질문 본문 + 답 보내기 + 히스토리
 function openQuestion(topic, n) {
+  const p = questionParts(topic, n, () => openQuestion(topic, n));
+  modalSplit('AI 질문', p.main, p.side);
+}
+function questionParts(topic, n, redraw) {
   const t = topicById(topic.id) || topic;
   const lastUser = Math.max(0, ...commentsFor({ kind: 'topic', id: t.id }).filter(c => c.by === 'user').map(c => toMs(c.ts) || 0));
   const answered = lastUser > (toMs(n.ts) || 0);
   const key = `mine-q:${t.id}:${n.ts}`;
   const acked = S.acks.has(key) || S.serverAcks?.has(key);
-  modalSplit('AI 질문', [
-    h('div', { class: 'meta', style: { display: 'flex', gap: '8px', 'flex-wrap': 'wrap', 'align-items': 'center' } },
-      h('span', { class: 'wait' }, av(n.by, true), `${person(n.by).full} 질문`),
-      h('span', { class: 'when' }, `${fmtAbs(n.ts)} · ${fmtRel(n.ts)}`)),
-    questionText(n.body),
-    answered ? h('div', { class: 'callout' }, h('span', { class: 'st done' }, icon('check'), '답함'), ' 이 질문 뒤에 아키텍트 답이 있습니다. 오른쪽 히스토리에서 확인하세요.')
-      : acked ? h('div', { class: 'callout' }, h('span', { class: 'st done' }, icon('check'), '확인함'), ' 답 없이 확인 처리했습니다.') : null,
-    thread({ kind: 'topic', id: t.id, title: t.title }, () => openQuestion(t, n),
-      { compose: true, title: `${person(n.by).name}에게 답하기`, placeholder: '여기에 답을 적으면 질문한 AI에게 전달되고, 다음 동기화 때 그 답으로 이어서 진행합니다', to: n.by }),
-    answered || acked ? null : h('div', { class: 'choice-row' },
-      h('button', { class: 'btn', onclick: () => { ack(key); closeDrawer(); } }, icon('check'), '답 없이 확인함으로 처리')),
-  ], historyPanel(t, null, `note:${n.ts}`));
+  return {
+    main: [
+      h('div', { class: 'meta', style: { display: 'flex', gap: '8px', 'flex-wrap': 'wrap', 'align-items': 'center' } },
+        h('span', { class: 'wait' }, av(n.by, true), `${person(n.by).full} 질문`),
+        h('span', { class: 'when' }, `${fmtAbs(n.ts)} · ${fmtRel(n.ts)}`)),
+      questionText(n.body),
+      answered ? h('div', { class: 'callout' }, h('span', { class: 'st done' }, icon('check'), '답함'), ' 이 질문 뒤에 아키텍트 답이 있습니다. 히스토리에서 확인하세요.')
+        : acked ? h('div', { class: 'callout' }, h('span', { class: 'st done' }, icon('check'), '확인함'), ' 답 없이 확인 처리했습니다.') : null,
+      thread({ kind: 'topic', id: t.id, title: t.title }, redraw,
+        { compose: true, title: `${person(n.by).name}에게 답하기`, placeholder: '여기에 답을 적으면 질문한 AI에게 전달되고, 다음 동기화 때 그 답으로 이어서 진행합니다', to: n.by }),
+      answered || acked ? null : h('div', { class: 'choice-row' },
+        h('button', { class: 'btn', onclick: () => { ack(key); closeDrawer(); } }, icon('check'), '답 없이 확인함으로 처리')),
+    ],
+    side: historyPanel(t, null, `note:${n.ts}`),
+  };
 }
 function topicById(id) { return id ? S.d.topics.find(t => t.id === id) || null : null; }
 
@@ -1405,7 +1507,7 @@ function historyPanel(topic, task, focusKey) {
     h('div', { class: 'hist-title' }, task.title),
     task.summary ? h('p', { class: 'muted', style: { margin: 0, 'font-size': '13px' } }, task.summary) : null,
     h('button', { class: 'btn sm', onclick: () => openTask(task) }, icon('tasks'), '작업 전체 보기'),
-  ] : [h('div', { class: 'hint' }, '연결된 주제가 없는 질문입니다.')];
+  ] : [h('div', { class: 'hint' }, '연결된 주제·작업이 없어 히스토리가 없습니다.')];
   const LIMIT = 12;
   const list = h('ol', { class: 'hist' });
   const row = e => h('li', { class: `hist-item k-${e.kind}${e.by === 'user' ? ' me' : ''}${e.key && e.key === focusKey ? ' focus' : ''}` },
