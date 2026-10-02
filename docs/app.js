@@ -894,7 +894,7 @@ function mineItems() {
     sub: x.recommendation ? '권장 ' + x.recommendation : (x.options || []).length ? `선택지 ${x.options.length}개` : '' });
   for (const { topic, note } of q.questions) items.push({ key: `q:${topic.id}:${note.ts}`, type: 'question', title: note.body, who: note.by, when: note.ts, topic, ref: note });
   for (const t of q.tests) items.push({ key: `t:${t.id}`, type: 'test', title: t.title, sub: t.next_action || t.summary || '', who: t.owner, when: t.updated_at, topic: S.d.topics.find(x => x.linked_task_id === t.id) || null, taskId: t.id, ref: t });
-  for (const a of q.actions) items.push({ key: `a:${a.id}`, type: 'action', title: a.title, sub: a.detail || '', who: 'user', when: a.since, topic: S.d.topics.find(x => a.task_id && x.linked_task_id === a.task_id) || null, taskId: a.task_id, ref: a });
+  for (const a of q.actions) items.push({ key: `a:${a.id}`, type: 'action', title: a.title, sub: a.detail || '', who: 'user', when: a.since, topic: topicById(a.task_id) || S.d.topics.find(x => a.task_id && x.linked_task_id === a.task_id) || null, taskId: a.task_id, ref: a });
   for (const t of q.backlog) items.push({ key: `b:${t.id}`, type: 'backlog', title: t.title, sub: t.body || '', who: t.proposed_by || 'user', when: t.created_at, topic: t, ref: t });
   return items;
 }

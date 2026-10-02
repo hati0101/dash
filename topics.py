@@ -801,7 +801,6 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
     drops = {r.get("topic"): r for r in urec.get("topic_drop", [])}
     locked = frozenset(urec.get("agent_locks", {}) or {})  # 잠근 작업자: 교차 검토도 맡기지 않음
     gate_answers = {r.get("id"): r for r in urec.get("decisions_answered", []) if str(r.get("id", "")).startswith("G")}
-    stall_answers = {r.get("id"): r for r in urec.get("decisions_answered", []) if str(r.get("id", "")).startswith("S-")}
     by_topic: dict[str, list[dict]] = {}
     for r in node_records or []:
         by_topic.setdefault(r.get("topic"), []).append(r)
@@ -831,14 +830,12 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
         requests: dict[str, dict] = {}  # 요청 ID → 요청(담당은 그대로 두고 다른 작업자에게 자료·확인을 부탁)
         finishes: list[tuple] = []  # AI의 '끝냄'(state done) — 다음 관문을 여는 신호
         for _ts, a, r in sorted(events, key=lambda e: e[0] or ""):
-            if r.get("status") == "parked" and AGENT_RE.match(a or "") and "-" in (a or "") and to_dt(_ts) >= RULES_V2_FROM:
-                # AI는 스스로 보류하지 못한다(새 규칙): '보류 제안'으로 남기고 아키텍트 결정(멈춤 결정)으로 올린다
-                t["park_proposed"] = {"by": a, "ts": _ts, "body": (r.get("body") or "")[:1500]}
+            if r.get("status") == "parked" and AGENT_RE.match(a or "") and "-" in (a or "") and to_dt(_ts) >= RULES_V2_FROM \
+                    and not str(r.get("body") or "").startswith("[아키텍트 보류 결정]"):
+                pass  # 보류는 아키텍트만 정한다(2026-10-03). AI의 보류 기록은 상태를 바꾸지 않는다(실행기는 질문으로 바꿔 올린다)
             elif r.get("status") in STATUSES:
                 t["status"] = r["status"]
                 t["status_at"] = _ts  # 실행기가 '이 PC에서 더 나중에 바꾼 상태'를 판단하는 기준
-                if r["status"] != "parked":
-                    t.pop("park_proposed", None)
                 if r["status"] == "done":
                     finishes.append((_ts, a, (r.get("body") or "")[:2000]))
             if r.get("work_id") and r.get("kind") in ("work", "handoff"):
@@ -908,20 +905,6 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
             if ed.get("kind"):
                 t["kind"] = ed["kind"]
             t["edited_at"] = ed.get("ts")
-        # 멈춤 결정(S-…) 답: 보류·보류 승인 → 보류, 즉시 완료 → 완료, 다시 진행·다시 시도 → 보류 제안 취소(실행기가 다시 깨움)
-        sans = sorted((r for k, r in stall_answers.items() if k.startswith(f"S-{t['id'][2:]}-")), key=lambda r: to_dt(r.get("ts")))
-        if sans and t.get("status") not in ("dropped",):
-            last_s = sans[-1]
-            ch = last_s.get("choice") or ""
-            if to_dt(last_s.get("ts")) >= to_dt(t.get("status_at")) or t.get("park_proposed"):
-                if ch.startswith("즉시 완료"):
-                    t["status"], t["confirmed"], t["status_at"], t["step"] = "done", True, last_s.get("ts"), None
-                    t.pop("gate", None); t.pop("live_session", None)
-                elif "보류" in ch:
-                    t["status"], t["status_at"], t["step"] = "parked", last_s.get("ts"), None
-                    t.pop("gate", None); t.pop("live_session", None)
-                if t.get("park_proposed") and to_dt(last_s.get("ts")) >= to_dt(t["park_proposed"]["ts"]):
-                    t.pop("park_proposed", None)  # 아키텍트가 답했으니 제안은 끝
         if t["id"] in drops:  # 삭제한 주제: 배분·실행 대상에서 빠지고 화면에서는 '삭제됨'에만 보인다
             t["status"], t["dropped_at"] = "dropped", drops[t["id"]].get("ts")
             t.pop("gate", None); t.pop("live_session", None); t["step"] = None
@@ -973,8 +956,6 @@ def review_partner(a: str | None, known: set | None, locked=frozenset()) -> str 
 def whose_turn(t: dict) -> str | None:
     if t["status"] in ("done", "parked", "backlog", "dropped", "review_user"):
         return None
-    if t.get("park_proposed"):
-        return None  # AI 보류 제안: 아키텍트 결정(멈춤 결정) 전까지 아무도 깨우지 않는다
     if t.get("live_session"):
         return t.get("assignee")  # 실게임 시험 단계: 개발컴 Claude 대화 세션(자동 실행기는 깨우지 않음)
     req = t.get("open_request")
@@ -1138,6 +1119,48 @@ def rebalance(cfg, topics: list[dict], agents: list[dict], loads: dict, routing:
     return moved
 
 
+OFFLINE_SECONDS = 150 * 60  # 다른 PC는 바뀐 게 없으면 60분마다만 올리므로 넉넉히(2시간 30분)
+
+
+def rescue(cfg, topics: list[dict], all_list: list[dict], agents_ok: list[dict], loads: dict, routing: dict, labels: dict) -> int:
+    """잠긴 작업자·신호가 끊긴 PC에 묶인 진행 중 주제를 다른 작업자에게 자동으로 넘긴다(아키텍트에게 묻지 않는다, 2026-10-03).
+    실게임 시험 대화 단계·운영 반영 단계(서버컴 몫)는 옮기지 않는다."""
+    now = datetime.now(KST)
+    my_pc = (cfg.get("pc") or {}).get("id")
+    def alive(a):
+        if a.get("pc") == my_pc:
+            return True  # 이 PC(허브)의 작업자: 지금 이 명령이 돌고 있으니 살아 있다
+        seen = a.get("pc_synced") or a.get("last_seen")
+        return bool(seen) and (now - to_dt(seen)).total_seconds() < OFFLINE_SECONDS
+    known = {a["id"]: a for a in all_list}
+    locks = agent_locks(cfg)
+    cands_all = [a for a in agents_ok if alive(a)]
+    moved = 0
+    for t in topics:
+        cur = t.get("assignee")
+        if not cur or t["status"] not in ("new", "triage", "ready", "active") or t.get("live_session") or t.get("stage") == "deploy":
+            continue
+        why = "배정 잠금" if cur in locks else ("PC 신호 끊김" if cur in known and not alive(known[cur]) else None)
+        if not why:
+            continue
+        cands = [a for a in cands_all if a["id"] != cur]
+        if not cands:
+            continue
+        rows = score_agents(t, cands, loads, routing)
+        best = rows[0][1] if rows else (LEAD if any(a["id"] == LEAD for a in cands) else cands[0]["id"])
+        path, rec = author_file(cfg, t["id"], "claude")
+        ts = now_iso()
+        reason = f"자동 이관({why}): {labels.get(cur, cur)} → {labels.get(best, best)}"
+        rec.update({"assignee": best, "dispatch_reason": reason, "assigned_at": ts, "updated_at": ts})
+        add_note(rec, "triage", reason)
+        write_json(path, rec)
+        loads[cur] = max(0, loads.get(cur, 0) - 1)
+        loads[best] = loads.get(best, 0) + 1
+        moved += 1
+        print(f"{t['id']} {reason}")
+    return moved
+
+
 def agent_locks(cfg) -> dict:
     """아키텍트가 잠근 작업자: {작업자: {mode: assign|all, ts}}. assign=새 배정·재분배·인계·요청 안 받음, all=자동 실행도 멈춤."""
     return (read_json(data_dir(cfg) / "user.json", None) or {}).get("agent_locks", {}) if cfg else {}
@@ -1191,7 +1214,8 @@ def cmd_dispatch(args, cfg):
         done += 1
         print(f"{t['id']} → {best[1]} · {reason}")
     moved = rebalance(cfg, topics, agents, loads, routing, labels)
-    print(f"자동 배분 {done}건" + (f" · 재분배 {moved}건" if moved else ""))
+    rescued = rescue(cfg, topics, all_list, agents, loads, routing, labels)
+    print(f"자동 배분 {done}건" + (f" · 재분배 {moved}건" if moved else "") + (f" · 자동 이관 {rescued}건" if rescued else ""))
 
 
 # ---------------------------------------------------------------- 알림 (수신함 메시지, 중복 없음)

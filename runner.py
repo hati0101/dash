@@ -262,8 +262,9 @@ def find_jobs(data: dict, state: dict, only: str | None = None) -> list[dict]:
     for q in data.get("decisions_needed", []):
         if q.get("_author") in agents and (not only or q["_author"] == only) and q["id"] in answers and q["id"] not in used:
             t = next((x for x in data.get("topics", []) if x["id"] == q.get("task_id")), None)
-            if q.get("kind") == "stall" and not str(answers[q["id"]].get("choice") or "").startswith("다시"):
-                used.append(q["id"])  # 멈춤 결정: '다시 시도'만 AI를 깨운다(보류·담당 바꾸기·대화 처리는 허브·화면이 처리)
+            if str(q.get("question") or "").startswith(PARK_ASK) and str(answers[q["id"]].get("choice") or "").startswith("보류"):
+                # 아키텍트가 보류를 골랐다 → AI를 깨우지 않고 실행기가 보류로 기록하는 작업(run_job에서 처리)
+                jobs.append({"kind": "park", "agent": q["_author"], "topic": t, "ask": q, "answer": answers[q["id"]], "sig": f"park-{q['id']}"})
                 continue
             if t and t.get("status") in ("done", "parked", "dropped", "review_user"):
                 used.append(q["id"])  # 이미 끝났거나 아키텍트 관문 대기: 이 답으로 AI가 할 일이 없으니 처리함으로(옛 답으로 나중에 다시 깨지 않게)
@@ -844,6 +845,12 @@ def apply(job: dict, result: dict, data: dict | None = None) -> tuple[list[str],
                 node.add_topic_record(CFG, tid, agent, "review" if (job.get("topic") or {}).get("reviewer") == agent else "memo",
                                       body=(f"[{'끝냄' if a['status'] == 'done' else '보류 제안'} — 이 단계 담당이 아니라 메모로 기록] " + (body or "(내용 없음)"))[:6000])
                 done.append("끝냄→메모(단계 담당 아님)")
+            elif typ == "state" and tid and a.get("status") == "parked":
+                # 보류는 아키텍트만 정한다: AI의 보류는 '보류할까요?' 질문으로 바꿔 올린다(아키텍트가 보류를 고르면 실행기가 보류로 기록)
+                answered = {x["id"] for x in (data or {}).get("decisions_answered", [])}
+                if not any(q.get("_author") == agent and q.get("task_id") == tid and q["id"] not in answered for q in (data or {}).get("decisions_needed", [])):
+                    node.add_ask(CFG, agent, tid, f"{PARK_ASK} {body or '(이유 없음)'}"[:1500], ["보류", "계속 진행"])
+                done.append("보류→질문")
             elif typ == "state" and tid and a.get("status") == "done" and len(body) < 40:
                 failed.append("끝냄 거부: 결과 요약(무엇을 했나·작업물 위치·시험 방법·권장 다음 단계)이 없음 — 다시 깨워 요약을 받음")
                 job["redo"] = True
@@ -1057,6 +1064,10 @@ def mark_done(st: dict, j: dict):
         st["last_sig"], st["last_parts"] = j["sig"], j.get("parts") or st.get("last_parts")
 
 
+PARK_ASK = "[보류 제안] 이 주제를 보류할까요?"  # AI의 보류 → 아키텍트 질문(앞머리로 알아본다)
+ARCH_PARK = "[아키텍트 보류 결정]"  # 아키텍트가 '보류'를 고른 뒤 실행기가 남기는 보류 기록(엔진은 이 표시가 있는 AI 보류만 받는다)
+
+
 def stage_doer(t: dict) -> str | None:
     """지금 단계를 끝낼 수 있는 작업자: 실게임 대화 단계는 개발컴 Claude, 시험·배포본·운영 반영은 단계 담당, 진행은 담당."""
     from topics import LIVE_AGENT
@@ -1084,6 +1095,12 @@ def run_job(j: dict, data: dict, state: dict) -> bool:
     agent = node.my_agents(CFG)[agent_id]
     t = j.get("topic") or {}
     st = job_state(state, j)
+    if j["kind"] == "park":  # 아키텍트가 '보류'를 고른 보류 질문: AI 없이 보류로 기록
+        if t.get("id") and t.get("status") in ACTIVE:
+            node.add_topic_record(CFG, t["id"], agent_id, "status", status="parked", body=f"{ARCH_PARK} {j['answer'].get('note') or ''}".strip())
+            log(f"보류 기록 {agent_id} ← {t['id']}: 아키텍트가 보류를 고름")
+        state.setdefault("answers_used", []).append(j["ask"]["id"])
+        return True
     # 실행 직전 재확인: 그 사이 대화 세션이 잡았거나 이 PC에서 끝낸 주제는 건너뛴다
     if t.get("id"):
         if t["id"] in node.active_holds(CFG):
@@ -1155,22 +1172,27 @@ def run_job(j: dict, data: dict, state: dict) -> bool:
         st["files"] = len(files)
     if j.get("redo"):
         st["cont"] = st.get("cont", 0) + 1  # 끝냄 요약이 빠졌으니 다음 동기화 때 다시 깨운다
-    # 단계를 끝내지도, 묻지도, 넘기지도 않고 진척 메모만 남겼으면 두 번까지는 이어서 깨운다(계획 모드 포함).
-    # 그래도 변화가 없으면 깨우지 않고 대시보드 '실행기 멈춤' → 아키텍트 결정으로 올린다(조용히 멈추지 않게)
+    # 단계를 끝내지도, 묻지도, 넘기지도 않고 진척 메모만 남겼으면 멈추지 않고 계속 다시 깨운다(계획 모드 포함, 아키텍트에게 묻지 않음).
+    # 두 번까지는 다음 동기화 때 바로, 그 뒤로는 30분 → 2시간 간격으로(하루 한도 안에서) — 아키텍트가 보류하지 않는 한 멈추지 않는다
     acts = [a for a in result.get("actions", []) if isinstance(a, dict)]
     settled = any(a.get("type") in ("ask", "handoff", "request", "reply") or (a.get("type") == "state" and a.get("status") in ("done", "parked")) for a in acts)
+    backoff = None
     if settled:
         st["idle_runs"] = 0
     else:
         st["idle_runs"] = st.get("idle_runs", 0) + 1
-        if st["idle_runs"] <= 2 and not j.get("redo"):
+        if not j.get("redo"):
             st["cont"] = st.get("cont", 0) + 1
+            if st["idle_runs"] > 2:
+                backoff = 30 if st["idle_runs"] <= 4 else 120
     if j["kind"] == "answer":
         state.setdefault("answers_used", []).extend([j["ask"]["id"], *j.get("older", [])])
     moved = clear_inbox(agent_id, t.get("id"), before=started)
     if moved:
         done.append(f"수신함 정리 {moved}건")
     st.pop("retry_after", None)
+    if backoff:
+        st["retry_after"] = (now() + timedelta(minutes=backoff)).isoformat(timespec="seconds")
     mark_done(st, j)
     st["last_result"] = {"summary": result["summary"][:300], "actions": done, "failed": failed, "at": now().isoformat(timespec="seconds")}
     node.end_run(CFG, j["rid"], result="partial" if failed else "ok", summary=result["summary"][:500],
@@ -1183,7 +1205,8 @@ def queue_summary(aid: str, data: dict, state: dict) -> dict:
     """이 작업자 차례인 주제가 지금 왜 돌거나 안 도는지 센다(대시보드 작업자 카드에 '쉬는 중' 대신 보여 준다)."""
     runnable = {(j.get("topic") or {}).get("id") or j["sig"] for j in find_jobs(data, copy.deepcopy(state), only=aid)}
     answered = {a["id"] for a in data.get("decisions_answered", [])}
-    asking = {q.get("task_id") for q in data.get("decisions_needed", []) if q.get("_author") == aid and q["id"] not in answered}
+    asking = {q.get("task_id") for q in data.get("decisions_needed", []) if q.get("_author") == aid and q["id"] not in answered
+              and q.get("kind") not in ("gate", "stall")}  # AI가 직접 올린 질문만 '답 대기'로 센다
     holds, stamp, today = node.active_holds(CFG), now().isoformat(timespec="seconds"), f"{now():%Y%m%d}"
     out = {"total": 0, "runnable": 0, "waiting_answer": 0, "waiting_change": 0, "retry": 0, "limit": 0, "held": 0, "stalled": 0}
     items, stalled = {}, []  # 주제별 판정(대시보드 '다음' 문구가 실행기 판정과 같게) · 멈춘 주제
