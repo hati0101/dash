@@ -320,9 +320,16 @@ def find_jobs(data: dict, state: dict, only: str | None = None) -> list[dict]:
 # AI는 개발 트리에 직접 쓰지 않는다. dev_edit(바꿀 부분 old→new)·dev_run(정해진 이름의 명령)·dev_revert를 남기면 실행기가 검사 뒤 대신 한다.
 # 고칠 때마다 원본 대비 diff를 작업물 patch/에 남긴다(운영 패치용). 백업·로그는 scratch(F 드라이브)에 모으고 정리 규칙대로 지운다.
 # 운영 서버(서버컴)는 대상이 아니다. 설정: config agents[].dev = {root, write, scratch, scratch_cap_gb, commands{이름: [명령…]}, timeout_min}
+import contextlib  # noqa: E402
 import difflib  # noqa: E402
+import time  # noqa: E402
 
 DEV_DENY = re.compile(r"(^|/)(\.git|\.vs|harness|bin)(/|$)|\.(exe|dll|pdb|lib|obj|ilk|idb|exp)$", re.I)
+# 고칠 수 있는 파일 종류(허용 목록, 2026-10-03 검토 P1): 빌드 설정(.vcxproj·.props·.targets·.sln·CMakeLists.txt)·스크립트는
+# 빌드 때 임의 명령이 돌 수 있으므로 고치지 못한다.
+DEV_ALLOW_EXT = {".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx", ".h", ".c", ".inl", ".inc", ".txt", ".yml", ".yaml", ".conf", ".sql"}
+DEV_DENY_NAMES = {"cmakelists.txt"}
+WIN_RESERVED = re.compile(r"^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?$", re.I)
 
 
 def dev_cfg(agent_id: str | None) -> dict | None:
@@ -334,13 +341,74 @@ def dev_scratch(dev: dict) -> Path:
     return Path(dev.get("scratch") or r"F:\real-dev-scratch")
 
 
+def dev_path(dev: dict, raw) -> tuple[str, Path]:
+    """AI가 적은 경로 → (개발 트리 기준 실제 상대 경로, 실제 경로). 허용 폴더·허용 확장자만. 트리 밖·링크로 빠져나가는 경로와
+    Windows가 다르게 읽는 이름(끝의 점·공백, ':' 스트림, 예약 이름, 8.3 짧은 이름)은 거부한다.
+    링크·정션을 따라간 실제 경로로 한 번 더 검사하고, 기록(잠금·manifest) 키도 실제 경로(실제 대소문자)로 쓴다
+    (2026-10-03 검토: 'src/MAP/Skill.cpp' 같은 대소문자 별칭으로 다른 주제의 잠금을 우회하지 못하게)."""
+    def check(rel: str):
+        parts = rel.split("/")
+        bad = (not rel or any(p in ("", ".", "..") for p in parts) or DEV_DENY.search(rel) or parts[0] not in dev.get("write", [])
+               or any(p != p.rstrip(" .") or ":" in p or WIN_RESERVED.match(p) or re.search(r"~\d", p) for p in parts))
+        if bad:
+            raise ValueError(f"고칠 수 없는 경로: {rel or '(없음)'} (허용 폴더: {', '.join(dev.get('write', []))})")
+        if Path(rel).suffix.lower() not in DEV_ALLOW_EXT or parts[-1].lower() in DEV_DENY_NAMES:
+            raise ValueError(f"고칠 수 없는 파일 종류: {rel} (허용: {' '.join(sorted(DEV_ALLOW_EXT))} · 빌드 설정·스크립트는 안 됨)")
+    rel = str(raw or "").replace("\\", "/").strip().lstrip("/")
+    check(rel)
+    root = Path(dev["root"]).resolve()
+    path = (root / rel).resolve()
+    if root not in path.parents:
+        raise ValueError(f"개발 트리 밖 경로: {rel}")
+    real = path.relative_to(root).as_posix()
+    check(real)
+    return real, path
+
+
+@contextlib.contextmanager
+def dev_lock(sc: Path, wait: float = 300):
+    """scratch의 기록(manifest·locks.json)을 고치는 동안 다른 실행(정리·다른 작업자)과 겹치지 않게 잠근다(2026-10-03 검토 P2).
+    빌드처럼 오래 걸리는 일은 잠근 채로 하지 않는다. 1시간 넘은 잠금은 비정상 종료로 보고 푼다."""
+    sc.mkdir(parents=True, exist_ok=True)
+    lk = sc / "dev.lock"
+    token = f"{os.getpid()}-{time.time_ns()}"
+    t0 = time.monotonic()
+    while True:
+        try:
+            fd = os.open(lk, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, token.encode())
+            os.close(fd)
+            break
+        except FileExistsError:
+            try:
+                if time.time() - lk.stat().st_mtime > 3600:
+                    # 오래된 잠금: 이름을 바꿔 치우면 둘이 동시에 와도 한쪽만 성공한다(지우고 잡는 경합 방지)
+                    stale = lk.with_name(f"dev.lock.stale-{token}")
+                    os.replace(lk, stale)
+                    stale.unlink(missing_ok=True)
+                    continue
+            except OSError:
+                pass
+            if time.monotonic() - t0 > wait:
+                raise ValueError("개발 트리 기록 잠금을 얻지 못함(다른 실행이 쓰는 중) — 다음 실행에서 다시")
+            time.sleep(0.5)
+    try:
+        yield
+    finally:
+        try:  # 내 잠금일 때만 푼다
+            if lk.read_text(encoding="utf-8", errors="replace") == token:
+                lk.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def _sha(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
 
 def _dev_json(path: Path, default):
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8-sig"))  # verify-build의 result.json은 BOM이 붙는다
     except (OSError, ValueError):
         return default
 
@@ -356,91 +424,198 @@ def _decode(raw: bytes) -> tuple[str, str]:
     try:
         return raw.decode("utf-8"), "utf-8"
     except UnicodeDecodeError:
-        return raw.decode("cp949"), "cp949"
+        return raw.decode("cp949"), "cp949"  # 둘 다 아니면 UnicodeDecodeError(ValueError) → 거부
+
+
+def _decode_out(raw: bytes) -> str:
+    """명령 출력: UTF-8 → cp949 순으로 읽고, 그래도 안 되면 깨진 글자만 바꿔서 읽는다(출력 때문에 실패하지 않게)."""
+    for enc in ("utf-8", "cp949"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            pass
+    return raw.decode("utf-8", errors="replace")
 
 
 def _encode(text: str, enc: str) -> bytes:
     return (b"\xef\xbb\xbf" + text.encode("utf-8")) if enc == "utf-8-sig" else text.encode(enc)
 
 
-def dev_edit(agent_id: str, tid: str, a: dict, ws: Path | None) -> str:
-    """바꿀 부분(old)을 정확히 한 곳에서 찾아 new로 바꾼다. 원래 인코딩·줄바꿈 유지, 처음 고칠 때 원본 백업, diff를 작업물에 남긴다."""
-    dev = dev_cfg(agent_id)
-    if not dev:
-        raise ValueError("이 작업자는 개발 트리를 고칠 수 없음")
-    rel = str(a.get("file") or "").replace("\\", "/").strip().lstrip("/")
-    parts = rel.split("/")
-    if not rel or ".." in parts or DEV_DENY.search(rel) or parts[0] not in dev.get("write", []):
-        raise ValueError(f"고칠 수 없는 경로: {rel or '(없음)'} (허용: {', '.join(dev.get('write', []))})")
-    root = Path(dev["root"]).resolve()
-    path = (root / rel).resolve()
-    if root not in path.parents:
-        raise ValueError(f"개발 트리 밖 경로: {rel}")
-    edits = a.get("edits") or []
-    if not edits or len(edits) > 30:
-        raise ValueError("edits는 1~30개")
-    exists = path.exists()
-    raw = path.read_bytes() if exists else b""
-    text, enc = _decode(raw) if exists else ("", "utf-8")
+def _apply_edits(rel: str, text: str, edits: list, exists: bool) -> tuple[str, str]:
+    """바꿀 부분을 정확히 한 곳에서 찾아 바꾼다 → (쓸 글, 줄바꿈 종류). 줄바꿈은 파일 그대로 둔다.
+    CRLF·LF가 섞인 파일은 전체를 한 종류로 바꾸지 않고, 찾은 곳의 줄바꿈 형태로만 바꾼다."""
     crlf = "\r\n" in text
-    work = text.replace("\r\n", "\n")
+    mixed = crlf and re.search(r"(?<!\r)\n", text) is not None
+    work = text if mixed else text.replace("\r\n", "\n")
     for e in edits:
         old = str(e.get("old") or "").replace("\r\n", "\n")
         new = str(e.get("new") or "").replace("\r\n", "\n")
         if not exists and old == "" and len(edits) == 1:
-            work = new  # 새 파일
-            continue
-        n = work.count(old) if old else 0
+            return new, "LF"  # 새 파일
+        forms = {old, old.replace("\n", "\r\n")} if mixed else {old}
+        hits = [(f, work.count(f)) for f in forms if f]
+        n = sum(c for _, c in hits)
         if n != 1:
             raise ValueError(f"{rel}: 바꿀 부분을 정확히 한 곳에서 찾지 못함({n}곳) — 앞뒤 줄을 더 넣어 유일하게: {old[:80]!r}")
-        work = work.replace(old, new, 1)
-    try:
-        out = _encode(work.replace("\n", "\r\n") if crlf else work, enc)
-    except UnicodeEncodeError:
-        raise ValueError(f"{rel}: 원래 인코딩({enc})으로 쓸 수 없는 글자가 있음")
+        found = next(f for f, c in hits if c == 1)
+        work = work.replace(found, new.replace("\n", "\r\n") if "\r\n" in found else new, 1)
+    if mixed:
+        return work, "혼합(고친 곳만 그 형태로)"
+    return (work.replace("\n", "\r\n") if crlf else work), ("CRLF" if crlf else "LF")
+
+
+def dev_edit(agent_id: str, tid: str, a: dict, ws: Path | None) -> str:
+    """바꿀 부분(old)을 정확히 한 곳에서 찾아 new로 바꾼다. 원래 인코딩·줄바꿈 유지, 처음 고칠 때 원본 백업, diff를 작업물에 남긴다.
+    기록(manifest)을 먼저 쓰고 파일을 바꾼다: 중간에 멈춰도 되돌리기·다음 수정이 어느 쪽 내용인지 안다(2026-10-03 검토 P2)."""
+    dev = dev_cfg(agent_id)
+    if not dev:
+        raise ValueError("이 작업자는 개발 트리를 고칠 수 없음")
+    rel, path = dev_path(dev, a.get("file"))
+    edits = a.get("edits") or []
+    if not isinstance(edits, list) or not edits or len(edits) > 30 \
+            or not all(isinstance(e, dict) and isinstance(e.get("old", ""), str) and isinstance(e.get("new", ""), str) for e in edits):
+        raise ValueError('edits는 [{"old": 문자열, "new": 문자열}] 1~30개')
     sc = dev_scratch(dev)
-    locks = _dev_json(sc / "locks.json", {})
-    if locks.get(rel) and locks[rel] != tid:
-        raise ValueError(f"{rel}: 다른 주제({locks[rel]})가 고치는 중인 파일")
-    mpath = sc / tid / "manifest.json"
-    man = _dev_json(mpath, {"files": {}, "builds": [], "created": now().isoformat(timespec="seconds")})
-    f = man["files"].get(rel)
-    if f:
-        if _sha(raw) != f.get("last_sha"):
-            raise ValueError(f"{rel}: 이 주제가 마지막으로 고친 뒤 다른 곳에서 바뀜 — 대화 세션에서 확인 필요")
-    else:
-        if exists:
+    with dev_lock(sc):
+        exists = path.exists()
+        raw = path.read_bytes() if exists else b""
+        text, enc = _decode(raw) if exists else ("", "utf-8")
+        out_text, nl = _apply_edits(rel, text, edits, exists)
+        try:
+            out = _encode(out_text, enc)
+        except UnicodeEncodeError:
+            raise ValueError(f"{rel}: 원래 인코딩({enc})으로 쓸 수 없는 글자가 있음")
+        locks = _dev_json(sc / "locks.json", {})
+        if locks.get(rel) and locks[rel] != tid:
+            raise ValueError(f"{rel}: 다른 주제({locks[rel]})가 고치는 중인 파일")
+        mpath = sc / tid / "manifest.json"
+        man = _dev_json(mpath, {"files": {}, "builds": [], "created": now().isoformat(timespec="seconds")})
+        cur = _sha(raw) if exists else None
+        f = man["files"].get(rel)
+        if f:
+            if cur not in (f.get("last_sha"), f.get("next_sha")):
+                raise ValueError(f"{rel}: 이 주제가 마지막으로 고친 뒤 다른 곳에서 바뀜 — 대화 세션에서 확인 필요")
+        else:
             bk = sc / tid / "backup" / rel
-            bk.parent.mkdir(parents=True, exist_ok=True)
-            bk.write_bytes(raw)
-        f = man["files"][rel] = {"base_sha": _sha(raw) if exists else None, "created": not exists, "enc": enc}
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".runner.tmp")
-    tmp.write_bytes(out)
-    os.replace(tmp, path)
-    f["last_sha"] = _sha(out)
-    _dev_save(mpath, man)
-    locks[rel] = tid
-    _dev_save(sc / "locks.json", locks)
-    # 원본 대비 diff(운영 패치용)를 작업물 patch/에
-    base = (sc / tid / "backup" / rel)
-    base_text = _decode(base.read_bytes())[0].replace("\r\n", "\n") if base.exists() else ""
-    lines = list(difflib.unified_diff(base_text.splitlines(True), work.splitlines(True), f"a/{rel}", f"b/{rel}"))
-    dest = (ws or (sc / tid)) / "patch" / (rel.replace("/", "__") + ".diff")
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(f"# 원본 SHA256 {f['base_sha'] or '(새 파일)'}\n# 수정 SHA256 {f['last_sha']}\n# 인코딩 {enc} · 줄바꿈 {'CRLF' if crlf else 'LF'}\n" + "".join(lines), encoding="utf-8")
+            if exists:
+                bk.parent.mkdir(parents=True, exist_ok=True)
+                if bk.exists() and _sha(bk.read_bytes()) != cur:  # 앞 회차 백업은 덮어쓰지 않고 이름을 바꿔 둔다
+                    bk.replace(bk.with_name(f"{bk.name}.prev-{now():%Y%m%d%H%M%S}"))
+                if not bk.exists():
+                    bk.write_bytes(raw)
+            # diff 이름: 앞 회차(정리 뒤 재작업) diff가 작업물에 있으면 덮어쓰지 않고 다음 번호로
+            pdir = (ws or (sc / tid)) / "patch"
+            stem = rel.replace("/", "__")
+            name, k = f"{stem}.diff", 2
+            while (pdir / name).exists():
+                name, k = f"{stem}.{k}.diff", k + 1
+            f = man["files"][rel] = {"base_sha": cur, "created": not exists, "enc": enc, "diff": name, "last_sha": cur}
+        f["next_sha"] = _sha(out)
+        _dev_save(mpath, man)
+        locks[rel] = tid
+        _dev_save(sc / "locks.json", locks)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".runner.tmp")
+        tmp.write_bytes(out)
+        os.replace(tmp, path)
+        f["last_sha"] = f.pop("next_sha")
+        _dev_save(mpath, man)
+        # 원본 대비 diff(운영 패치용)를 작업물 patch/에
+        base = sc / tid / "backup" / rel
+        base_text = _decode(base.read_bytes())[0].replace("\r\n", "\n") if base.exists() and not f.get("created") else ""
+        lines = list(difflib.unified_diff(base_text.splitlines(True), out_text.replace("\r\n", "\n").splitlines(True), f"a/{rel}", f"b/{rel}"))
+        dest = (ws or (sc / tid)) / "patch" / (f.get("diff") or (rel.replace("/", "__") + ".diff"))
+        note = f"diff patch/{dest.name}"
+        try:  # 파일은 이미 바뀌었다: diff를 못 써도 '거부'로 기록하지 않고 알린다(다음 수정 때 다시 쓴다)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(f"# 원본 SHA256 {f['base_sha'] or '(새 파일)'}\n# 수정 SHA256 {f['last_sha']}\n# 인코딩 {enc} · 줄바꿈 {nl}\n" + "".join(lines), encoding="utf-8")
+        except OSError as exc:
+            note = f"diff 쓰기 실패({exc}) — 수정은 적용됨"
     add = sum(1 for x in lines if x.startswith("+") and not x.startswith("+++"))
     rem = sum(1 for x in lines if x.startswith("-") and not x.startswith("---"))
-    return f"{rel} 수정(원본 대비 +{add}/-{rem}줄) · diff patch/{dest.name}"
+    return f"{rel} 수정(원본 대비 +{add}/-{rem}줄) · {note}"
 
 
-def _build_dirs(dev: dict) -> set:
-    runs = Path(dev["root"]) / "harness" / "runs"
-    return {str(p) for p in runs.glob("build-*") if p.is_dir()} if runs.is_dir() else set()
+def _is_build_dir(dev: dict, d) -> bool:
+    """지워도 되는 빌드 사본인가: <개발 트리>/harness/runs/build-* 바로 아래 실제 폴더(링크·정션 아님)여야 한다(2026-10-03 검토 P2)."""
+    try:
+        p = Path(d)
+        runs = (Path(dev["root"]) / "harness" / "runs").resolve()
+        return (p.name.startswith("build-") and p.is_dir() and not p.is_symlink() and not p.is_junction()
+                and p.resolve() == runs / p.name)
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
 
 
-def dev_run(agent_id: str, tid: str, a: dict) -> str:
-    """정해진 이름의 명령만 실행한다(빌드·검사). 결과 꼬리를 돌려주고 전체 기록은 scratch/logs에. 실행기가 만든 빌드 사본만 관리한다."""
+def _rm_build(dev: dict, d) -> bool:
+    if not _is_build_dir(dev, d):
+        return False
+    shutil.rmtree(d, ignore_errors=True)
+    return True
+
+
+def _build_result(dev: dict, text: str, since: datetime | None = None) -> tuple[dict, str | None]:
+    """빌드 명령 출력 끝의 결과(JSON)에 적힌 경로로 이번 빌드 사본 폴더를 찾는다.
+    폴더 비교로 짐작하지 않는다(같은 때 돈 다른 세션의 빌드를 지우지 않게, 2026-10-03 검토 P2)."""
+    i = text.rfind("\n{")
+    chunk = text[i + 1:] if i >= 0 else (text if text.lstrip().startswith("{") else "")
+    j = chunk.rfind("}")
+    try:
+        res = json.loads(chunk[:j + 1]) if j >= 0 else {}
+    except ValueError:
+        res = {}
+    if not isinstance(res, dict):
+        res = {}
+    for key in ("log", "artifact"):
+        v = res.get(key)
+        if not v:
+            continue
+        p = Path(str(v))
+        for cand in (p, *p.parents):
+            if cand.name.startswith("build-"):
+                # 내 빌드 확인: 그 폴더의 result.json이 있고, 거기 적힌 경로가 그 폴더 안이고, 이번 실행 뒤에 만들어진 폴더여야 한다
+                # (출력에 끼어든 다른 JSON으로 다른 세션 빌드를 내 것으로 잡아 지우지 않게)
+                saved = _dev_json(cand / "result.json", None) if _is_build_dir(dev, cand) else None
+                inside = isinstance(saved, dict) and str(saved.get(key) or "").replace("/", "\\").lower().startswith(str(cand).replace("/", "\\").lower() + "\\")
+                try:
+                    fresh = inside and (since is None or datetime.fromtimestamp(cand.stat().st_ctime, KST) >= since - timedelta(seconds=5))
+                except OSError:
+                    fresh = False
+                if inside and fresh:
+                    return saved, str(cand)
+                break
+    return res, None
+
+
+def _run_tree(argv: list, cwd: str, timeout: float, out_path: Path) -> tuple[int, bytes]:
+    """명령 실행. 비밀번호는 넘기지 않고(ai_env), 시간 초과면 자식(MSBuild 등)까지 모두 끝낸다(2026-10-03 검토).
+    출력은 파이프가 아니라 파일로 받는다: 빌드가 띄운 상주 프로세스(mspdbsrv 등)가 출력을 물고 있어도 명령이 끝나면 바로 돌아온다."""
+    env = {**ai_env(), "MSBUILDDISABLENODEREUSE": "1"}
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "wb") as fh:
+        p = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=fh, stderr=subprocess.STDOUT, env=env, creationflags=NO_WINDOW)
+        try:
+            rc = p.wait(timeout=timeout)
+            tail = b""
+        except subprocess.TimeoutExpired:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True, creationflags=NO_WINDOW)
+            p.kill()
+            try:
+                p.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                pass
+            rc, tail = -1, "\n[시간 초과 — 프로세스 트리 종료]".encode("utf-8")
+    try:
+        out = out_path.read_bytes()
+    except OSError:
+        out = b""
+    return rc, out + tail
+
+
+def dev_run(agent_id: str, tid: str, a: dict) -> tuple[str, bool]:
+    """정해진 이름의 명령만 실행한다(빌드·검사) → (결과 꼬리, 성공 여부). 전체 기록은 scratch/logs에.
+    빌드 사본은 이 명령 결과에 적힌 폴더만 관리한다(성공한 최신 하나만 남기고 나머지는 지운다)."""
     dev = dev_cfg(agent_id)
     if not dev:
         raise ValueError("이 작업자는 개발 명령을 돌릴 수 없음")
@@ -449,38 +624,86 @@ def dev_run(agent_id: str, tid: str, a: dict) -> str:
     if not argv:
         raise ValueError(f"없는 명령 '{name}' (가능: {', '.join(dev.get('commands') or {})})")
     sc = dev_scratch(dev)
-    before = _build_dirs(dev)
     t0 = now()
-    try:
-        r = subprocess.run(argv, cwd=dev["root"], capture_output=True, timeout=int(dev.get("timeout_min", 45)) * 60, env=child_env(), creationflags=NO_WINDOW)
-        rc, out = r.returncode, (r.stdout + b"\n" + r.stderr)
-    except subprocess.TimeoutExpired as exc:
-        rc, out = -1, (exc.stdout or b"") + "\n[시간 초과]".encode("utf-8")
-    text = _decode(out)[0] if out else ""
-    secs = int((now() - t0).total_seconds())
     log_path = sc / tid / "logs" / f"{t0:%Y%m%d-%H%M%S}-{name}.log"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
+    raw_path = log_path.with_suffix(".raw")
+    rc, out = _run_tree(argv, dev["root"], float(dev.get("timeout_min", 45)) * 60, raw_path)
+    text = _decode_out(out) if out else ""
+    secs = int((now() - t0).total_seconds())
     log_path.write_text(text, encoding="utf-8")
-    new_dirs = sorted(_build_dirs(dev) - before)
-    mpath = sc / tid / "manifest.json"
-    man = _dev_json(mpath, {"files": {}, "builds": [], "created": now().isoformat(timespec="seconds")})
+    try:
+        raw_path.unlink(missing_ok=True)
+    except OSError:
+        pass  # 빌드가 띄운 상주 프로세스가 아직 잡고 있음 — 다음 정리 때 지운다
+    res, run_dir = _build_result(dev, text, t0)
+    ok = rc == 0 and (not run_dir or res.get("status", "PASS") == "PASS")
     artifact = ""
-    for d in new_dirs:
-        res = _dev_json(Path(d) / "result.json", {})
-        ok = rc == 0 and res.get("status", "PASS") == "PASS"
-        man["builds"].append({"dir": d, "cmd": name, "ok": ok, "at": t0.isoformat(timespec="seconds"), "artifact": res.get("artifact"), "sha256": res.get("sha256")})
-        if ok and res.get("artifact"):
-            artifact = f"\n빌드 결과물: {res['artifact']} (SHA256 {str(res.get('sha256'))[:16]}…)"
-    # 정리: 실패했거나 더 새 성공 빌드로 대체된 사본은 바로 지운다(성공한 최신 하나만 실게임 시험용으로 남김)
-    oks = [b for b in man["builds"] if b.get("ok") and not b.get("removed")]
-    keep = oks[-1]["dir"] if oks else None
-    for b in man["builds"]:
-        if not b.get("removed") and b["dir"] != keep:
-            shutil.rmtree(b["dir"], ignore_errors=True)
-            b["removed"] = True
-    _dev_save(mpath, man)
+    with dev_lock(sc, wait=900):  # 빌드는 끝났다: 기록을 못 남기면 사본이 추적되지 않으므로 넉넉히 기다린다
+        mpath = sc / tid / "manifest.json"
+        man = _dev_json(mpath, {"files": {}, "builds": [], "created": now().isoformat(timespec="seconds")})
+        if run_dir:
+            man["builds"].append({"dir": run_dir, "cmd": name, "ok": ok, "at": t0.isoformat(timespec="seconds"), "artifact": res.get("artifact"), "sha256": res.get("sha256")})
+            if ok and res.get("artifact"):
+                artifact = f"\n빌드 결과물: {res['artifact']} (SHA256 {str(res.get('sha256'))[:16]}…)"
+        elif name.startswith("build"):
+            artifact = "\n(빌드 결과에서 사본 폴더를 찾지 못함 — 사본은 지우지 않고 그대로 둠)"
+        # 정리: 실패했거나 더 새 성공 빌드로 대체된 사본은 바로 지운다(성공한 최신 하나만 실게임 시험용으로 남김)
+        oks = [b for b in man["builds"] if b.get("ok") and not b.get("removed")]
+        keep = oks[-1]["dir"] if oks else None
+        for b in man["builds"]:
+            if not b.get("removed") and b["dir"] != keep:
+                _rm_build(dev, b["dir"])
+                b["removed"] = True
+        _dev_save(mpath, man)
     tail = text.strip()[-2500:]
-    return f"[{name}] 종료 코드 {rc} · {secs}초{artifact}\n{tail}\n(전체 기록: {log_path})"
+    return f"[{name}] 종료 코드 {rc} · {secs}초{artifact}\n{tail}\n(전체 기록: {log_path})", ok
+
+
+def _dev_revert(dev: dict, tid: str, rel: str | None, force: bool) -> list[str]:
+    sc = dev_scratch(dev)
+    mpath = sc / tid / "manifest.json"
+    man = _dev_json(mpath, None)
+    if not man:
+        return []
+    msgs = []
+    locks = _dev_json(sc / "locks.json", {})
+    root = Path(dev["root"]).resolve()
+    want = str(rel).replace("\\", "/").strip().lstrip("/") if rel else None
+    if want:
+        try:  # 고칠 때처럼 실제 경로(실제 대소문자)로 맞춘다
+            want = (root / want).resolve().relative_to(root).as_posix()
+        except (OSError, ValueError):
+            pass
+    for name, f in list(man["files"].items()):
+        if want and name != want:
+            continue
+        path = (root / name).resolve()
+        if root not in path.parents:
+            msgs.append(f"{name}: 개발 트리 밖 경로라 되돌리지 않음")
+            continue
+        cur = _sha(path.read_bytes()) if path.exists() else None
+        if cur not in (f.get("last_sha"), f.get("next_sha")) and not force:
+            msgs.append(f"{name}: 다른 곳에서 바뀌어 되돌리지 않음")
+            continue
+        bk = sc / tid / "backup" / name
+        if f.get("created"):
+            path.unlink(missing_ok=True)
+        elif bk.exists():
+            tmp = path.with_name(path.name + ".runner.tmp")
+            tmp.write_bytes(bk.read_bytes())
+            os.replace(tmp, path)
+        else:
+            msgs.append(f"{name}: 백업이 없어 되돌리지 못함")
+            continue
+        msgs.append(f"{name}: 원본으로 되돌림")
+        man["files"].pop(name, None)
+        if locks.get(name) == tid:
+            locks.pop(name)
+    if want and not msgs:
+        msgs.append(f"{want}: 이 주제가 고친 파일이 아님")
+    _dev_save(mpath, man)
+    _dev_save(sc / "locks.json", locks)
+    return msgs
 
 
 def dev_revert(agent_id: str | None, tid: str, rel: str | None = None, force: bool = False) -> list[str]:
@@ -488,39 +711,23 @@ def dev_revert(agent_id: str | None, tid: str, rel: str | None = None, force: bo
     devs = [dev_cfg(agent_id)] if agent_id else [d for d in (a.get("dev") for a in node.my_agents(CFG).values()) if d]
     msgs = []
     for dev in [d for d in devs if d]:
-        sc = dev_scratch(dev)
-        mpath = sc / tid / "manifest.json"
-        man = _dev_json(mpath, None)
-        if not man:
-            continue
-        locks = _dev_json(sc / "locks.json", {})
-        for name, f in list(man["files"].items()):
-            if rel and name != rel:
-                continue
-            path = Path(dev["root"]) / name
-            cur = _sha(path.read_bytes()) if path.exists() else None
-            if cur != f.get("last_sha") and not force:
-                msgs.append(f"{name}: 다른 곳에서 바뀌어 되돌리지 않음")
-                continue
-            bk = sc / tid / "backup" / name
-            if f.get("created"):
-                path.unlink(missing_ok=True)
-            elif bk.exists():
-                path.write_bytes(bk.read_bytes())
-            msgs.append(f"{name}: 원본으로 되돌림")
-            man["files"].pop(name, None)
-            if locks.get(name) == tid:
-                locks.pop(name)
-        _dev_save(mpath, man)
-        _dev_save(sc / "locks.json", locks)
+        with dev_lock(dev_scratch(dev)):
+            msgs += _dev_revert(dev, tid, rel, force)
     return msgs
+
+
+def dev_passed(t: dict) -> bool:
+    """정리해도 되는 '통과' 상태인가 — 지금 상태로만 판정한다(2026-10-03 검토 P1: ★4 통과 이력이 있어도 '문제 있음'·'수정'으로
+    진행에 되돌아와 다시 고치는 중이면 백업·diff를 지우지 않는다). 완료, ★5·★7·★9 대기, 배포본 작성·운영 반영 단계."""
+    return t.get("status") == "done" or (t.get("gate") or {}).get("n") in (5, 7, 9) or t.get("stage") in ("pack", "deploy")
 
 
 def dev_cleanup(data: dict) -> list[str]:
     """정리 규칙(아키텍트 지시 2026-10-03: 시험 뒤에는 기술 문서와 diff만 남긴다).
-    - 주제가 ★4를 통과했거나(★5 이후) 완료되면: 개발 트리 변경은 그대로 두고 백업·로그·빌드 사본을 지운다
-    - 보류·삭제·사라진 주제: 그 뒤 손대지 않은 파일은 원본으로 되돌린 뒤 지운다
-    - 7일 지난 로그·빌드 사본은 지운다 · 전체가 상한(GB)을 넘으면 오래된 빌드부터 지운다"""
+    - 지금 ★4를 통과한 상태(★5 이후)거나 완료면: 개발 트리 변경은 그대로 두고 백업·로그·빌드 사본을 지운다
+    - 보류·삭제된 주제: 그 뒤 손대지 않은 파일은 원본으로 되돌린 뒤 지운다. 되돌리지 못한 파일이 있으면 그 백업은 남긴다
+    - 7일 지난 로그·빌드 사본은 지운다 · 전체가 상한(GB)을 넘으면 오래된 빌드부터 지운다
+    - 지우는 빌드 사본은 <개발 트리>/harness/runs/build-* 아래 실제 폴더만(링크·다른 경로는 건드리지 않는다)"""
     out = []
     topics = {t["id"]: t for t in data.get("topics", [])}
     for aid, a in node.my_agents(CFG).items():
@@ -530,56 +737,76 @@ def dev_cleanup(data: dict) -> list[str]:
         sc = dev_scratch(dev)
         if not sc.is_dir():
             continue
-        locks = _dev_json(sc / "locks.json", {})
-        cutoff = now() - timedelta(days=7)
-        for d in [p for p in sc.iterdir() if p.is_dir()]:
-            tid, man = d.name, _dev_json(d / "manifest.json", {"files": {}, "builds": []})
-            t = topics.get(tid)
-            passed = t and (t.get("status") == "done" or any(h.get("n") in (4, 40) and h.get("act") in ("open5", "done", "followup") for h in t.get("gate_history") or [])
-                            or (t.get("gate") or {}).get("n") in (5, 7, 9) or t.get("stage") in ("pack", "deploy"))
-            if not t:
-                continue  # 게시본에 없는 주제(읽기 오류 등)는 건드리지 않는다
-            gone = t.get("status") in ("parked", "dropped")
-            if gone:
-                out += [f"{tid} {m}" for m in dev_revert(aid, tid)]
-            if passed or gone:
-                for b in man.get("builds", []):
-                    if not b.get("removed"):
-                        shutil.rmtree(b["dir"], ignore_errors=True)
-                for name in list(man.get("files", {})):
-                    if locks.get(name) == tid:
-                        locks.pop(name)
-                shutil.rmtree(d, ignore_errors=True)
-                out.append(f"{tid} 정리({'완료·★4 통과' if passed else '보류·삭제'}): 백업·로그·빌드 사본 삭제, 문서·diff는 작업물에 남김")
-                continue
-            for b in man.get("builds", []):  # 7일 지난 빌드 사본
-                if not b.get("removed") and b.get("at", "") < cutoff.isoformat():
-                    shutil.rmtree(b["dir"], ignore_errors=True)
+        with dev_lock(sc):
+            out += _dev_cleanup_one(dev, sc, topics)
+    return out
+
+
+def _dev_cleanup_one(dev: dict, sc: Path, topics: dict) -> list[str]:
+    out = []
+    locks = _dev_json(sc / "locks.json", {})
+    cutoff = now() - timedelta(days=7)
+    for d in [p for p in sc.iterdir() if p.is_dir()]:
+        tid, man = d.name, _dev_json(d / "manifest.json", {"files": {}, "builds": []})
+        t = topics.get(tid)
+        if not t:
+            continue  # 게시본에 없는 주제(읽기 오류 등)는 건드리지 않는다
+        passed = dev_passed(t)
+        gone = t.get("status") in ("parked", "dropped")
+        if gone:
+            _dev_save(sc / "locks.json", locks)
+            out += [f"{tid} {m}" for m in _dev_revert(dev, tid, None, False)]
+            man = _dev_json(d / "manifest.json", man)
+            locks = _dev_json(sc / "locks.json", locks)
+        if passed or gone:
+            for b in man.get("builds", []):
+                if not b.get("removed"):
+                    _rm_build(dev, b["dir"])
                     b["removed"] = True
-            for lg in (d / "logs").glob("*.log") if (d / "logs").is_dir() else []:
-                if datetime.fromtimestamp(lg.stat().st_mtime, KST) < cutoff:
-                    lg.unlink(missing_ok=True)
-            _dev_save(d / "manifest.json", man)
-        _dev_save(sc / "locks.json", locks)
-        # 용량 상한: 오래된 빌드 사본부터
-        cap = float(dev.get("scratch_cap_gb", 20)) * 1024 ** 3
-        def size(p: Path) -> int:
-            return sum(f.stat().st_size for f in p.rglob("*") if f.is_file()) if p.exists() else 0
-        builds = sorted(((d.name, b) for d in sc.iterdir() if d.is_dir() for b in _dev_json(d / "manifest.json", {}).get("builds", []) if not b.get("removed")),
-                        key=lambda x: x[1].get("at", ""))
-        total = size(sc) + sum(size(Path(b["dir"])) for _, b in builds)
-        for tid, b in builds:
-            if total <= cap:
-                break
-            s = size(Path(b["dir"]))
-            shutil.rmtree(b["dir"], ignore_errors=True)
-            total -= s
-            m = _dev_json(sc / tid / "manifest.json", {})
-            for x in m.get("builds", []):
-                if x.get("dir") == b["dir"]:
-                    x["removed"] = True
-            _dev_save(sc / tid / "manifest.json", m)
-            out.append(f"{tid} 용량 상한으로 빌드 사본 삭제: {b['dir']}")
+            left = list(man.get("files", {})) if gone else []
+            if left:  # 되돌리지 못한 파일: 백업·기록은 남기고 로그·빌드만 지운다
+                shutil.rmtree(d / "logs", ignore_errors=True)
+                _dev_save(d / "manifest.json", man)
+                out.append(f"{tid} 정리(보류·삭제): 되돌리지 못한 파일 {len(left)}개({', '.join(left[:3])}) — 백업 유지, 로그·빌드 사본만 삭제")
+                continue
+            for name in list(man.get("files", {})):
+                if locks.get(name) == tid:
+                    locks.pop(name)
+            shutil.rmtree(d, ignore_errors=True)
+            out.append(f"{tid} 정리({'완료·★4 통과' if passed else '보류·삭제'}): 백업·로그·빌드 사본 삭제, 문서·diff는 작업물에 남김")
+            continue
+        for b in man.get("builds", []):  # 7일 지난 빌드 사본
+            if not b.get("removed") and b.get("at", "") < cutoff.isoformat():
+                _rm_build(dev, b["dir"])
+                b["removed"] = True
+        for lg in [*(d / "logs").glob("*.log"), *(d / "logs").glob("*.raw")] if (d / "logs").is_dir() else []:
+            try:
+                if lg.suffix == ".raw" or datetime.fromtimestamp(lg.stat().st_mtime, KST) < cutoff:
+                    lg.unlink(missing_ok=True)  # .raw는 명령이 끝난 뒤 남은 출력 사본(내용은 .log에 있음)
+            except OSError:
+                pass
+        _dev_save(d / "manifest.json", man)
+    _dev_save(sc / "locks.json", locks)
+    # 용량 상한: 오래된 빌드 사본부터
+    cap = float(dev.get("scratch_cap_gb", 20)) * 1024 ** 3
+
+    def size(p: Path) -> int:
+        return sum(f.stat().st_size for f in p.rglob("*") if f.is_file()) if p.exists() else 0
+    builds = sorted(((d.name, b) for d in sc.iterdir() if d.is_dir() for b in _dev_json(d / "manifest.json", {}).get("builds", []) if not b.get("removed")),
+                    key=lambda x: x[1].get("at", ""))
+    total = size(sc) + sum(size(Path(b["dir"])) for _, b in builds)
+    for tid, b in builds:
+        if total <= cap:
+            break
+        s = size(Path(b["dir"]))
+        _rm_build(dev, b["dir"])
+        total -= s
+        m = _dev_json(sc / tid / "manifest.json", {})
+        for x in m.get("builds", []):
+            if x.get("dir") == b["dir"]:
+                x["removed"] = True
+        _dev_save(sc / tid / "manifest.json", m)
+        out.append(f"{tid} 용량 상한으로 빌드 사본 삭제: {b['dir']}")
     return out
 
 
@@ -694,10 +921,22 @@ READ_HINT = {
 }
 
 
+def dev_blocked(job: dict) -> str | None:
+    """개발 트리 행동을 막는 경우(2026-10-03 검토 P2): 계획 모드, 배포본 작성·운영 반영 단계, 관문 대기·실게임 대화 단계."""
+    t = job.get("topic") or {}
+    if job.get("mode") != "impl":
+        return "계획 모드에서는 개발 트리를 고치거나 빌드하지 않음(진행 베이스·교차 검토 뒤 작업 모드에서)"
+    if t.get("stage") in ("pack", "deploy"):
+        return "배포본 작성·운영 반영 단계에서는 개발 트리를 고치지 않음"
+    if t.get("gate") or t.get("live_session"):
+        return "관문 대기·실게임 대화 단계에서는 자동 실행기가 개발 트리를 고치지 않음"
+    return None
+
+
 def dev_section(job: dict) -> str:
     """개발 트리 권한이 있는 작업자(개발컴 Claude)가 이 단계 담당일 때: 실제로 고치고 빌드·시험하는 방법."""
     dev = dev_cfg(job["agent"])
-    if not dev or job["agent"] != stage_doer(job.get("topic") or {}):
+    if not dev or job["agent"] != stage_doer(job.get("topic") or {}) or dev_blocked(job):
         return ""
     cmds = "\n".join(f"  - `{k}`" for k in (dev.get("commands") or {}))
     return f"""## 개발 트리 직접 수정·빌드·시험 (아키텍트 승인 2026-10-03, 개발컴 격리 개발 트리만)
@@ -1221,17 +1460,23 @@ def apply(job: dict, result: dict, data: dict | None = None) -> tuple[list[str],
                 if agent != stage_doer(job.get("topic") or {}):
                     failed.append(f"{typ} 거부: 이 단계 담당만 할 수 있음")
                     continue
+                why = dev_blocked(job)
+                if why:
+                    node.add_topic_record(CFG, tid, agent, "memo", body=f"[실행기 {typ} 거부] {why}")
+                    failed.append(f"{typ} 거부: {why}")
+                    continue
                 try:
+                    ok = True
                     if typ == "dev_edit":
                         msg = dev_edit(agent, tid, a, job.get("ws"))
                     elif typ == "dev_run":
-                        msg = dev_run(agent, tid, a)
+                        msg, ok = dev_run(agent, tid, a)
                     else:
                         msg = "; ".join(dev_revert(agent, tid, a.get("file"))) or "되돌릴 것 없음"
                     node.add_topic_record(CFG, tid, agent, "memo", body=f"[실행기 {typ}] {msg}"[:6000])
-                    done.append(typ)
+                    done.append(typ if ok else f"{typ}(실패)")
                     continue
-                except ValueError as exc:
+                except Exception as exc:  # noqa: BLE001 — 형식 오류·디스크·권한·실행 오류도 실행 전체를 멈추지 않고 거부로 기록
                     node.add_topic_record(CFG, tid, agent, "memo", body=f"[실행기 {typ} 거부] {exc}"[:2000])
                     failed.append(f"{typ} 거부: {exc}")
                     continue
@@ -1514,9 +1759,16 @@ def run_job(j: dict, data: dict, state: dict) -> bool:
     acts = [a for a in result.get("actions", []) if isinstance(a, dict)]
     settled = any(a.get("type") in ("ask", "handoff", "request", "reply") or (a.get("type") == "state" and a.get("status") in ("done", "parked")) for a in acts)
     backoff = None
-    if any(x in ("dev_edit", "dev_run", "dev_revert") for x in done):
-        st["idle_runs"] = 0  # 실제로 고치거나 빌드했다: 결과를 보고 이어서 하도록 다음 동기화 때 바로 깨운다
+    dev_did = any(x in ("dev_edit", "dev_run", "dev_revert") for x in done)
+    dev_bad = "dev_run(실패)" in done or any(x.startswith(("dev_edit 거부", "dev_run 거부", "dev_revert 거부")) for x in failed)
+    if dev_did or dev_bad:
+        # 실제로 고치거나 빌드했다: 결과를 보고 이어서 하도록 다음 동기화 때 바로 깨운다.
+        # 빌드 실패·거부가 연달아 세 번 넘으면 30분 → 2시간 간격으로(같은 실패로 매분 돌지 않게, 2026-10-03 검토 P2)
+        st["idle_runs"] = 0
+        st["dev_fail"] = (st.get("dev_fail", 0) + 1) if dev_bad and not ("dev_run" in done) else 0
         st["cont"] = st.get("cont", 0) + 1
+        if st["dev_fail"] >= 3:
+            backoff = 30 if st["dev_fail"] <= 4 else 120
     elif settled:
         st["idle_runs"] = 0
     else:
