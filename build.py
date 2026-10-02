@@ -641,13 +641,82 @@ def gate_decisions(topics: list[dict], curated: dict, known: set) -> list[dict]:
                         "question": f"[{g.get('step', g['n'])}/9 {g['label']}] {title}\n\n{(g.get('summary') or '(AI 결과 요약 없음 — 주제 히스토리를 확인하세요)').strip()}",
                         "options": g.get("options") or []})
         for hh in t.get("gate_history") or []:  # 답한 관문: 다음에 움직일 작업자 앞으로
-            nxt = {"test": stage_owner("test", t, known), "pack": stage_owner("pack", t, known), "deploy": stage_owner("deploy", t, known)}.get(hh.get("act")) or t.get("assignee")
+            # AI가 할 일이 있는 답(진행·시험·배포본·운영 반영)만 작업자를 깨운다. ★4 통과→★5, 완료, 보류, 후속 주제, ★7 메모는 깨우지 않는다
+            if hh.get("act") not in ("work", "test", "pack", "deploy"):
+                nxt = None
+            else:
+                nxt = {"test": stage_owner("test", t, known), "pack": stage_owner("pack", t, known), "deploy": stage_owner("deploy", t, known)}.get(hh.get("act")) or t.get("assignee")
             out.append({"id": hh["id"], "kind": "gate", "gate": hh["n"], "owner": "user", "task_id": t["id"], "since": hh.get("opened_at"), "_author": nxt,
                         "question": f"[{4 if hh['n'] == 40 else hh['n']}/9 {GATE_NAME.get(hh['n'], '관문')}] {title}\n\n{(hh.get('summary') or '').strip()}", "options": []})
     return out
 
 
 GATE_NAME = {4: "실게임 시험", 5: "배포본 결정", 7: "운영 반영 승인", 9: "완료 확정", 40: "결과 확인"}
+
+STALL_SKIP_DONE = "즉시 완료 확정(남은 단계 건너뜀)"
+
+
+def stall_decisions(topics: list[dict], agents: list[dict], holds: dict, curated: dict, locks: dict) -> list[dict]:
+    """멈춤 감시(2026-10-03 전수 모의 검사): 어느 단계에서 멈추든 아키텍트가 찾아다니지 않게, 멈춘 사유를 ★ 결정으로 올린다.
+    사유: AI 보류 제안 · 실게임 수정 대화 필요 · 차례 작업자 잠김 · 그 PC 신호 없음(60분) · 로그인 만료 등 실행 오류 ·
+    실행기 멈춤(같은 사유 반복 건너뜀 / 처리 뒤 변화 없음) · 하루 실행 한도. 답하면 그 사유의 같은 결정은 다시 묻지 않는다."""
+    from topics import to_dt
+    answered = {d.get("id"): d for d in curated["decisions_answered"]}
+    by_id = {a["id"]: a for a in agents}
+    now_dt = datetime.now(timezone(timedelta(hours=9)))
+    name = lambda aid: f"{(by_id.get(aid) or {}).get('pc_label', '')} {(by_id.get(aid) or {}).get('label') or aid}".strip()
+    out = []
+    for t in topics:
+        if t.get("status") not in ("new", "triage", "ready", "active"):
+            continue
+        tid, who = t["id"], t.get("turn")
+        if tid in holds:
+            continue  # 대화 세션이 잡고 처리 중이면 멈춤이 아니다
+        step = t.get("step") or {}
+        where = f"{step.get('n', 2)}/9 {step.get('label', '진행')}"
+        kind, why, since, retry = None, "", None, False
+        if t.get("park_proposed"):
+            p = t["park_proposed"]
+            kind, why, since = "park", f"{name(p['by'])}이(가) 보류를 제안했습니다: {p.get('body') or '(이유 없음)'}", p.get("ts")
+        elif t.get("live_session"):
+            kind, why, since = "live", "실게임 시험에서 나온 수정을 개발컴 Claude 대화에서 처리해야 합니다(자동 실행기는 손대지 않는 단계)", t.get("status_at")
+        elif who and who in by_id:
+            a = by_id[who]
+            q = a.get("queue") or {}
+            code = (q.get("items") or {}).get(tid)
+            seen = a.get("last_seen") or a.get("pc_synced")
+            health = a.get("health") or {}
+            if who in locks:
+                kind, why = "locked", f"차례인 {name(who)}이(가) 배정 잠금 상태입니다"
+            elif seen and (now_dt - to_dt(seen)).total_seconds() > 3600:
+                kind, why, since = "offline", f"{name(who)} PC 신호가 {int((now_dt - to_dt(seen)).total_seconds() // 3600)}시간 넘게 없습니다(그 PC 자동 동기화·실행기 확인 필요)", seen
+            elif health.get("needs_user"):
+                kind, why, since = "health", f"{name(who)} 실행 오류: {health.get('fix') or health.get('message') or '확인 필요'}", health.get("since") or health.get("at")
+            elif code == "stalled":
+                s = next((x for x in q.get("stalled") or [] if x.get("topic") == tid), {})
+                kind, why, since, retry = "stalled", f"실행기 멈춤: {s.get('reason') or '원인 미상'}", s.get("since"), True
+            elif code == "limit":
+                kind, why, retry = "limit", f"{name(who)}의 이 주제 오늘 실행 한도(10회)에 걸렸습니다", True
+        if not kind:
+            continue
+        since = since or t.get("status_at") or t.get("updated_at")
+        sid = f"S-{tid[2:]}-{kind}-{to_dt(since).astimezone(timezone(timedelta(hours=9))):%Y%m%d%H%M%S}"
+        if sid in answered:
+            continue
+        tries = sum(1 for k, d in answered.items() if str(k).startswith(f"S-{tid[2:]}-") and str(d.get("choice") or "").startswith("다시"))
+        if kind == "park":
+            opts = ["보류 승인", "다시 진행", STALL_SKIP_DONE]
+        elif kind == "live":
+            opts = ["개발컴 Claude 대화로 처리(대화 시작 문구 복사)", "보류", STALL_SKIP_DONE]
+        else:
+            others = [a["id"] for a in agents if a["id"] != who and a["id"] not in locks][:3]
+            opts = (["다시 시도"] if retry and tries < 3 else []) + [f"담당 바꾸기 → {name(x)} ({x})" for x in others] + \
+                   ["개발컴 Claude 대화로 처리(대화 시작 문구 복사)", "보류", STALL_SKIP_DONE]
+        out.append({"id": sid, "kind": "stall", "stall": kind, "owner": "user", "task_id": tid, "since": since,
+                    "_author": who if (retry and who in by_id) else None,
+                    "question": f"[멈춤 · {where}] {t.get('title') or tid}\n\n{why}" + (f"\n\n(다시 시도 {tries}번 했습니다 — 같은 사유로 3번 멈추면 다시 시도 대신 담당 바꾸기·대화 처리를 고르세요)" if tries else ""),
+                    "options": opts})
+    return out
 
 
 def load_topics(cfg: dict, log: SourceLog, node_records: list | None = None, known: set | None = None):
@@ -747,6 +816,10 @@ def build_payload(cfg: dict, pw: str | None = None) -> dict:
     curated["user_actions"] += health_actions(agents)
     topics = load_topics(cfg, log, node_records, {a["id"] for a in agents} or None)
     curated["decisions_needed"] += gate_decisions(topics, curated, {a["id"] for a in agents})
+    from topics import agent_locks, to_dt as _to_dt
+    _now = datetime.now(timezone(timedelta(hours=9)))
+    held = {h.get("topic") for h in (holds or []) if isinstance(h, dict) and h.get("until") and _to_dt(h["until"]) > _now}
+    curated["decisions_needed"] += stall_decisions(topics, agents, held, curated, agent_locks(cfg))
     works = load_works(cfg, topics, log)
     from topics import load_routing
     routing = load_routing(cfg)

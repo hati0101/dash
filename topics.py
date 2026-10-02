@@ -504,6 +504,38 @@ def cmd_import_proposals(args, cfg):
     print(f"메모 가져오기 {added}건")
 
 
+def cmd_spawn_followups(args, cfg):
+    """★결과 확인에서 '후속 구현 주제 만들기'를 고른 주제마다 새 구현 주제를 한 번 만든다(허브 전용, 중복 없음).
+    원래 주제는 완료로 끝나고, 새 주제는 배분 대상(새 주제)으로 들어가 구현 흐름(진행 → 자체 시험 → ★4 …)을 탄다."""
+    import hashlib
+    from node import collect_nodes
+    if (cfg.get("pc") or {}).get("role") != "hub":
+        sys.exit("후속 주제 만들기는 허브 PC에서만 실행합니다.")
+    pw = os.environ.get("REAL_OPS_PASSWORD") or (Path(args.password_file).read_text(encoding="utf-8").strip() if args.password_file else None)
+    nodes = collect_nodes(cfg, pw)
+    recs = [r for n in nodes for r in n.get("topic_records") or []]
+    known = {a for n in nodes for a in (n.get("agents") or {})} or None
+    state_path = topics_dir(cfg) / ".followups.json"
+    done = read_json(state_path, {})
+    added = 0
+    for t in merged_topics(topics_dir(cfg), cfg, recs, known):
+        last = (t.get("gate_history") or [None])[-1]
+        if not last or last.get("act") != "followup" or last["id"] in done:
+            continue
+        nid = f"T-{datetime.now(KST):%Y%m%d}-{hashlib.sha1(last['id'].encode()).hexdigest()[:6]}"
+        body = (f"원래 주제 {t['id']} '{t.get('title')}'의 조사·기획 결과를 구현한다(★결과 확인에서 아키텍트가 '후속 구현'을 골랐다).\n\n"
+                f"결과 요약:\n{(last.get('summary') or '').strip()[:3000]}\n\n아키텍트 메모: {last.get('note') or '(없음)'}\n\n"
+                f"원래 작업물: {t.get('work_id') or '(없음)'}")
+        topic = clean_topic({"id": nid, "title": f"후속 구현: {t.get('title')}"[:200], "body": body, "kind": "기능·개선",
+                             "priority": t.get("priority") or "P2", "prefer": "auto", "created_at": now_iso(), "from": "followup"})
+        if save_topic(cfg, topic, "후속 구현(★결과 확인)", {"origin_topic": t["id"], "origin_gate": last["id"]}):
+            added += 1
+            print(f"후속 구현 주제 {nid} ← {t['id']} {t.get('title')}")
+        done[last["id"]] = {"topic": nid, "at": now_iso()}
+    write_json(state_path, done)
+    print(f"후속 구현 주제 {added}건")
+
+
 # ---------------------------------------------------------------- 작성자 기록
 
 def author_file(cfg, tid: str, by: str) -> tuple[Path, dict]:
@@ -615,14 +647,37 @@ STAGE_STEP = {"work": (2, "진행"), "test": (3, "AI 자체 시험"), "pack": (6
 STAGE_GATE = {"test": 4, "pack": 7, "deploy": 9}  # 그 단계에서 AI가 끝내면 열리는 관문(진행은 자체 시험으로 자동으로 넘어감)
 
 
-# 시험·배포할 것이 없는 주제: 조사·분석 종류, 제목이 기획·구상·조사·연구·검토·연결 시험·메모 수집인 것
+# 판정 규칙 2판(2026-10-03 전수 모의 검사 반영): 이 시각 이후 기록부터 적용한다.
+# 그 전 기록까지 새 규칙으로 다시 판정하면 이미 답한 관문 번호가 바뀌어 관문이 다시 열리므로, 지난 흐름은 그때 규칙 그대로 둔다.
+RULES_V2_FROM = datetime(2026, 10, 3, 3, 0, tzinfo=timezone(timedelta(hours=9)))
+# 시험·배포할 것이 없는 주제(옛 규칙): 제목에 기획·검토 등이 있으면 조사로 봤다 → 구현 주제를 잘못 분류해 새 규칙에서는 쓰지 않음
 NO_TEST_RE = re.compile(r"기획|구상|조사|연구|분석|검토|여부|\[연결 시험\]|\[메모 수집\]|실사용 시험|자동실행 테스트")
+NO_TEST_META = re.compile(r"\[연결 시험\]|\[메모 수집\]")  # 새 규칙에서도 시험할 것이 없는 운영용 주제
 NO_TEST_SAID = re.compile(r"시험할 것 없음|배포할 것 없음|바꾼 파일 없음")
 
 
-def is_research(t: dict, body: str = "") -> bool:
-    """True면 2 진행을 끝냈을 때 3 자체 시험을 건너뛰고 바로 ★결과 확인. AI가 끝냄 요약에 '시험할 것 없음'이라고 적어도 같다."""
-    return t.get("kind") == "조사·분석" or bool(NO_TEST_RE.search(t.get("title") or "")) or bool(NO_TEST_SAID.search(body or ""))
+def is_research(t: dict, body: str = "", ts=None) -> bool:
+    """True면 2 진행을 끝냈을 때 3 자체 시험을 건너뛰고 바로 ★결과 확인.
+    새 규칙: 종류가 조사·분석이거나, AI가 끝냄 요약에 '시험할 것 없음'이라고 적었을 때만(제목 단어로는 판정하지 않음)."""
+    if t.get("kind") == "조사·분석" or NO_TEST_SAID.search(body or "") or NO_TEST_META.search(t.get("title") or ""):
+        return True
+    old_rule = ts is not None and to_dt(ts) < RULES_V2_FROM
+    return old_rule and bool(NO_TEST_RE.search(t.get("title") or ""))
+
+
+def finish_counts(by: str, stage: str, live: bool, t: dict, known, ts) -> bool:
+    """그 단계 담당의 끝냄만 다음 단계로 넘긴다(새 규칙). 교차 검토자·요청받은 작업자·남은 답 처리 작업의 done은 세지 않는다."""
+    if to_dt(ts) < RULES_V2_FROM:
+        return True  # 옛 기록은 그때 판정 그대로
+    if live:
+        return by in (LIVE_AGENT, t.get("assignee"))
+    if stage == "work":
+        return by in (t.get("assignee"), t.get("live_from"))
+    if stage in ("test", "pack"):
+        return by == stage_owner(stage, t, known)
+    if stage == "deploy":
+        return str(by).startswith("server-")
+    return False
 
 
 SKIP_DONE = "즉시 완료 확정(남은 단계 건너뜀)"  # 아키텍트가 어느 관문에서든 바로 끝낼 수 있게(2026-10-03)
@@ -637,7 +692,9 @@ def gate_options(n: int, t: dict, tested: bool = False) -> list[str]:
 
 
 def gate_action(n: int, ans: dict) -> str:
-    """관문 답 → 다음: work|pack|deploy|park|done|open5. 선택지 없이 메모만 오면 수정(진행으로)."""
+    """관문 답 → 다음: work|pack|deploy|park|done|open5|followup|regate. 선택지 없이 메모만 오면 수정(진행으로).
+    ★7에 메모만 오면 조용히 보류하지 않고 같은 관문을 메모와 함께 다시 연다(regate).
+    ★결과 확인의 '후속 구현 주제 만들기'는 이 주제를 끝내고 새 구현 주제를 만든다(followup)."""
     c = ans.get("choice") or ""
     if c.startswith("즉시 완료"):
         return "done"
@@ -648,9 +705,13 @@ def gate_action(n: int, ans: dict) -> str:
     if n == 5:
         return "pack" if "배포본" in c else "work"
     if n == 7:
-        return "deploy" if "서버컴" in c else "park"
+        return "deploy" if "서버컴" in c else "regate"
     if n == 40:
-        return "done" if "완료 확정" in c else "work"
+        if "완료 확정" in c:
+            return "done"
+        if c.startswith("후속 구현") and to_dt(ans.get("ts")) >= RULES_V2_FROM:
+            return "followup"
+        return "work"
     return "done" if c.startswith("완료") else "work"
 
 
@@ -658,7 +719,7 @@ def gate_id(n: int, tid: str, ts) -> str:
     return f"G{n}-{tid[2:]}-{to_dt(ts).astimezone(KST):%Y%m%d%H%M%S}"
 
 
-def run_gates(t: dict, finishes: list, answered: dict) -> dict:
+def run_gates(t: dict, finishes: list, answered: dict, known=None) -> dict:
     """AI의 끝냄 기록과 아키텍트 관문 답을 시간순으로 따라가 지금 단계·관문을 정한다."""
     # live: ★4 실게임(격리 서버) 시험이 열린 뒤 통과할 때까지는 개발컴 Claude 대화 세션 단계(아키텍트 결정 2026-10-02).
     # 이 동안 자동 실행기는 깨우지 않고, '문제 있음'으로 되돌아온 수정도 대화에서 고쳐 끝내면 자체 시험 없이 바로 ★4로 돌아온다.
@@ -670,8 +731,11 @@ def run_gates(t: dict, finishes: list, answered: dict) -> dict:
             if not nxt:
                 break
             ts, by, body = nxt
+            if not finish_counts(by, stage, live, t, known, ts):
+                fin = [f for f in fin if f is not nxt]  # 그 단계 담당이 아닌 작업자의 끝냄: 단계를 넘기지 않는다
+                continue
             since = ts
-            if stage == "work" and not live and not is_research(t, body):
+            if stage == "work" and not live and not is_research(t, body, ts):
                 stage = "test"  # 진행 끝 → AI 자체 시험(관문 없음)
                 continue
             n = (4 if live else 40) if stage == "work" else STAGE_GATE[stage]
@@ -687,9 +751,13 @@ def run_gates(t: dict, finishes: list, answered: dict) -> dict:
         history.append({**gate, "choice": ans.get("choice"), "note": ans.get("note"), "answered_at": ans.get("ts"), "act": act})
         since = ans.get("ts") or since
         prev, gate = gate, None
-        if act in ("park", "done"):
-            final, live = act, False
+        if act in ("park", "done", "followup"):
+            final, live = ("done" if act == "followup" else act), False
             break
+        if act == "regate":  # 메모만 온 ★7: 같은 관문을 메모와 함께 다시 연다(조용한 보류 방지)
+            gate = {**prev, "id": gate_id(prev["n"], t["id"], since), "opened_at": since, "summary": f"{prev.get('summary') or ''}\n\n[아키텍트 메모] {ans.get('note') or ''}".strip()}
+            gate.pop("legacy_id", None)
+            continue
         if act == "open5":
             live = False  # 실게임 통과 → 대화 세션 단계 끝, 다시 자동 흐름
             # ★5 번호는 ★4 번호에서 정한다(G4-… → G5-…). 대시보드가 ★4 통과 직후 ★5를 바로 띄워 이어서 답할 수 있게.
@@ -733,6 +801,7 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
     drops = {r.get("topic"): r for r in urec.get("topic_drop", [])}
     locked = frozenset(urec.get("agent_locks", {}) or {})  # 잠근 작업자: 교차 검토도 맡기지 않음
     gate_answers = {r.get("id"): r for r in urec.get("decisions_answered", []) if str(r.get("id", "")).startswith("G")}
+    stall_answers = {r.get("id"): r for r in urec.get("decisions_answered", []) if str(r.get("id", "")).startswith("S-")}
     by_topic: dict[str, list[dict]] = {}
     for r in node_records or []:
         by_topic.setdefault(r.get("topic"), []).append(r)
@@ -762,9 +831,14 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
         requests: dict[str, dict] = {}  # 요청 ID → 요청(담당은 그대로 두고 다른 작업자에게 자료·확인을 부탁)
         finishes: list[tuple] = []  # AI의 '끝냄'(state done) — 다음 관문을 여는 신호
         for _ts, a, r in sorted(events, key=lambda e: e[0] or ""):
-            if r.get("status") in STATUSES:
+            if r.get("status") == "parked" and AGENT_RE.match(a or "") and "-" in (a or "") and to_dt(_ts) >= RULES_V2_FROM:
+                # AI는 스스로 보류하지 못한다(새 규칙): '보류 제안'으로 남기고 아키텍트 결정(멈춤 결정)으로 올린다
+                t["park_proposed"] = {"by": a, "ts": _ts, "body": (r.get("body") or "")[:1500]}
+            elif r.get("status") in STATUSES:
                 t["status"] = r["status"]
                 t["status_at"] = _ts  # 실행기가 '이 PC에서 더 나중에 바꾼 상태'를 판단하는 기준
+                if r["status"] != "parked":
+                    t.pop("park_proposed", None)
                 if r["status"] == "done":
                     finishes.append((_ts, a, (r.get("body") or "")[:2000]))
             if r.get("work_id") and r.get("kind") in ("work", "handoff"):
@@ -806,7 +880,7 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
             if t["status"] == "new":
                 t["status"] = "triage"
         if finishes:  # 단계·관문: AI 끝냄은 다음 단계·관문으로, 완료는 아키텍트 ★9(조사·분석은 결과 확인)에서만
-            g = run_gates(t, finishes, gate_answers)
+            g = run_gates(t, finishes, gate_answers, known or peers)
             t["gate_history"] = g["history"]
             if g["live"] and not g["final"]:  # 실게임 시험 단계: 담당을 개발컴 Claude로 옮기고 대화 세션에서 진행
                 live_to = LIVE_AGENT if (known is None or LIVE_AGENT in known) else t.get("assignee")
@@ -834,6 +908,20 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
             if ed.get("kind"):
                 t["kind"] = ed["kind"]
             t["edited_at"] = ed.get("ts")
+        # 멈춤 결정(S-…) 답: 보류·보류 승인 → 보류, 즉시 완료 → 완료, 다시 진행·다시 시도 → 보류 제안 취소(실행기가 다시 깨움)
+        sans = sorted((r for k, r in stall_answers.items() if k.startswith(f"S-{t['id'][2:]}-")), key=lambda r: to_dt(r.get("ts")))
+        if sans and t.get("status") not in ("dropped",):
+            last_s = sans[-1]
+            ch = last_s.get("choice") or ""
+            if to_dt(last_s.get("ts")) >= to_dt(t.get("status_at")) or t.get("park_proposed"):
+                if ch.startswith("즉시 완료"):
+                    t["status"], t["confirmed"], t["status_at"], t["step"] = "done", True, last_s.get("ts"), None
+                    t.pop("gate", None); t.pop("live_session", None)
+                elif "보류" in ch:
+                    t["status"], t["status_at"], t["step"] = "parked", last_s.get("ts"), None
+                    t.pop("gate", None); t.pop("live_session", None)
+                if t.get("park_proposed") and to_dt(last_s.get("ts")) >= to_dt(t["park_proposed"]["ts"]):
+                    t.pop("park_proposed", None)  # 아키텍트가 답했으니 제안은 끝
         if t["id"] in drops:  # 삭제한 주제: 배분·실행 대상에서 빠지고 화면에서는 '삭제됨'에만 보인다
             t["status"], t["dropped_at"] = "dropped", drops[t["id"]].get("ts")
             t.pop("gate", None); t.pop("live_session", None); t["step"] = None
@@ -885,6 +973,8 @@ def review_partner(a: str | None, known: set | None, locked=frozenset()) -> str 
 def whose_turn(t: dict) -> str | None:
     if t["status"] in ("done", "parked", "backlog", "dropped", "review_user"):
         return None
+    if t.get("park_proposed"):
+        return None  # AI 보류 제안: 아키텍트 결정(멈춤 결정) 전까지 아무도 깨우지 않는다
     if t.get("live_session"):
         return t.get("assignee")  # 실게임 시험 단계: 개발컴 Claude 대화 세션(자동 실행기는 깨우지 않음)
     req = t.get("open_request")
@@ -1312,6 +1402,7 @@ def main():
     p.add_argument("--source", help="출처 표기(예: 스티커 메모(개발컴))")
     p = sub.add_parser("activate", help="미처리 주제를 착수 대상으로"); p.add_argument("id")
     sub.add_parser("import-proposals", help="각 PC 작업자가 올린 메모를 미처리 주제로 가져오기(허브)")
+    sub.add_parser("spawn-followups", help="★결과 확인에서 '후속 구현'을 고른 주제의 새 구현 주제 만들기(허브)")
     sub.add_parser("list")
     sub.add_parser("announce")
     p = sub.add_parser("tidy", help="자동 알림(DASH-*)·아키텍트 행동 사본(USR-*) 중 반영이 끝난 것을 수신함 done/으로 옮김")
@@ -1335,7 +1426,7 @@ def main():
     cfg = load_cfg()
     {"pull": cmd_pull, "add-blob": cmd_add_blob, "add": cmd_add, "list": cmd_list, "announce": cmd_announce,
      "triage": cmd_triage, "plan": cmd_plan, "note": cmd_note, "status": cmd_status, "comment": cmd_comment,
-     "dispatch": cmd_dispatch, "activate": cmd_activate, "import-proposals": cmd_import_proposals, "tidy": cmd_tidy}[args.cmd](args, cfg)
+     "dispatch": cmd_dispatch, "activate": cmd_activate, "import-proposals": cmd_import_proposals, "spawn-followups": cmd_spawn_followups, "tidy": cmd_tidy}[args.cmd](args, cfg)
 
 
 if __name__ == "__main__":

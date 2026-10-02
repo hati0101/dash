@@ -815,9 +815,9 @@ function todayCard() {
   const d = S.d, data = S.data;
   const items = [];
   // ★ 관문(실게임 시험·배포본 결정·운영 반영 승인·완료 확정·결과 확인)은 한 줄로 묶어 맨 위에
-  const gates = (data.decisions_needed || []).filter(q => q.kind === 'gate' && !d.answers[q.id]);
+  const gates = (data.decisions_needed || []).filter(q => (q.kind === 'gate' || q.kind === 'stall') && !d.answers[q.id] && (q.options || []).length);
   if (gates.length) {
-    const by = {}; for (const q of gates) { const k = (q.question.match(/^\[\d+\/9 ([^\]]+)\]/) || [])[1] || '관문'; by[k] = (by[k] || 0) + 1; }
+    const by = {}; for (const q of gates) { const k = q.kind === 'stall' ? '멈춤' : (q.question.match(/^\[\d+\/9 ([^\]]+)\]/) || [])[1] || '관문'; by[k] = (by[k] || 0) + 1; }
     items.push({ ico: 'scale', lv: 'warn', t: `★ 관문 결정 ${gates.length}건`, s: Object.entries(by).map(([k, n]) => `${k} ${n}`).join(' · '), who: 'user',
       when: gates.map(q => q.since).sort()[0], go: () => { S.f.mine = 'decision'; S.mineSel = null; go('mine'); } });
   }
@@ -854,14 +854,16 @@ function waitText(ts) {
   const hh = hoursSince(ts);
   return isNaN(hh) ? '대기' : hh < 1 ? `${Math.max(1, Math.round(hh * 60))}분째 대기` : hh < 48 ? `${Math.round(hh)}시간째 대기` : `${Math.round(hh / 24)}일째 대기`;
 }
+const STALL_LABEL = { park: 'AI 보류 제안', live: '실게임 수정 대화 필요', locked: '담당 잠김', offline: 'PC 신호 없음', health: '실행 오류', stalled: '실행기 멈춤', limit: '하루 실행 한도' };
 function gateQueue() {
-  return (S.data.decisions_needed || []).filter(q => q.kind === 'gate' && !S.d.answers[q.id] && (q.options || []).length)
+  return (S.data.decisions_needed || []).filter(q => (q.kind === 'gate' || q.kind === 'stall') && !S.d.answers[q.id] && (q.options || []).length)
     .map(q => {
+      if (q.kind === 'stall') return { q, n: -1, label: `멈춤 · ${STALL_LABEL[q.stall] || '확인 필요'}`, topic: topicById(q.task_id), late: true };
       const m = (q.question || '').match(/^\[(\d+)\/9 ([^\]]+)\]/) || [];
       const n = q.gate || Number(m[1]);
       return { q, n, label: `★${m[1] || n}/9 ${m[2] || '관문'}`, topic: topicById(q.task_id), late: hoursSince(q.since) >= GATE_LATE_H };
     })
-    .sort((a, b) => (GATE_ORDER[a.n] ?? 9) - (GATE_ORDER[b.n] ?? 9) || toMs(a.q.since) - toMs(b.q.since));
+    .sort((a, b) => (a.n === -1 ? -1 : GATE_ORDER[a.n] ?? 9) - (b.n === -1 ? -1 : GATE_ORDER[b.n] ?? 9) || toMs(a.q.since) - toMs(b.q.since));
 }
 // 목록에서 주제 이름을 보여주고 누르면 주제 서랍을 연다
 function topicTag(id) {
@@ -888,7 +890,7 @@ function mineItems() {
   // ★ 관문: 단계 순(실게임 시험 → 결과 확인 → 배포본 → 운영 반영 → 완료 확정), 같은 단계는 오래 기다린 것부터
   for (const x of gateQueue()) items.push({ key: `d:${x.q.id}`, type: 'gate', title: x.topic ? x.topic.title : x.q.question.split('\n')[0], who: x.q._author || 'claude', when: x.q.since,
     topic: x.topic, taskId: x.q.task_id, ref: x.q, sub: `${x.label} · ${waitText(x.q.since)}`, late: x.late });
-  for (const x of q.decisions.filter(d => d.kind !== 'gate')) items.push({ key: `d:${x.id}`, type: 'decision', title: x.question, who: x._author || 'claude', when: x.since, topic: topicById(x.task_id), taskId: x.task_id, ref: x,
+  for (const x of q.decisions.filter(d => d.kind !== 'gate' && d.kind !== 'stall')) items.push({ key: `d:${x.id}`, type: 'decision', title: x.question, who: x._author || 'claude', when: x.since, topic: topicById(x.task_id), taskId: x.task_id, ref: x,
     sub: x.recommendation ? '권장 ' + x.recommendation : (x.options || []).length ? `선택지 ${x.options.length}개` : '' });
   for (const { topic, note } of q.questions) items.push({ key: `q:${topic.id}:${note.ts}`, type: 'question', title: note.body, who: note.by, when: note.ts, topic, ref: note });
   for (const t of q.tests) items.push({ key: `t:${t.id}`, type: 'test', title: t.title, sub: t.next_action || t.summary || '', who: t.owner, when: t.updated_at, topic: S.d.topics.find(x => x.linked_task_id === t.id) || null, taskId: t.id, ref: t });
@@ -1757,6 +1759,12 @@ async function decide(q, choice, note, redraw) {
   try {
     await sendOps('decide', { decision_id: q.id, choice, note: note || '' }, `결정: ${choice || '메모'}`);
     clearDraft(`decide:${q.id}`);
+    // 멈춤 결정의 화면 쪽 처리: 담당 바꾸기는 담당 지정도 보내고, 대화로 처리는 대화 시작 문구를 띄운다
+    if (q.kind === 'stall') {
+      const to = (String(choice || '').match(/^담당 바꾸기 → .*\(([a-z0-9-]+)\)$/) || [])[1];
+      if (to) await sendOps('assign', { topic: q.task_id, agent: to, note: '멈춤 결정에서 담당 바꾸기' }, `주제 담당 → ${person(to).name}`);
+      if (/^개발컴 Claude 대화로 처리/.test(choice || '')) { const t = topicById(q.task_id); if (t) setTimeout(() => openChatStarter(t), 50); }
+    }
     const next = chainNextGate(q, choice);
     if (next) { S.mineSel = `d:${next}`; S.kbChained = S.mineSel; toast('★5 배포본 결정이 바로 이어집니다'); }
     render(); if (redraw) redraw();
@@ -1928,6 +1936,7 @@ function topicPhase(t) {
   }
   if (t.live_session) return { cls: 'user_test', icon: 'user', label: '실게임 시험 수정 · 개발컴 Claude 대화',
     detail: '실게임 시험에서 나온 문제를 대화 세션에서 고치는 중입니다(자동 실행기는 손대지 않음).', next: '개발컴 Claude 대화 — 고치고 끝냄을 남기면 바로 ★4 실게임 시험으로' };
+  if (t.park_proposed) return { cls: 'user_test', icon: 'pause', label: `AI 보류 제안 · ${name(t.park_proposed.by)}`, detail: t.park_proposed.body || null, next: '아키텍트 — 내 차례 ★ 관문에서 보류 승인·다시 진행·즉시 완료 중 고르기' };
   if (t.status === 'backlog') return { cls: 'neutral', icon: 'inbox', label: '미처리', next: '아키텍트 — 내 차례 → 착수 고르기에서 착수·담당 정하기' };
   const hold = holdOf(t.id);
   if (hold) return { cls: 'progress', icon: 'user', label: `대화 세션 작업 중 · ${name(hold.agent)}`, detail: `${hold.note || ''} (${fmtAbs(hold.until)}까지 자동 실행 멈춤)` };
@@ -2208,13 +2217,26 @@ function openMemory(m) {
 function openDecision(x) {
   drawer('결정 기록', decisionCard(x), fieldList({ 출처: x.source, 기록자: x._author, ID: x.id }));
 }
+// 개발컴 Claude 대화 시작 문구(실게임 시험 단계·멈춤 결정 '대화로 처리' 공용)
+function chatStarterText(t) {
+  return t.live_session
+    ? `주제 ${t.id} "${t.title}"의 실게임(격리 서버) 시험을 이 대화에서 진행합니다.\n` +
+      `먼저 대시보드 도구 폴더(node.py가 있는 곳)에서 python node.py brief ${t.id} 로 내용·작업물·체크리스트를 불러오세요.\n` +
+      `시험 중 나온 문제는 이 대화에서 바로 고치고, 고친 뒤에는 python node.py state ${t.id} --agent dev-claude --status done --note "무엇을 고쳤나·시험 방법" 으로 끝냄을 남겨 주세요(자동으로 ★4 실게임 시험으로 돌아옵니다).\n` +
+      `격리 서버(server-dev)만 씁니다. 운영 서버 반영은 ★7 승인 뒤 서버컴에서만 합니다.`
+    : `주제 ${t.id} "${t.title}"이(가) 자동 실행에서 멈춰서 이 대화에서 처리합니다.\n` +
+      `먼저 대시보드 도구 폴더(node.py가 있는 곳)에서 python node.py hold ${t.id} --agent dev-claude --minutes 120 --note "대화 세션 처리" 로 자동 실행기를 멈추고, python node.py brief ${t.id} 로 내용·기록·작업물을 불러오세요.\n` +
+      `이 단계 일을 끝내면 python node.py state ${t.id} --agent dev-claude --status done --note "무엇을 했나·작업물 위치·시험 방법" 으로 끝냄을 남기고 python node.py release ${t.id} 로 풀어 주세요.`;
+}
+function openChatStarter(t) {
+  const text = chatStarterText(t);
+  modal('개발컴 Claude 대화 시작 문구', h('p', { class: 'hint' }, '개발컴에서 Claude 대화를 열고 아래 문구를 붙여 넣으세요.'), h('pre', { class: 'pre' }, text),
+    h('button', { class: 'btn primary', onclick: async () => { try { await navigator.clipboard.writeText(text); toast('복사했습니다'); } catch { toast('복사하지 못했습니다 — 위 글을 직접 선택해 복사하세요'); } } }, icon('send'), '복사'));
+}
 // 실게임(격리 서버) 시험 단계: 개발컴 Claude 대화를 열어 바로 시험·수정한다(자동 실행기는 손대지 않음)
 function liveBox(t) {
   if (!t || !t.live_session) return null;
-  const text = `주제 ${t.id} "${t.title}"의 실게임(격리 서버) 시험을 이 대화에서 진행합니다.\n` +
-    `먼저 대시보드 도구 폴더(node.py가 있는 곳)에서 python node.py brief ${t.id} 로 내용·작업물·체크리스트를 불러오세요.\n` +
-    `시험 중 나온 문제는 이 대화에서 바로 고치고, 고친 뒤에는 python node.py state ${t.id} --agent dev-claude --status done --note "무엇을 고쳤나·시험 방법" 으로 끝냄을 남겨 주세요(자동으로 ★4 실게임 시험으로 돌아옵니다).\n` +
-    `격리 서버(server-dev)만 씁니다. 운영 서버 반영은 ★7 승인 뒤 서버컴에서만 합니다.`;
+  const text = chatStarterText(t);
   return h('div', { class: 'callout warn live-box' },
     h('b', null, '실게임 시험 단계 · 개발컴 Claude 대화에서 진행'),
     h('div', null, `이 단계는 자동 실행기가 손대지 않습니다${t.live_from ? ` (원래 담당 ${person(t.live_from).name} → 개발컴 Claude로 이관)` : ''}. 개발컴에서 Claude 대화를 열고 아래 문구를 붙여 넣으면 바로 시험·수정할 수 있습니다. 개발컴 Claude 수신함에도 같은 안내가 갑니다.`),

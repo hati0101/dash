@@ -262,12 +262,29 @@ def find_jobs(data: dict, state: dict, only: str | None = None) -> list[dict]:
     for q in data.get("decisions_needed", []):
         if q.get("_author") in agents and (not only or q["_author"] == only) and q["id"] in answers and q["id"] not in used:
             t = next((x for x in data.get("topics", []) if x["id"] == q.get("task_id")), None)
-            if t and (t["id"] in holds or t.get("live_session") or t.get("status") in ("done", "parked", "dropped", "review_user")):
+            if q.get("kind") == "stall" and not str(answers[q["id"]].get("choice") or "").startswith("다시"):
+                used.append(q["id"])  # 멈춤 결정: '다시 시도'만 AI를 깨운다(보류·담당 바꾸기·대화 처리는 허브·화면이 처리)
+                continue
+            if t and t.get("status") in ("done", "parked", "dropped", "review_user"):
+                used.append(q["id"])  # 이미 끝났거나 아키텍트 관문 대기: 이 답으로 AI가 할 일이 없으니 처리함으로(옛 답으로 나중에 다시 깨지 않게)
+                continue
+            if t and (t["id"] in holds or t.get("live_session")):
                 continue  # 대화 세션 처리 중·실게임 시험 단계(개발컴 Claude 대화)는 실행기가 깨우지 않는다
             if limited(state.setdefault("topics", {}).setdefault(t["id"] if t else f"ans-{q['id']}", {})):
                 continue
             jobs.append({"kind": "answer", "agent": q["_author"], "topic": t, "ask": q, "answer": answers[q["id"]],
                          "sig": f"ans-{q['id']}", "mode": "plan", "reason": "아키텍트 답 도착"})
+    # 같은 주제·작업자에 답 처리가 여러 건이면 가장 최근 답 하나만 돌리고, 나머지는 그 실행에서 함께 처리함으로 표시한다
+    newest: dict = {}
+    for j in [j for j in jobs if j["kind"] == "answer"]:
+        k = ((j.get("topic") or {}).get("id") or j["sig"], j["agent"])
+        if k not in newest or (j["answer"].get("ts") or "") >= (newest[k]["answer"].get("ts") or ""):
+            if k in newest:
+                j.setdefault("older", []).extend([newest[k]["ask"]["id"], *newest[k].get("older", [])])
+            newest[k] = j
+        else:
+            newest[k].setdefault("older", []).append(j["ask"]["id"])
+    jobs = [j for j in jobs if j["kind"] != "answer" or newest.get(((j.get("topic") or {}).get("id") or j["sig"], j["agent"])) is j]
     ans_keys = {((j.get("topic") or {}).get("id"), j["agent"]) for j in jobs if j["kind"] == "answer"}
     jobs = [j for j in jobs if j["kind"] == "answer" or ((j["topic"] or {}).get("id"), j["agent"]) not in ans_keys]
     if only:
@@ -539,6 +556,10 @@ def build_prompt(job: dict, data: dict, workspace: Path | None, st: dict) -> str
 - 작업물 기록은 `work_note`로 남긴다(work_id는 비워 둔다. 실행기가 이 주제의 작업물에 쓴다).
 - 메모 수집 주제라면 찾은 메모를 한 건씩 `propose`로 올린다(비밀값은 [가림]). 이미 올린 것은 다시 올리지 않는다.
 - 이 단계의 일이 끝났으면 반드시 `state`(status="done")로 끝낸다. body에 결과 요약(무엇을 했나·작업물 위치·시험 방법·권장 다음 단계)을 적는다. 요약이 없으면 거부된다.
+- 이번에 다 끝내지 못하면 `note`에 한 일·남은 일·다음 실행에서 이어서 할 첫 단계를 적는다(그래야 실행기가 이어서 깨운다). 진척 없이 같은 말만 반복하면 멈춤으로 아키텍트에게 올라간다.
+- 막혀서 더 못 하면(자료·권한·결정이 없음) 이어서 하겠다고 하지 말고 `ask`로 무엇이 필요한지 묻는다.
+- 보류(state parked)는 아키텍트만 정한다. 보류가 맞다고 보면 parked를 남기되 body에 이유를 쓴다 — 아키텍트에게 '보류 제안'으로 올라간다.
+- 끝냄(done)은 이 단계 담당만 한다. 교차 검토자·요청받은 작업자는 `note`(review/memo)나 `reply`로 끝낸다(done을 남겨도 메모로 바뀐다).
 
 {impl_section(job, workspace)}
 ## 단계 가이드
@@ -818,6 +839,11 @@ def apply(job: dict, result: dict, data: dict | None = None) -> tuple[list[str],
             elif typ == "note" and tid and body:
                 kind = a.get("kind") if a.get("kind") in ("memo", "review", "question", "answer") else "memo"
                 node.add_topic_record(CFG, tid, agent, kind, body=body[:6000])
+            elif typ == "state" and tid and a.get("status") in ("done", "parked") and agent != stage_doer(job.get("topic") or {}):
+                # 그 단계 담당이 아닌 작업자(교차 검토자·요청받은 작업자 등)의 끝냄·보류는 단계를 바꾸지 않는다 → 메모로 남긴다
+                node.add_topic_record(CFG, tid, agent, "review" if (job.get("topic") or {}).get("reviewer") == agent else "memo",
+                                      body=(f"[{'끝냄' if a['status'] == 'done' else '보류 제안'} — 이 단계 담당이 아니라 메모로 기록] " + (body or "(내용 없음)"))[:6000])
+                done.append("끝냄→메모(단계 담당 아님)")
             elif typ == "state" and tid and a.get("status") == "done" and len(body) < 40:
                 failed.append("끝냄 거부: 결과 요약(무엇을 했나·작업물 위치·시험 방법·권장 다음 단계)이 없음 — 다시 깨워 요약을 받음")
                 job["redo"] = True
@@ -1031,6 +1057,16 @@ def mark_done(st: dict, j: dict):
         st["last_sig"], st["last_parts"] = j["sig"], j.get("parts") or st.get("last_parts")
 
 
+def stage_doer(t: dict) -> str | None:
+    """지금 단계를 끝낼 수 있는 작업자: 실게임 대화 단계는 개발컴 Claude, 시험·배포본·운영 반영은 단계 담당, 진행은 담당."""
+    from topics import LIVE_AGENT
+    if t.get("live_session"):
+        return LIVE_AGENT
+    if t.get("stage") in ("test", "pack", "deploy") and t.get("stage_owner"):
+        return t["stage_owner"]
+    return t.get("assignee")
+
+
 def note_skip(st: dict, agent_id: str, tid: str, reason: str):
     """건너뜀을 주제 상태에 센다. 같은 사유는 처음 한 번과 60회마다만 로그에 남긴다(매분 같은 줄이 쌓이지 않게).
     3회 넘게 같은 사유로 건너뛰면 대시보드에 '실행기 멈춤'으로 올라간다(queue_summary → stalled)."""
@@ -1061,6 +1097,8 @@ def run_job(j: dict, data: dict, state: dict) -> bool:
             return False
     for k in ("skip_reason", "skip_count", "skip_since"):  # 실제로 깨우면 건너뜀 기록은 지운다
         st.pop(k, None)
+    if j["kind"] == "answer" and (j.get("ask") or {}).get("kind") == "stall":
+        st["idle_runs"] = 0  # 아키텍트가 '다시 시도'를 골랐다: 변화 없음 횟수를 처음부터
     started = now()
     tag = f"{started:%Y%m%d-%H%M%S}-{agent_id}-{t.get('id') or 'answer'}"
     log(f"깨움 {agent_id} ← {t.get('id')} {t.get('title')} · 이유: {j.get('reason')} · {j.get('mode')}")
@@ -1117,8 +1155,18 @@ def run_job(j: dict, data: dict, state: dict) -> bool:
         st["files"] = len(files)
     if j.get("redo"):
         st["cont"] = st.get("cont", 0) + 1  # 끝냄 요약이 빠졌으니 다음 동기화 때 다시 깨운다
+    # 단계를 끝내지도, 묻지도, 넘기지도 않고 진척 메모만 남겼으면 두 번까지는 이어서 깨운다(계획 모드 포함).
+    # 그래도 변화가 없으면 깨우지 않고 대시보드 '실행기 멈춤' → 아키텍트 결정으로 올린다(조용히 멈추지 않게)
+    acts = [a for a in result.get("actions", []) if isinstance(a, dict)]
+    settled = any(a.get("type") in ("ask", "handoff", "request", "reply") or (a.get("type") == "state" and a.get("status") in ("done", "parked")) for a in acts)
+    if settled:
+        st["idle_runs"] = 0
+    else:
+        st["idle_runs"] = st.get("idle_runs", 0) + 1
+        if st["idle_runs"] <= 2 and not j.get("redo"):
+            st["cont"] = st.get("cont", 0) + 1
     if j["kind"] == "answer":
-        state.setdefault("answers_used", []).append(j["ask"]["id"])
+        state.setdefault("answers_used", []).extend([j["ask"]["id"], *j.get("older", [])])
     moved = clear_inbox(agent_id, t.get("id"), before=started)
     if moved:
         done.append(f"수신함 정리 {moved}건")
