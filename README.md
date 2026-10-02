@@ -25,6 +25,13 @@
 | `publish.ps1` | 가져오기 → 생성 → 검증 → push |
 | `docs/` | 게시되는 정적 페이지 |
 
+## 여러 PC·AI 작업자
+
+- 작업자 = PC + AI (예: `dev-claude`, `server-gpt`). 각 PC는 `node.py`로 지금 하는 일과 주제 진행 기록을 남긴다.
+- 기록은 암호화해 `docs/nodes/<PC>.enc.json`으로 올린다. 각 PC는 자기 파일만 올린다.
+- 새 주제 배분은 허브 PC 한 곳에서만 한다(`topics.py dispatch`, 규칙: `routing.example.json`). 같은 일을 두 곳에서 하지 않게 하기 위해서다.
+- 다른 PC 연결 방법: [서버컴-연결.md](서버컴-연결.md)
+
 ## 사용
 
 ```powershell

@@ -8,6 +8,8 @@ $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [En
 New-Item -ItemType Directory -Force (Join-Path $PSScriptRoot '.local') | Out-Null
 $log = Join-Path $PSScriptRoot '.local/sync.log'
 function Log([string]$m) { ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ' ' + $m) | Out-File $log -Append -Encoding utf8 }
+# python 출력과 오류를 cmd에서 합쳐 받는다(PowerShell 5의 오류 레코드 장식이 기록에 섞이지 않게). 종료 코드는 $LASTEXITCODE로 남는다.
+function Py([string]$a) { (cmd /c "python $a 2>&1" | Out-String).Trim() }
 
 $lock = Join-Path $PSScriptRoot '.local/sync.lock'
 if ((Test-Path $lock) -and ((Get-Date) - (Get-Item $lock).LastWriteTime).TotalMinutes -lt 20) { Log '이전 동기화 실행 중 — 건너뜀'; return }
@@ -37,9 +39,9 @@ try {
 
   if ($role -eq 'node') {
     $pcid = $cfg.pc.id
-    $out = (python node.py inbox 2>&1 | Out-String).Trim()
+    $out = Py 'node.py inbox'
     if ($LASTEXITCODE) { Log "수신 전달 실패: $out" } elseif ($out -notmatch '새 전달 0건') { Log "수신 전달: $out" }
-    $out = (python node.py pack --if-changed 2>&1 | Out-String).Trim()
+    $out = Py 'node.py pack --if-changed'
     if ($LASTEXITCODE -eq 10) { return }
     if ($LASTEXITCODE) { Log "기록 암호화 실패: $out"; return }
     $file = "docs/nodes/$pcid.enc.json"
@@ -53,17 +55,19 @@ try {
   }
 
   # ---- 허브
-  $out = (python topics.py pull --close 2>&1 | Out-String).Trim()
-  if ($LASTEXITCODE) { Log "가져오기 실패: $out" } elseif ($out -notmatch '^새 주제·요청 없음') { Log "가져오기: $out" }
-  $out = (python topics.py dispatch 2>&1 | Out-String).Trim()
+  if ($cfg.github_repo) {
+    $out = Py 'topics.py pull --close'
+    if ($LASTEXITCODE) { Log "가져오기 실패: $out" } elseif ($out -notmatch '^새 주제·요청 없음') { Log "가져오기: $out" }
+  }
+  $out = Py 'topics.py dispatch'
   if ($LASTEXITCODE) { Log "자동 배분 실패: $out" } elseif ($out -notmatch '자동 배분 0건') { Log "자동 배분: $out" }
-  $out = (python topics.py announce 2>&1 | Out-String).Trim()
+  $out = Py 'topics.py announce'
   if ($out -notmatch '새 알림 0건') { Log "알림: $out" }
 
-  $out = (python build.py --skip-unchanged 2>&1 | Out-String).Trim()
+  $out = Py 'build.py --skip-unchanged'
   if ($LASTEXITCODE -eq 10) { return }
   if ($LASTEXITCODE) { Log "생성 실패: $out"; return }
-  $out = (python tests/verify.py 2>&1 | Out-String).Trim()
+  $out = Py 'tests/verify.py'
   if ($LASTEXITCODE) { Log "검증 실패 — 게시하지 않음: $out"; return }
 
   git add -A
