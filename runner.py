@@ -248,6 +248,11 @@ def find_jobs(data: dict, state: dict, only: str | None = None) -> list[dict]:
         # 하루 횟수 한도는 없다(아키텍트 결정 2026-10-03: 보류하지 않았으면 멈추지 않는다). 헛돌 때만 retry_after로 간격을 둔다
         return (st.get("retry_after") or "") > stamp
 
+    def slowed(st: dict) -> bool:
+        """지금 대기가 헛돎·개발 실패 감속인가(실행 실패 재시도 대기가 아니라). 옛 상태 파일은 횟수로 짐작한다."""
+        kind = st.get("retry_kind") or ("slow" if (st.get("idle_runs") or 0) > 2 or (st.get("dev_fail") or 0) >= 3 else "error")
+        return kind == "slow"
+
     for t in data.get("topics", []):
         who = t.get("turn")
         if who not in agents or (only and who != only) or t.get("status") not in ACTIVE:
@@ -264,9 +269,15 @@ def find_jobs(data: dict, state: dict, only: str | None = None) -> list[dict]:
         if migrate and st.get("last_sig") and st.get("last_sig") != sig:
             st["last_sig"], st["last_parts"] = sig, parts  # 계산 방식이 바뀐 첫 실행: 이미 처리한 주제를 한꺼번에 다시 깨우지 않는다
             continue
-        if limited(st):
-            continue
         reason = wake_reason(parts, st.get("last_parts"))
+        if limited(st):
+            # 감속 중이어도 새 입력(아키텍트·대화, 내 요청에 온 답, 단계·모드 변화)이 오면 바로 깨운다 — 아키텍트가 '헛도는 중'을 보고
+            # 개입한 답이 2시간 늦게 가지 않게(2026-10-03 포크 모의 검사 s16·s36). 실행기 자신의 '이어서'(cont)와 다른 AI 작업자의
+            # 메모(others)는 새 입력으로 치지 않는다(헛도는 두 AI가 서로의 메모로 감속을 풀며 빠르게 도는 것 방지)
+            last = st.get("last_parts") or {}
+            if not (slowed(st) and last and any(parts.get(k) != last.get(k) for k in ("stage", "mode", "talk", "replies"))):
+                continue
+            reason = f"감속 중이지만 새 입력이 와서 바로 깨움({reason})"
         if st.get("last_sig") == sig:
             # 이 단계를 이미 처리했는데 차례가 그대로다(아키텍트가 보류하지 않았다) → 멈추지 않고 간격을 두고 다시 깨운다.
             # 아키텍트 답을 기다리는 질문이 있으면 그 답이 올 때까지는 기다린다(답이 오면 답 처리로 깨운다)
@@ -295,8 +306,9 @@ def find_jobs(data: dict, state: dict, only: str | None = None) -> list[dict]:
                 continue
             if t and (t["id"] in holds or t.get("live_session")):
                 continue  # 대화 세션 처리 중·실게임 시험 단계(개발컴 Claude 대화)는 실행기가 깨우지 않는다
-            if limited(state.setdefault("topics", {}).setdefault(t["id"] if t else f"ans-{q['id']}", {})):
-                continue
+            ast_ = state.setdefault("topics", {}).setdefault(t["id"] if t else f"ans-{q['id']}", {})
+            if limited(ast_) and not slowed(ast_):
+                continue  # 실행 실패 재시도 대기만 기다린다. 헛돎 감속 중이어도 아키텍트 답은 바로 전한다
             jobs.append({"kind": "answer", "agent": q["_author"], "topic": t, "ask": q, "answer": answers[q["id"]],
                          "sig": f"ans-{q['id']}", "mode": "plan", "reason": "아키텍트 답 도착"})
     # 같은 주제·작업자에 답 처리가 여러 건이면 가장 최근 답 하나만 돌리고, 나머지는 그 실행에서 함께 처리함으로 표시한다
@@ -1623,6 +1635,7 @@ def run_agent(agent_id: str, pw: str, dry: bool) -> bool:
                         mark_done(st, j)
                     else:
                         st["retry_after"] = (now() + timedelta(minutes=10)).isoformat(timespec="seconds")
+                        st["retry_kind"] = "error"
                     produced = True
         finally:
             node.write_json(state_path(agent_id), state)
@@ -1732,6 +1745,7 @@ def run_job(j: dict, data: dict, state: dict) -> bool:
                      needs_user=needs_user, fix=fix, work_id=j.get("work_id"))
         # 신호는 소비하지 않고 잠시 뒤 다시 시도한다(하루 한도 안에서). 사람이 고칠 문제는 30분 간격.
         st["retry_after"] = (now() + timedelta(minutes=30 if needs_user else 10)).isoformat(timespec="seconds")
+        st["retry_kind"] = "error"  # 실행 실패 재시도: 새 입력이 와도 이 시간까지는 기다린다
         st["last_error"] = err
         return True
     health = ((node.load_records(CFG).get("agents") or {}).get(agent_id) or {}).get("health") or {}
@@ -1809,8 +1823,10 @@ def run_job(j: dict, data: dict, state: dict) -> bool:
     if moved:
         done.append(f"수신함 정리 {moved}건")
     st.pop("retry_after", None)
+    st.pop("retry_kind", None)
     if backoff:
         st["retry_after"] = (now() + timedelta(minutes=backoff)).isoformat(timespec="seconds")
+        st["retry_kind"] = "slow"  # 헛돎·개발 실패 감속: 새 입력이 오면 바로 깨운다(find_jobs)
     mark_done(st, j)
     st["last_result"] = {"summary": result["summary"][:300], "actions": done, "failed": failed, "at": now().isoformat(timespec="seconds")}
     node.end_run(CFG, j["rid"], result="partial" if failed else "ok", summary=result["summary"][:500],
