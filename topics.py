@@ -731,6 +731,7 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
     activations = {r.get("topic") for r in urec.get("topic_activate", [])}
     edits = {r.get("topic"): r for r in urec.get("topic_edit", [])}
     drops = {r.get("topic"): r for r in urec.get("topic_drop", [])}
+    locked = frozenset(urec.get("agent_locks", {}) or {})  # 잠근 작업자: 교차 검토도 맡기지 않음
     gate_answers = {r.get("id"): r for r in urec.get("decisions_answered", []) if str(r.get("id", "")).startswith("G")}
     by_topic: dict[str, list[dict]] = {}
     for r in node_records or []:
@@ -849,7 +850,7 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
                 q["status"] = "closed"
         opened = [q for q in reqs if q["status"] == "open"]
         t["open_request"] = max(opened, key=lambda q: q["ts"] or "") if opened else None
-        t["reviewer"] = review_partner(t.get("assignee"), peers)
+        t["reviewer"] = review_partner(t.get("assignee"), peers, locked)
         t["claims"] = sorted({a for a, _ in claims})
         # 중복 착수 = 지금 담당이 정해진 뒤에 담당이 아닌 작업자가 착수한 경우만.
         # 인계·담당 변경 전에 남은 이전 담당의 착수 기록은 충돌이 아니다(거짓 경보 방지).
@@ -864,15 +865,19 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
     return out
 
 
-def review_partner(a: str | None, known: set | None) -> str | None:
-    """교차 검토자: 같은 PC의 다른 작업자(검토가 한 사람에게 몰리지 않게). 없으면 사령탑, 사령탑 일이면 개발컴 Astra."""
+def review_partner(a: str | None, known: set | None, locked=frozenset()) -> str | None:
+    """교차 검토자: 같은 PC의 다른 작업자(검토가 한 사람에게 몰리지 않게). 없으면 사령탑, 그다음 다른 PC 작업자.
+    아키텍트가 잠근 작업자는 검토도 맡기지 않는다(2026-10-03: 잠근 개발컴 Astra에 교차 검토가 계속 간 문제). 맡길 사람이 없으면 None(검토 생략)."""
     if not a:
         return None
+    avail = {x for x in (known or {LEAD, "dev-astra"}) if x != a and x not in locked}
     pc = a.split("-", 1)[0]
-    mates = sorted(x for x in (known or set()) if x != a and x.split("-", 1)[0] == pc)
+    mates = sorted(x for x in avail if x.split("-", 1)[0] == pc)
     if mates:
         return mates[0]
-    return LEAD if a != LEAD else "dev-astra"
+    if LEAD in avail:
+        return LEAD
+    return sorted(avail)[0] if avail else None
 
 
 def whose_turn(t: dict) -> str | None:
@@ -898,7 +903,9 @@ def whose_turn(t: dict) -> str | None:
         return a  # 넘겨받은 쪽 차례. 받은 쪽이 새 진행 베이스를 쓰면 아래 교차 검토 단계로 돌아간다
     if not t.get("plan"):
         return a  # 진행 베이스 작성 대기
-    reviewer = t.get("reviewer") or (LEAD if a != LEAD else "dev-astra")
+    reviewer = t.get("reviewer")
+    if not reviewer:
+        return a  # 검토를 맡길 작업자가 없음(모두 잠금): 검토 단계 없이 담당이 이어서
     # 인계받은 쪽이 새로 쓴 진행 베이스는 그 뒤의 검토만 인정한다(넘기기 전 검토로 건너뛰지 않게)
     since = (t.get("plan_at") or "") if ho and ho.get("to") == a else ""
     if not any(n.get("kind") == "review" and n.get("by") != a and (n.get("ts") or "") >= since for n in t.get("notes", [])):
