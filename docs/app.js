@@ -695,6 +695,16 @@ function mineBanner() {
   return h('button', { class: 'mine-banner', onclick: () => go('mine') }, icon('user'),
     h('b', null, `아키텍트 차례 ${q.total}건`), h('span', null, parts.join(' · ')), h('span', { class: 'go' }, '바로 보기', icon('arrow')));
 }
+// 목록에서 주제 이름을 보여주고 누르면 주제 서랍을 연다
+function topicTag(id) {
+  if (!id) return null;
+  const t = topicById(id);
+  return h('button', { class: 'tag tag-btn', title: t ? t.title : id, onclick: () => { t ? openTopic(t) : openTaskById(id); } }, t ? t.title : id);
+}
+function histCount(topic, taskId) {
+  const n = historyEvents(topic, !topic && taskId ? S.d.tasks.find(t => t.id === taskId) : null).length;
+  return n ? h('span', { class: 'hist-count' }, icon('clock'), `기록 ${n}`) : null;
+}
 function mineSection(title, sub, count, body) {
   return card(title, { big: count, unit: '건' }, sub ? h('p', { class: 'hint', style: { margin: '0 0 10px' } }, sub) : null, body);
 }
@@ -706,14 +716,15 @@ function vMine() {
     h('div', { class: 'body' }, h('button', { class: 't clamp-3 linkless', onclick: () => openDecisionNeeded(x) }, x.question),
       x.recommendation ? h('div', { class: 's' }, h('b', null, '권장 '), x.recommendation) : null,
       h('div', { class: 'meta' }, h('span', { class: 'wait' }, av(x._author || 'claude', true), `${person(x._author || 'claude').name} 질문`),
-        x.task_id ? h('button', { class: 'tag', style: { cursor: 'pointer' }, onclick: () => { const t = S.d.topics.find(y => y.id === x.task_id); t ? openTopic(t) : openTaskById(x.task_id); } }, x.task_id) : null,
+        topicTag(x.task_id), histCount(topicById(x.task_id), x.task_id),
         h('span', { class: 'when' }, fmtRel(x.since))),
       h('div', { class: 'choice-row' }, h('button', { class: 'btn sm primary', onclick: () => openDecisionNeeded(x) }, icon('scale'), `열어서 결정${(x.options || []).length ? ` (선택지 ${x.options.length}개)` : ''}`)))))) : empty('답할 결정이 없습니다.');
   const questions = q.questions.length ? h('div', { class: 'list' }, q.questions.map(({ topic, note }) => h('div', { class: 'item' },
     h('span', { class: 'lead-ico warn' }, icon('messages')),
-    h('div', { class: 'body' }, h('div', { class: 't' }, note.body), h('div', { class: 'meta' }, h('span', { class: 'wait' }, av(note.by, true), person(note.by).name),
-      h('span', { class: 'tag' }, topic.title), h('span', { class: 'when' }, fmtRel(note.ts))),
-      h('div', { class: 'choice-row' }, h('button', { class: 'btn sm primary', onclick: () => openTopic(topic) }, icon('send'), '답하기'),
+    h('div', { class: 'body' }, h('button', { class: 't clamp-3 linkless', onclick: () => openQuestion(topic, note) }, note.body),
+      h('div', { class: 'meta' }, h('span', { class: 'wait' }, av(note.by, true), person(note.by).name),
+        topicTag(topic.id), histCount(topic), h('span', { class: 'when' }, fmtRel(note.ts))),
+      h('div', { class: 'choice-row' }, h('button', { class: 'btn sm primary', onclick: () => openQuestion(topic, note) }, icon('send'), '열어서 답하기'),
         h('button', { class: 'btn sm', onclick: () => ack(`mine-q:${topic.id}:${note.ts}`) }, icon('check'), '확인함')))))) : empty('AI가 아키텍트에게 물은 것이 없습니다.');
   const tests = q.tests.length ? h('div', { class: 'list' }, q.tests.map(t => h('div', { class: 'item' },
     h('span', { class: 'lead-ico warn' }, icon('flask')),
@@ -762,7 +773,7 @@ function decisionsNeededCard() {
           ans ? h('div', { class: 's' }, h('b', null, '내 결정: '), ans.choice || '(메모)', ans.note ? ' — ' + ans.note : '', ' · ', ans.pending ? '반영 대기' : '전달됨')
             : h('div', { class: 'choice-row' }, h('button', { class: 'btn sm primary', onclick: () => openDecisionNeeded(q) }, icon('scale'), `열어서 결정${(q.options || []).length ? ` (선택지 ${q.options.length}개)` : ''}`)),
           h('div', { class: 'meta' }, h('span', { class: 'wait' }, av(q.owner || 'user', true), (person(q.owner || 'user').name) + ' 결정'),
-            h('span', { class: 'tag' }, `${q._author} 제기`), h('span', { class: 'when' }, fmtRel(q.since)))));
+            h('span', { class: 'tag' }, `${person(q._author || 'claude').name} 제기`), topicTag(q.task_id), histCount(topicById(q.task_id), q.task_id), h('span', { class: 'when' }, fmtRel(q.since)))));
     })) : empty('지금 결정할 문제가 없습니다.'));
 }
 function projGrid(tasks) {
@@ -1260,6 +1271,8 @@ function thread(target, redraw, opts = {}) {
       render(); if (redraw) redraw();
     } catch (e) { toast(e.message); } finally { send.disabled = false; }
   } }, icon('send'), '보내기');
+  // compose: 지난 대화는 옆 히스토리에 있으므로 입력칸만 보인다
+  if (opts.compose) return h('div', { class: 'reply-box' }, h('h4', null, opts.title || '답 보내기'), h('div', { class: 'composer' }, ta, h('div', { class: 'row' }, to, send)), sendHint());
   return h('div', { class: 'reply-box' },
     h('h4', null, `대화 ${items.length}`),
     items.length ? h('div', { class: 'note-thread' }, items.map(c => h('div', { class: 'note' }, av(c.by),
@@ -1404,8 +1417,16 @@ function historyPanel(topic, task, focusKey) {
         h('span', { class: 'when', title: fmtAbs(e.ts) }, fmtAbs(e.ts))),
       e.msg ? h('button', { class: 'linkish', onclick: () => openMessage(e.msg) }, e.body) : longText(e.body)));
   const fill = all => { list.replaceChildren(...(all ? ev : ev.slice(-LIMIT)).map(row)); };
-  fill(false);
-  const more = ev.length > LIMIT ? h('button', { class: 'btn sm', onclick: () => { fill(true); more.remove(); } }, `이전 기록 ${ev.length - LIMIT}건 더 보기`) : null;
+  // 지금 보는 항목이 접힌 앞부분에 있으면 처음부터 전부 보여준다
+  const focusAt = ev.findIndex(e => e.key && e.key === focusKey);
+  const showAll = ev.length <= LIMIT || (focusAt >= 0 && focusAt < ev.length - LIMIT);
+  fill(showAll);
+  const more = showAll ? null : h('button', { class: 'btn sm', onclick: () => { fill(true); more.remove(); } }, `이전 기록 ${ev.length - LIMIT}건 더 보기`);
+  // 넓은 화면에서는 히스토리 칸만 지금 항목으로 스크롤(좁은 화면은 질문부터 읽도록 그대로)
+  if (matchMedia('(min-width: 881px)').matches) setTimeout(() => {
+    const f = list.querySelector('.focus'), side = list.closest('.ms-side');
+    if (f && side) side.scrollTop += f.getBoundingClientRect().top - side.getBoundingClientRect().top - side.clientHeight / 2 + f.offsetHeight / 2;
+  }, 260);
   return [
     h('div', { class: 'hist-head' }, head),
     h('h4', null, `히스토리 ${ev.length}건 · 오래된 것부터`),
