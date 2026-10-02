@@ -927,3 +927,11 @@ mark { background: color-mix(in srgb, var(--st-user_test) 35%, transparent); col
   .team-strip .team-row-item { padding: 5px 10px; } .team-strip .team-row-item .s { -webkit-line-clamp: 1; }
   .ov-bottom .card { padding: 12px 14px 10px; } .ov-bottom .card-h { margin-bottom: 6px; }
 }
+
+/* 개요 목록 칸: 항목은 절대 겹치지 않게, 보조 줄(반영 전 N건 등)은 칸 맨 아래 고정 */
+.list-card .c-row { overflow: hidden; min-height: 0; }
+.list-card > .card-foot { margin-top: auto !important; flex: none; }
+.ring-break { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.ov-top .foot-note { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 8px; }
+.flow-card { --pc: var(--line-2); border-left: 3px solid var(--pc); }
+.flow-card.pc-dev { --pc: var(--pc-dev); } .flow-card.pc-server { --pc: var(--pc-server); }

@@ -543,8 +543,7 @@ function sidebar() {
     h('div', { class: 'side-h' }, 'TEAM'),
     h('div', { class: 'team-row' }, ['user', 'claude', 'astra', 'cli'].map(id => av(id))),
     h('div', { class: 'side-foot' },
-      !matchMedia('(display-mode: standalone)').matches && !navigator.standalone
-        ? h('button', { class: 'btn', onclick: installApp, title: '주소창 없이 앱처럼 열기' }, icon('install'), '앱으로 설치') : null,
+
       h('div', { class: 'row' }, av('user'), h('b', null, '내 계정'),
         h('button', { class: 'icon-btn', style: { 'margin-left': 'auto' }, title: '테마 바꾸기', 'aria-label': '테마 바꾸기', onclick: toggleTheme },
           icon(document.documentElement.dataset.theme === 'light' ? 'moon' : 'sun')),
@@ -591,7 +590,7 @@ function page() {
 }
 function head(eyebrow, title, small, ...tools) {
   return h('div', { class: 'page-head' },
-    h('div', null, h('div', { class: 'eyebrow' }, eyebrow), h('h1', null, title, small ? h('small', null, small) : null)),
+    h('div', null, h('h1', null, title, small ? h('small', null, small) : null)),  // 영어 머리글(eyebrow)은 쓰지 않는다
     tools.length ? h('div', { class: 'tools' }, tools) : null);
 }
 function chips(options, value, onPick, label) {
@@ -694,11 +693,11 @@ function completionCard(pct, done, left, tasks, owner) {
       h('div', { class: 'kv' }, h('div', null, h('div', { class: 'k' }, '완료'), h('div', { class: 'v' }, done)),
         h('div', null, h('div', { class: 'k' }, '남음'), h('div', { class: 'v' }, left)))),
     (() => { const n = st => S.d.topics.filter(t => t.status === st).length;  // 남은 주제가 어디쯤 있는지
-      return h('div', { class: 'ring-break' }, [['new', '새 주제'], ['triage', '검토 중'], ['active', '진행 중'], ['done', '완료'], ['backlog', '미처리']].map(([k, l]) =>
+      return h('div', { class: 'ring-break' }, [['new', '새 주제'], ['triage', '검토 중'], ['active', '진행 중'], ['backlog', '미처리']].map(([k, l]) =>
         h('button', { class: 'rb', onclick: () => go('topics') }, h('i', { class: `st-dot ${k}` }), h('span', null, l), h('b', null, n(k))))); })(),
-    h('div', { class: 'foot-note' }, done + left ? `착수한 주제 ${done + left}건 중 완료 ${done}건 (미처리·보류·삭제 제외)` : '아직 착수한 주제가 없습니다.',
-      owner === 'user' ? h('div', null, '아키텍트 담당 주제는 없어서 전체 기준으로 보여 줍니다.') : null,
-      board ? h('div', null, `업무 보드: ${board}`) : null));
+    h('div', { class: 'foot-note one-line-s', title: [done + left ? `착수한 주제 ${done + left}건 중 완료 ${done}건 (미처리·보류·삭제 제외)` : '아직 착수한 주제가 없습니다.',
+      owner === 'user' ? '아키텍트 담당 주제는 없어서 전체 기준으로 보여 줍니다.' : '', board ? `업무 보드: ${board}` : ''].filter(Boolean).join('\n') },
+      done + left ? `착수 ${done + left}건 중 완료 ${done}건` : '착수한 주제 없음', board ? ` · ${board}` : ''));
 }
 
 function inWindow(ts, hours, dateOnly) {
@@ -1491,7 +1490,9 @@ function vSources() {
   const data = S.data, m = data.meta;
   const pend = pending.all();
   return [
-    head('SOURCES', '연결과 설정', null),
+    head('SOURCES', '연결과 설정', null,
+      !matchMedia('(display-mode: standalone)').matches && !navigator.standalone
+        ? h('button', { class: 'btn', onclick: installApp, title: '주소창 없이 앱처럼 열기' }, icon('install'), '앱으로 설치') : null),
     h('div', { class: 'src-fit fit-page' }, tokenCard(),
       card('보낸 요청 · 반영 대기', { big: pend.length, unit: '건', cls: 'fill' },
         pend.length ? h('div', { class: 'list' }, [...pend].reverse().map(p => h('div', { class: 'item' },
