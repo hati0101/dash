@@ -622,8 +622,7 @@ function listCard(title, rows, opts = {}) {
 // ------------------------------------------------------------ 개요
 function vOverview() {
   const d = S.d, data = S.data, now = new Date();
-  const tasks = filterTasks(d.tasks, S.f.owner);
-  // 완료율은 주제 기준: 완료 ÷ 착수한 주제(새 주제·검토·준비·진행·완료). 미처리·보류·삭제는 뺀다
+  // 완료율은 주제 기준: 완료 확정 ÷ 착수한 주제(새 주제·검토·준비·진행·관문 대기·완료). 미처리·보류·삭제는 뺀다
   const aiOf = id => ((data.agents || []).find(a => a.id === id) || {}).ai || (/claude/.test(id || '') ? 'claude' : /astra|gpt/.test(id || '') ? 'gpt' : '');
   const started = d.topics.filter(t => ['new', 'triage', 'ready', 'active', 'review_user', 'done'].includes(t.status))
     .filter(t => S.f.owner === 'claude' ? aiOf(t.assignee) === 'claude' : S.f.owner === 'astra' ? aiOf(t.assignee) === 'gpt' : true);
@@ -637,21 +636,28 @@ function vOverview() {
     // 넓고 높은 화면(1500×860 이상)에서는 한 화면에 스크롤 없이: 윗줄 요약 5칸 + 아랫줄 4칸(칸마다 최대 3건)
     h('div', { class: 'ov-fit' },
       h('div', { class: 'ov-top' }, completionCard(pct, started, S.f.owner), collectedCard(), pipelineCard(), missedCard()),
-      h('div', { class: 'ov-bottom' }, todayCard(), decisionsNeededCard(), projectsCard(tasks), activityCard()),
+      h('div', { class: 'ov-bottom' }, todayCard(), decisionsNeededCard(), projectsCard(), activityCard()),
       teamStrip()),
   ];
 }
 // 개요 아랫줄: 진행 중 프로젝트(막힘·이번 주 마감을 먼저)
-function projectsCard(tasks) {
-  const live = tasks.filter(t => t.stage !== 'done');
-  const blocked = live.filter(t => t.stage === 'blocked' || t._stale);
-  const due = live.filter(t => t.due && !blocked.includes(t) && toMs(t.due) - Date.now() < 7 * 864e5);
-  const rest = live.filter(t => !blocked.includes(t) && !due.includes(t)).sort(taskSort);
-  const rows = [...blocked.sort(taskSort).map(t => ({ t, lv: 'bad', ico: 'alert', tag: t.stage === 'blocked' ? '막힘' : `${Math.round(t._age)}시간 멈춤` })),
-    ...due.map(t => ({ t, lv: 'warn', ico: 'calendar', tag: `마감 ${fmtAbs(t.due, true)}` })), ...rest.map(t => ({ t, ico: 'tasks' }))]
-    .map(({ t, lv, ico, tag }) => ({ lv, ico, t: t.title, s: t.next_action || t.summary || '', go: () => openTask(t), meta: [tag ? h('span', { class: `st ${lv === 'bad' ? 'blocked' : 'user_test'}` }, tag) : null, priChip(t.priority), stChip(t.stage), h('span', { class: 'when' }, fmtRel(t.updated_at))] }));
+// 개요 아랫줄: 진행 중인 업무 = 업무 보드 흐름(막힘 → 검증 → 진행 → 요청 순, 아키텍트 대기는 '오늘 확인할 일'에 있으므로 뺌)
+function projectsCard() {
+  const ORDER = { blocked: 0, validating: 1, progress: 2, request: 3 };
+  const items = flowItems(S.f.owner || 'all', 'all').filter(i => i.col in ORDER)
+    .sort((a, b) => ORDER[a.col] - ORDER[b.col] || (PRI_ORDER[a.t.priority] ?? 9) - (PRI_ORDER[b.t.priority] ?? 9) || toMs(b.ts) - toMs(a.ts));
+  const LV = { blocked: ['bad', 'alert'], validating: ['', 'eye'], progress: ['', 'play'], request: ['', 'inbox'] };
+  const rows = items.map(it => {
+    const t = it.t, who = it.kind === 'topic' ? (t.turn || t.assignee) : (LEGACY[t.owner] || t.owner);
+    const label = (FLOW.find(c => c.id === it.col) || {}).label;
+    return { lv: LV[it.col][0], ico: LV[it.col][1], t: t.title, s: it.kind === 'topic' ? topicPhase(t).label : (t.next_action || t.summary || ''),
+      go: () => it.kind === 'topic' ? openTopic(t) : openTask(t),
+      meta: [h('span', { class: `st ${it.col}` }, it.why.length ? it.why.join(' · ') : label), it.kind === 'task' ? h('span', { class: 'tag' }, '옛 작업표') : null,
+        h('span', { class: 'wait' }, av(who || 'user', true), person(who || 'user').name), h('span', { class: 'when' }, fmtRel(it.ts))] };
+  });
+  const blocked = items.filter(i => i.col === 'blocked').length;
   return listCard('진행 중인 업무', rows, { more: () => go('tasks'), empty: '진행 중인 업무가 없습니다.',
-    foot: blocked.length || due.length ? h('div', { class: 'card-foot' }, [blocked.length && `막힘·멈춤 ${blocked.length}`, due.length && `이번 주 마감 ${due.length}`].filter(Boolean).join(' · ')) : null });
+    foot: blocked ? h('div', { class: 'card-foot' }, `막힘·멈춤 ${blocked}`) : null });
 }
 function activityCard() {
   const rows = timelineEvents().slice(0, 40).map(e => ({ ico: 'clock', t: e.t, s: e.s || '', go: e.go, meta: [h('span', { class: 'when' }, e.dateOnly ? fmtAbs(e.ts, true) : fmtRel(e.ts))] }));
@@ -682,16 +688,16 @@ function taskSort(a, b) {
 function completionCard(pct, started, owner) {
   const n = (...st) => started.filter(t => st.includes(t.status)).length;
   const rows = [
-    { label: '완료', n: n('done'), c: 'st-done', ico: 'check' },
+    { label: '완료 확정', n: n('done'), c: 'st-done', ico: 'check' },
     { label: '남음', n: started.length - n('done'), c: 'ink-3', ico: 'clock' },
-    { label: '아키텍트 관문', n: n('review_user'), c: 'st-user_test', ico: 'user' },
+    { label: 'AI 끝남·★확인 대기', n: n('review_user'), c: 'st-user_test', ico: 'user' },
     { label: '진행 중', n: n('active'), c: 'st-progress', ico: 'tasks' },
     { label: '검토·준비', n: n('triage', 'ready'), c: 'st-validating', ico: 'eye' },
     { label: '새 주제', n: n('new'), c: 'st-request', ico: 'inbox' },
   ];
   const max = Math.max(1, ...rows.map(r => r.n));
   return card('완료율', { big: pct, unit: `% · 착수 ${started.length}건`, cls: 'sum-card', right: moreBtn(0, () => go('topics')) },
-    h('div', { class: 'bars', title: owner === 'user' ? '아키텍트 담당 주제는 없어서 전체 기준으로 보여 줍니다.' : '착수한 주제 기준(미처리·보류·삭제 제외)' },
+    h('div', { class: 'bars', title: `${owner === 'user' ? '아키텍트 담당 주제는 없어서 전체 기준으로 보여 줍니다.\n' : ''}착수한 주제 기준(미처리·보류·삭제 제외). 완료는 ★9 완료 확정(조사·기획은 ★결과 확인)에서만 셉니다. AI가 끝낸 주제는 'AI 끝남·★확인 대기'에 있습니다.` },
       rows.map(r => h('button', { class: 'bar-row', onclick: () => go('topics'), 'aria-label': `${r.label} ${r.n}건` },
         h('span', { style: { color: `var(--${r.c})`, display: 'grid' } }, icon(r.ico)),
         h('span', { class: 'lbl' }, r.label),
