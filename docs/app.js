@@ -2150,7 +2150,180 @@ function toast(text) {
   t.textContent = text; t.classList.add('on');
   clearTimeout(S._toast); S._toast = setTimeout(() => t.classList.remove('on'), 2600);
 }
+// ------------------------------------------------------------ 내 차례 키보드 조작(아키텍트 요청 2026-10-03 · 텐키리스 기준)
+// 물리 키(e.code)로 판정해 한글 입력 상태에서도 글자 키가 동작한다. 입력칸 안에서는 Ctrl+Enter(보내기)·Esc(빠져나오기)만 받는다.
+// 내 차례 화면과 그 '크게 보기' 창에서만 동작하고, 다른 창이 열려 있거나 휴대폰 폭이면 아무것도 하지 않는다.
+function kbHint() {
+  return h('div', { class: 'kb-hint' }, '↑↓ 항목 · ←→ 탭 · 1-9 선택 · R 답 쓰기 · Enter 보내기 · PgUp/PgDn 히스토리 · ? 도움말');
+}
+const KB_HELP = [
+  ['목록·탭', [['↑ / ↓', '이전·다음 항목(오른쪽 상세가 바로 바뀜)'], ['Home / End', '첫·마지막 항목'], ['← / →', '탭 이동'], ['O', '크게 보기(가운데 창)'], ['Esc', '창 닫기 · 입력칸 빠져나오기(쓰던 글 유지)']]],
+  ['선택·답하기', [['1 ~ 9', '선택지 고르기(같은 번호 다시 누르면 해제) · 착수 고르기에서는 담당 고르기'], ['R', '답 입력칸으로'],
+    ['Enter', '보내기(고른 선택지 + 덧붙일 말). 아무것도 없으면 입력칸으로'], ['입력칸 안: Enter · Ctrl+Enter · Esc', '줄바꿈 · 보내기 · 빠져나오기'],
+    ['Y · N · L', '실게임·확인: 확인 완료 · 문제 있음(내용 적고 Ctrl+Enter) · 나중에'], ['X', 'AI 질문·할 일: 답 없이 확인함 · 했음'], ['A', '착수 고르기: 자동 배분으로 착수'],
+    ['보낸 뒤', '자동으로 다음 항목']]],
+  ['히스토리(오른쪽 칸)', [['PgUp / PgDn', '한 화면씩 위·아래'], ['Shift+↑ / Shift+↓', '이전·다음 기록 하나씩(강조)'], ['E', '강조한 기록 펼치기·접기'],
+    ['Shift+Home / Shift+End', '맨 처음 · 마지막'], ['Space / Shift+Space', '가운데 본문 아래·위로']]],
+  ['도움말', [['? 또는 F1', '이 표 열기·닫기']]],
+];
+function kbHelp() {
+  if (document.querySelector('.drawer.on[data-kb="help"]')) return closeDrawer();
+  modal('키보드 단축키 · 내 차례', h('div', { class: 'kb-help' }, KB_HELP.map(([title, rows]) => [h('h4', null, title),
+    h('table', { class: 'kb-table' }, h('tbody', null, rows.map(([k, d]) => h('tr', null, h('th', null, k), h('td', null, d)))))])),
+    h('p', { class: 'hint' }, '한글 입력 상태에서도 글자 키가 그대로 동작합니다. 입력칸 안에서는 단축키가 꺼집니다.'));
+  const p = [...document.querySelectorAll('.drawer.modal')].pop();
+  if (p) p.dataset.kb = 'help';
+}
+// 지금 키보드가 조작하는 곳: 맨 위 '크게 보기' 창 또는 내 차례 오른쪽 상세
+function kbScope() {
+  const top = [...document.querySelectorAll('.drawer.on')].pop();  // 닫히는 중인 창(on 빠짐)은 제외
+  if (top) return top.dataset.kb === 'mine' ? { el: top, key: top.dataset.key, modal: true } : top.dataset.kb === 'help' ? { help: true } : null;
+  if (!S.data || S.view !== 'mine') return null;
+  return { el: document.querySelector('.mine-detail'), key: S.mineSel, modal: false };
+}
+const kbItem = key => mineItems().find(i => i.key === key) || null;
+function kbShowRow(key) {
+  const r = [...document.querySelectorAll('.mine-row')].find(x => x.dataset.key === key);
+  r?.scrollIntoView({ block: 'nearest' });
+}
+function kbSelect(sc, item) {
+  if (!item) return;
+  S.mineSel = item.key; S.kbPick = null; S.kbIntent = null; S.editTopic = null;
+  if (sc.modal) { closeDrawer(true); openMineItem(item); }
+  S._keepScroll = true; render(); kbShowRow(item.key);
+}
+function kbMove(sc, d) {
+  const list = mineList();
+  if (!list.length) return toast('이 탭에는 항목이 없습니다');
+  const i = list.findIndex(x => x.key === sc.key);
+  const n = d === 'first' ? 0 : d === 'last' ? list.length - 1 : Math.max(0, Math.min(list.length - 1, (i < 0 ? (d > 0 ? -1 : list.length) : i) + d));
+  kbSelect(sc, list[n]);
+}
+function kbTab(sc, d) {
+  const tabs = ['all', ...MINE_TYPES.map(x => x[0])];
+  const i = tabs.indexOf(S.f.mine || 'all');
+  if (sc.modal) closeDrawer(true);
+  S.f.mine = tabs[(i + d + tabs.length) % tabs.length]; S.mineSel = null; S.kbPick = null; S.kbIntent = null; S.mineSelecting = false; S.editTopic = null;
+  render();
+}
+// 보내기 → 성공하면 다음 항목으로(보낸 항목이 목록에 남아 있으면 그 다음, 빠졌으면 같은 자리)
+async function kbSend(sc, fn) {
+  const before = mineList(), at = before.findIndex(x => x.key === sc.key);
+  const ok = await fn();
+  if (!ok) return;
+  S.kbPick = null; S.kbIntent = null;
+  const now = mineList(), still = now.findIndex(x => x.key === sc.key);
+  const next = still >= 0 ? now[still + 1] || null : now[Math.min(Math.max(at, 0), now.length - 1)] || null;
+  S.mineSel = next ? next.key : null;
+  if (sc.modal) { closeDrawer(true); if (next) openMineItem(next); }
+  S._keepScroll = true; render(); if (next) kbShowRow(next.key);
+  toast(next ? '보냄 · 다음 항목' : '보냄 · 남은 항목 없음');
+}
+function kbEnter(sc) {
+  const it = kbItem(sc.key);
+  if (!it || !sc.el) return;
+  const ta = sc.el.querySelector('[data-kb-reply]');
+  const text = ta ? ta.value.trim() : '';
+  if (it.type === 'gate' || it.type === 'decision') {
+    const q = it.ref, pick = S.kbPick && S.kbPick.id === q.id ? (q.options || [])[S.kbPick.idx] : '';
+    if (!pick && !text) return ta?.focus();
+    return kbSend(sc, () => decide(q, pick || '', text, null));
+  }
+  if (it.type === 'backlog') {
+    const b = sc.el.querySelector('[data-kb-assign]');
+    if (b && S.kbPick && S.kbPick.id === it.topic.id) return kbSend(sc, () => b._kb({ quiet: true }));
+    if (text && ta._send) return kbSend(sc, () => ta._send({ quiet: true }));
+    return ta?.focus();
+  }
+  if (!ta || !ta._send) return;
+  if (!text) return ta.focus();
+  if (it.type === 'test' && S.kbIntent === it.key) {  // N(문제 있음): 내용을 담당에게 보내고 문제 있음으로
+    const pb = sc.el.querySelector('[data-kb-problem]');
+    return kbSend(sc, async () => { const ok = await ta._send({ quiet: true }); if (ok && pb) pb.click(); return ok; });
+  }
+  return kbSend(sc, () => ta._send({ quiet: true }));
+}
+function kbDigit(sc, n) {
+  const it = kbItem(sc.key);
+  if (!it || !sc.el) return;
+  if (it.type === 'gate' || it.type === 'decision') {
+    const opts = it.ref.options || [];
+    if (n >= opts.length) return toast(opts.length ? `선택지는 ${opts.length}개입니다` : '선택지가 없습니다 · R로 직접 적기');
+    S.kbPick = S.kbPick && S.kbPick.id === it.ref.id && S.kbPick.idx === n ? null : { id: it.ref.id, idx: n };
+    sc.el.querySelectorAll('[data-kb-opt]').forEach(b => b.classList.toggle('kb-picked', !!S.kbPick && Number(b.dataset.kbOpt) === S.kbPick.idx));
+    return toast(S.kbPick ? `${n + 1}번 고름 · Enter로 보내기(R로 덧붙일 말)` : '선택 해제');
+  }
+  if (it.type === 'backlog') {
+    const sel = sc.el.querySelector('[data-kb-agent]'), o = sel?.options[n + 1];
+    if (!o) return toast('그 번호의 담당이 없습니다');
+    if (o.disabled) return toast('배정 잠금한 작업자입니다');
+    const same = S.kbPick && S.kbPick.id === it.topic.id && S.kbPick.agent === o.value;
+    S.kbPick = same ? null : { id: it.topic.id, agent: o.value };
+    sel.value = same ? '' : o.value; sel.classList.toggle('kb-picked', !same);
+    return toast(same ? '선택 해제' : `${o.textContent} · Enter로 이 담당 착수`);
+  }
+}
+function kbHist(sc, d) {
+  const side = sc.el?.querySelector('.ms-side');
+  if (!side) return;
+  const items = [...side.querySelectorAll('.hist-item')];
+  if (!items.length) return;
+  const cur = side.querySelector('.hist-item.kb-hl'), i = cur ? items.indexOf(cur) : (d > 0 ? -1 : items.length);
+  const next = items[Math.max(0, Math.min(items.length - 1, i + d))];
+  cur?.classList.remove('kb-hl'); next.classList.add('kb-hl');
+  side.scrollTop += next.getBoundingClientRect().top - side.getBoundingClientRect().top - side.clientHeight / 2 + next.offsetHeight / 2;
+}
 document.addEventListener('keydown', e => {
+  if (e.isComposing || e.keyCode === 229) return;  // 한글 조합 중
+  const sc = kbScope();
+  if (!sc) return;
+  if (sc.help) { if (e.code === 'F1' || (e.code === 'Slash' && e.shiftKey)) { e.preventDefault(); closeDrawer(); } return; }
+  if (matchMedia('(max-width: 880px)').matches) return;  // 휴대폰·좁은 화면은 그대로
+  const tgt = e.target;
+  if (tgt && tgt.matches && tgt.matches('input, textarea, select, [contenteditable="true"]')) {
+    if (e.code === 'Enter' && (e.ctrlKey || e.metaKey) && tgt.matches('[data-kb-reply]')) { e.preventDefault(); kbEnter(sc); }
+    return;  // Esc는 아래 공통 처리(빠져나오기)
+  }
+  if (e.altKey || ((e.ctrlKey || e.metaKey) && e.code !== 'Enter')) return;  // 브라우저·운영체제 단축키는 그대로
+  const c = e.code, sh = e.shiftKey, act = fn => { e.preventDefault(); fn(); };
+  const side = sc.el?.querySelector('.ms-side'), main = sc.el?.querySelector('.ms-main');
+  if (c === 'F1' || (c === 'Slash' && sh)) return act(kbHelp);
+  if (sh && c === 'ArrowUp') return act(() => kbHist(sc, -1));
+  if (sh && c === 'ArrowDown') return act(() => kbHist(sc, 1));
+  if (sh && c === 'Home') return act(() => { if (side) side.scrollTop = 0; });
+  if (sh && c === 'End') return act(() => { if (side) side.scrollTop = side.scrollHeight; });
+  if (c === 'ArrowUp') return act(() => kbMove(sc, -1));
+  if (c === 'ArrowDown') return act(() => kbMove(sc, 1));
+  if (c === 'Home') return act(() => kbMove(sc, 'first'));
+  if (c === 'End') return act(() => kbMove(sc, 'last'));
+  if (c === 'ArrowLeft') return act(() => kbTab(sc, -1));
+  if (c === 'ArrowRight') return act(() => kbTab(sc, 1));
+  if (c === 'PageUp' || c === 'PageDown') return act(() => side?.scrollBy({ top: (c === 'PageUp' ? -1 : 1) * side.clientHeight * 0.9 }));
+  if (c === 'Space') return act(() => main?.scrollBy({ top: (sh ? -1 : 1) * main.clientHeight * 0.8 }));
+  if (c === 'Enter' || c === 'NumpadEnter') return act(() => kbEnter(sc));
+  const dm = /^Digit([1-9])$/.exec(c);
+  if (dm && !sh) return act(() => kbDigit(sc, Number(dm[1]) - 1));
+  if (sh) return;
+  if (c === 'KeyO') return act(() => { const it = kbItem(sc.key); if (it && !sc.modal) openMineItem(it); });
+  if (c === 'KeyR') return act(() => { const ta = sc.el?.querySelector('[data-kb-reply]'); if (ta) { ta.focus(); ta.scrollIntoView({ block: 'nearest' }); } else toast('이 항목에는 입력칸이 없습니다'); });
+  if (c === 'KeyE') return act(() => side?.querySelector('.hist-item.kb-hl .linkish')?.click());
+  const km = /^Key([YNLXA])$/.exec(c);
+  if (km) {
+    const b = sc.el?.querySelector(`[data-kb-key="${km[1].toLowerCase()}"]`);
+    if (!b) return;
+    e.preventDefault();
+    if (km[1] === 'N') {  // 문제 있음: 먼저 무엇이 문제인지 적게 한다
+      S.kbIntent = sc.key;
+      const ta = sc.el.querySelector('[data-kb-reply]');
+      if (ta) { ta.focus(); ta.scrollIntoView({ block: 'nearest' }); toast('문제 내용을 적고 Ctrl+Enter — 담당에게 보내고 문제 있음으로 표시합니다'); } else b.click();
+      return;
+    }
+    kbSend(sc, async () => (b._kb ? b._kb({ quiet: true }) : (b.click(), true)));
+  }
+});
+document.addEventListener('keydown', e => {
+  // Esc: 입력칸 안이면 빠져나오기만(쓰던 글 유지), 아니면 창 닫기
+  if (e.key === 'Escape' && e.target?.matches?.('input, textarea, select')) { e.target.blur(); return; }
   if (e.key === 'Escape') { closeDrawer(); $('.side')?.classList.remove('on'); }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k' && S.data) { e.preventDefault(); const i = $('.top-search input'); i?.focus(); }
 });

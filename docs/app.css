@@ -657,6 +657,23 @@ mark { background: color-mix(in srgb, var(--st-user_test) 35%, transparent); col
 .mine-row, .mine-group { flex: none; }
 .mine-row { display: flex; gap: 12px; align-items: flex-start; padding: 11px 10px; border-radius: 12px; border: 1px solid transparent; background: none; width: 100%; text-align: left; color: inherit; }
 .mine-row:hover { background: var(--card-2); }
+/* 내 차례 키보드 조작: 키 표시·선택지 번호·고른 표시·히스토리 강조·한 줄 안내 */
+.kb { display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 5px; margin-left: 6px; border-radius: 5px; border: 1px solid var(--line-2);
+  background: var(--card-3); color: var(--ink-3); font-size: 10.5px; font-weight: 700; line-height: 1; white-space: nowrap; font-family: inherit; flex: none; }
+.btn.primary .kb { background: color-mix(in srgb, #000 18%, transparent); border-color: color-mix(in srgb, #fff 30%, transparent); color: inherit; }
+.opt { display: flex; align-items: flex-start; gap: 10px; text-align: left; }
+.opt .kb-num { flex: none; display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 6px; background: var(--card-3); color: var(--ink-2); font-size: 11.5px; font-weight: 800; margin-top: 1px; }
+.opt.kb-picked { border-color: var(--accent); background: var(--accent-soft); box-shadow: 0 0 0 2px var(--accent) inset; }
+.opt.kb-picked .kb-num { background: var(--accent); color: #fff; }
+select.kb-picked { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.hist-item.kb-hl .hist-body { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.kb-hint { flex: none; padding: 7px 18px; border-top: 1px solid var(--line); color: var(--ink-3); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ms-main > .kb-hint { padding: 8px 0 0; }
+.kb-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.kb-table th { text-align: left; white-space: nowrap; padding: 6px 14px 6px 0; color: var(--ink); font-weight: 700; vertical-align: top; width: 1%; }
+.kb-table td { padding: 6px 0; color: var(--ink-2); border-bottom: 1px solid var(--line); }
+.kb-table th { border-bottom: 1px solid var(--line); }
+@media (max-width: 880px) { .kb, .opt .kb-num, .kb-hint { display: none; } }
 /* ★ 관문 추적: 하루 넘게 기다린 관문은 왼쪽 띠로, 주제 카드에는 대기 시간 */
 .mine-row.late { box-shadow: inset 3px 0 0 var(--st-blocked); }
 .proj .gate-wait { font-size: 12px; color: var(--st-user_test); font-weight: 600; }
