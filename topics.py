@@ -50,7 +50,8 @@ ACTION_ID_RE = re.compile(r"^A-\d{8}-[a-z0-9]{3,10}$")
 REF_RE = re.compile(r"^[A-Za-z0-9_.:\-]{1,200}$")
 TARGET_KINDS = ("task", "message", "topic", "decision", "general")
 STAGES = ("request", "progress", "validating", "user_test", "blocked", "done")
-ACTION_TYPES = ("reply", "ack", "task-state", "decide")
+ACTION_TYPES = ("reply", "ack", "task-state", "decide", "assign")
+AGENT_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,30}$")
 
 
 def now_iso() -> str:
@@ -117,13 +118,15 @@ def clean_topic(raw: dict) -> dict:
         raise ValueError("제목 없음")
     pri = str(raw.get("priority", "P2"))
     prefer = str(raw.get("prefer", "auto"))
+    if prefer not in ("auto", "claude", "astra", "gpt") and not AGENT_RE.match(prefer):
+        prefer = "auto"
     return {
         "id": tid,
         "title": title,
         "body": str(raw.get("body", ""))[:8000],
         "kind": str(raw.get("kind", "기타"))[:20],
         "priority": pri if pri in ("P0", "P1", "P2", "P3") else "P2",
-        "prefer": prefer if prefer in ("auto", "claude", "astra") else "auto",
+        "prefer": prefer,
         "created_at": str(raw.get("created_at", now_iso()))[:40],
         "from": str(raw.get("from", "dashboard"))[:20],
     }
@@ -254,8 +257,8 @@ def clean_action(raw: dict) -> dict:
         body = str(raw.get("body", "")).strip()
         if not body:
             raise ValueError("빈 답")
-        a.update(target=clean_target(raw.get("target")), body=body[:6000],
-                 to=raw.get("to") if raw.get("to") in AUTHORS else "claude")
+        to = norm_agent(str(raw.get("to") or "dev-claude"))
+        a.update(target=clean_target(raw.get("target")), body=body[:6000], to=to if AGENT_RE.match(to) else "dev-claude")
     elif kind == "ack":
         msgs, keys = raw.get("messages") or [], raw.get("keys") or []
         if not isinstance(msgs, list) or not isinstance(keys, list) or len(msgs) > 1000 or len(keys) > 1000:
@@ -275,6 +278,11 @@ def clean_action(raw: dict) -> dict:
                  note=str(raw.get("note", "")).strip()[:3000])
         if not a["choice"] and not a["note"]:
             raise ValueError("빈 결정")
+    elif kind == "assign":
+        topic, agent = str(raw.get("topic", "")), norm_agent(str(raw.get("agent", "")))
+        if not ID_RE.match(topic) or not AGENT_RE.match(agent or ""):
+            raise ValueError("담당 지정 형식 오류")
+        a.update(topic=topic, agent=agent, note=str(raw.get("note", ""))[:1000])
     return a
 
 
@@ -285,7 +293,7 @@ def data_dir(cfg) -> Path:
 def user_file(cfg) -> tuple[Path, dict]:
     path = data_dir(cfg) / "user.json"
     rec = read_json(path, None) or {"author": "user", "_rule": "이 파일은 topics.py가 사용자 요청을 받아서만 쓴다."}
-    for key in ("processed_actions", "comments", "tasks", "acks", "decisions_answered"):
+    for key in ("processed_actions", "comments", "tasks", "acks", "decisions_answered", "topic_assign"):
         rec.setdefault(key, [])
     return path, rec
 
@@ -317,13 +325,17 @@ def apply_action(cfg, a: dict, source: str) -> str:
         rec["comments"].append({"id": a["id"], "ts": a["created_at"] or ts, "target": a["target"],
                                 "to": a["to"], "body": a["body"], "source": source})
         t = a["target"]
-        box = bridge / ("inbox-astra" if a["to"] == "astra" else "inbox-claude")
-        write_inbox(box, f"USR-REPLY-{a['id']}", f"[사용자 → {a['to'].capitalize()}] 대시보드 답: {t.get('title') or t['id']}",
-                    {"sender": "user (대시보드)", "recipient": a["to"], "kind": "user reply via dashboard",
-                     "task_id": t["id"] if t["kind"] in ("task", "topic") else None,
-                     "in_reply_to": t["id"] if t["kind"] == "message" else None, "target": f"{t['kind']}:{t['id']}"},
-                    a["body"] + f"\n\n(대시보드 대화창에서 보냄 · 답은 python topics.py comment --by {a['to']} --target {t['kind']}:{t['id']} --body \"...\")")
-        result = f"답 전달 → {a['to']} ({t['kind']}:{t['id']})"
+        local = {"dev-claude": ("inbox-claude", "claude"), "dev-astra": ("inbox-astra", "astra")}
+        if a["to"] in local:
+            box, who = local[a["to"]]
+            write_inbox(bridge / box, f"USR-REPLY-{a['id']}", f"[사용자 → {who.capitalize()}] 대시보드 답: {t.get('title') or t['id']}",
+                        {"sender": "user (대시보드)", "recipient": who, "kind": "user reply via dashboard",
+                         "task_id": t["id"] if t["kind"] in ("task", "topic") else None,
+                         "in_reply_to": t["id"] if t["kind"] == "message" else None, "target": f"{t['kind']}:{t['id']}"},
+                        a["body"] + f"\n\n(대시보드 대화창에서 보냄 · 답은 python topics.py comment --by {who} --target {t['kind']}:{t['id']} --body \"...\")")
+            result = f"답 전달 → {a['to']} ({t['kind']}:{t['id']})"
+        else:
+            result = f"답 기록 → {a['to']} (그 PC의 node.py inbox가 전달)"
     elif a["type"] == "ack":
         inbox = bridge / "inbox-claude"
         done = inbox / "done"
@@ -354,6 +366,13 @@ def apply_action(cfg, a: dict, source: str) -> str:
                     {"sender": "user (대시보드)", "recipient": "claude", "kind": "user task-state via dashboard"},
                     "\n".join(f"- {x}" for x in a["ids"]) + (f"\n\n메모: {a['note']}" if a["note"] else ""))
         result = f"작업 {len(a['ids'])}건 단계 → {a['stage']}"
+    elif a["type"] == "assign":
+        rec["topic_assign"] = [r for r in rec["topic_assign"] if r.get("topic") != a["topic"]]
+        rec["topic_assign"].append({"topic": a["topic"], "agent": a["agent"], "note": a["note"], "ts": a["created_at"] or ts})
+        write_inbox(bridge / "inbox-claude", f"USR-ASSIGN-{a['id']}", f"[사용자 → Claude] 주제 담당 변경: {a['topic']} → {a['agent']}",
+                    {"sender": "user (대시보드)", "recipient": "claude", "kind": "user topic assignment", "task_id": a["topic"]},
+                    a["note"] or "대시보드에서 담당을 바꿨습니다.")
+        result = f"주제 담당 지정 {a['topic']} → {a['agent']}"
     else:  # decide
         rec["decisions_answered"] = [r for r in rec["decisions_answered"] if r.get("id") != a["target"]]
         rec["decisions_answered"].append({"id": a["target"], "choice": a["choice"], "note": a["note"], "ts": a["created_at"] or ts})
@@ -408,10 +427,14 @@ def add_note(rec: dict, kind: str, body: str | None):
 
 def cmd_triage(args, cfg):
     path, rec = author_file(cfg, args.id, args.by)
-    rec["assignee"] = args.assign
+    agent = norm_agent(args.assign)
+    if not AGENT_RE.match(agent or ""):
+        sys.exit("--assign은 작업자 ID여야 합니다 (예: dev-claude, server-gpt)")
+    rec["assignee"] = agent
     rec["status"] = args.status or "triage"
-    add_note(rec, "triage", args.note or f"{args.assign}에게 배정")
-    rec["updated_at"] = now_iso()
+    rec["dispatch_reason"] = f"수동 배정: {args.note}" if args.note else "수동 배정"
+    add_note(rec, "triage", args.note or f"{agent}에게 배정")
+    rec["updated_at"] = rec["assigned_at"] = rec["status_at"] = now_iso()
     write_json(path, rec)
     print(f"{args.id}: 담당 {args.assign}, 상태 {rec['status']}")
 
@@ -426,7 +449,9 @@ def cmd_plan(args, cfg):
         if vals:
             plan[key] = vals
     rec["plan"] = plan
-    rec["status"] = args.status or "ready"
+    if args.status or rec.get("status") in (None, "new", "triage"):
+        rec["status"] = args.status or "ready"
+        rec["status_at"] = now_iso()
     add_note(rec, "plan", args.note or "진행 베이스 작성")
     rec["updated_at"] = now_iso()
     write_json(path, rec)
@@ -445,6 +470,7 @@ def cmd_status(args, cfg):
     path, rec = author_file(cfg, args.id, args.by)
     if args.status:
         rec["status"] = args.status
+        rec["status_at"] = now_iso()
     if args.task:
         rec["linked_task_id"] = args.task
     add_note(rec, "status", args.note or f"상태 {args.status or '유지'}" + (f", 작업 {args.task} 연결" if args.task else ""))
@@ -455,63 +481,229 @@ def cmd_status(args, cfg):
 
 # ---------------------------------------------------------------- 병합·조회 (build.py와 공유)
 
-def merged_topics(folder: Path) -> list[dict]:
+# 허브(개발컴)의 기존 작성자 파일 이름 → 작업자 ID
+FILE_AGENT = {"claude": "dev-claude", "astra": "dev-astra"}
+LEAD = "dev-claude"
+
+
+def to_dt(v) -> datetime:
+    """시각 문자열(UTC 'Z' 또는 +09:00 등)을 비교 가능한 값으로. 없거나 형식이 틀리면 가장 이른 시각."""
+    try:
+        d = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+        return d if d.tzinfo else d.replace(tzinfo=KST)
+    except ValueError:
+        return datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def norm_agent(x: str | None) -> str | None:
+    return FILE_AGENT.get(x, x) if x else None
+
+
+def user_assigns(cfg: dict | None) -> dict:
+    if not cfg:
+        return {}
+    rec = read_json(data_dir(cfg) / "user.json", None) or {}
+    out = {}
+    for r in rec.get("topic_assign", []):
+        out[r.get("topic")] = r
+    return out
+
+
+def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict] | None = None) -> list[dict]:
+    """주제 원본 + 허브 작성자 파일(claude/astra) + 다른 PC 작업자 기록 + 사용자 지정 담당을 합친다."""
     out = []
     if not folder.is_dir():
         return out
+    assigns = user_assigns(cfg)
+    by_topic: dict[str, list[dict]] = {}
+    for r in node_records or []:
+        by_topic.setdefault(r.get("topic"), []).append(r)
     for d in sorted(p for p in folder.iterdir() if p.is_dir() and ID_RE.match(p.name)):
         base = read_json(d / "topic.json")
         if not base:
             continue
-        recs = {a: read_json(d / f"{a}.json") for a in AUTHORS}
-        recs = {a: r for a, r in recs.items() if r}
+        recs = {FILE_AGENT[a]: r for a in AUTHORS if (r := read_json(d / f"{a}.json", None))}
         t = dict(base)
-        t["notes"] = sorted(({**n, "by": a} for a, r in recs.items() for n in r.get("notes", [])), key=lambda n: n.get("ts", ""))
-        ordered = sorted(recs.items(), key=lambda kv: kv[1].get("updated_at", ""))
+        events = []  # (ts, agent, record) — 시간순으로 상태를 정한다
+        notes = []
+        for a, r in recs.items():
+            notes += [{**n, "by": a} for n in r.get("notes", [])]
+            # 상태는 '상태를 정한 시각' 기준으로 비교한다. 메모만 덧붙여도 옛 상태가 최신으로 바뀌지 않게.
+            st_at = r.get("status_at") or r.get("assigned_at") or r.get("updated_at", "")
+            events.append((st_at, a, {"status": r.get("status"), "linked_task_id": r.get("linked_task_id"),
+                                      "priority": r.get("priority"), "plan": r.get("plan")}))
+        for r in by_topic.get(t["id"], []):
+            notes.append({"ts": r.get("ts"), "kind": r.get("kind"), "body": r.get("body", ""), "by": r.get("agent")})
+            events.append((r.get("ts", ""), r.get("agent"), r))
+        t["notes"] = sorted(notes, key=lambda n: n.get("ts") or "")
         t["status"] = "new"
-        for a, r in ordered:  # 가장 최근 기록의 상태가 이긴다
+        plans = {}
+        claims = []
+        for _ts, a, r in sorted(events, key=lambda e: e[0] or ""):
             if r.get("status") in STATUSES:
                 t["status"] = r["status"]
             if r.get("linked_task_id"):
                 t["linked_task_id"] = r["linked_task_id"]
             if r.get("priority") in ("P0", "P1", "P2", "P3"):
                 t["priority"] = r["priority"]
-        # 담당 지정은 사령탑(Claude) 기록 우선
-        t["assignee"] = (recs.get("claude") or {}).get("assignee") or (recs.get("astra") or {}).get("assignee")
-        planner = t["assignee"] if t["assignee"] in recs and recs[t["assignee"]].get("plan") else \
-            next((a for a, r in ordered[::-1] if r.get("plan")), None)
+            if r.get("plan"):
+                plans[a] = r["plan"]
+            if r.get("kind") == "claim":
+                claims.append(a)
+        lead = recs.get(LEAD) or {}
+        t["assignee"] = norm_agent(lead.get("assignee") or (recs.get("dev-astra") or {}).get("assignee"))
+        t["dispatch_reason"] = lead.get("dispatch_reason")
+        t["dispatch_scores"] = lead.get("dispatch_scores")
+        ua = assigns.get(t["id"])
+        if ua and to_dt(ua.get("ts")) >= to_dt(lead.get("assigned_at")):
+            t["assignee"], t["assign_by"], t["dispatch_reason"] = ua["agent"], "user", "사용자가 대시보드에서 지정"
+            if t["status"] == "new":
+                t["status"] = "triage"
+        planner = t["assignee"] if t["assignee"] in plans else (next(iter(plans)) if plans else None)
         if planner:
-            t["plan"], t["plan_by"] = recs[planner]["plan"], planner
-        t["updated_at"] = max([base.get("received_at", "")] + [r.get("updated_at", "") for r in recs.values()])
-        t["authors"] = sorted(recs)
-        t["turn"] = whose_turn(t, recs)
+            t["plan"], t["plan_by"] = plans[planner], planner
+        t["claims"] = sorted(set(claims))
+        t["conflict"] = [a for a in t["claims"] if t.get("assignee") and a != t["assignee"]]
+        t["updated_at"] = max([base.get("received_at", "")] + [e[0] or "" for e in events])
+        t["authors"] = sorted(set(list(recs) + [r.get("agent") for r in by_topic.get(t["id"], [])]))
+        t["turn"] = whose_turn(t)
         out.append(t)
     return out
 
 
-def whose_turn(t: dict, recs: dict) -> str | None:
+def whose_turn(t: dict) -> str | None:
     if t["status"] in ("done", "parked"):
         return None
-    if not recs:
-        return "claude"  # 사령탑 분배 대기
     a = t.get("assignee")
-    if a and not (recs.get(a) or {}).get("plan") and t["status"] in ("new", "triage"):
+    if not a:
+        return LEAD  # 배분 대기
+    if not t.get("plan"):
         return a  # 진행 베이스 작성 대기
-    other = {"claude": "astra", "astra": "claude"}.get(a or "")
-    if a and other and (recs.get(a) or {}).get("plan"):
-        reviewed = any(n.get("kind") == "review" for n in (recs.get(other) or {}).get("notes", []))
-        if not reviewed:
-            return other  # 교차 검토 대기
+    reviewer = LEAD if a != LEAD else "dev-astra"
+    if not any(n.get("kind") == "review" and n.get("by") != a for n in t.get("notes", [])):
+        return reviewer  # 교차 검토 대기
     return a
 
 
 def cmd_list(args, cfg):
-    topics = merged_topics(topics_dir(cfg))
+    node_recs = []
+    if cfg.get("pc"):
+        from node import collect_nodes
+        pw = os.environ.get("REAL_OPS_PASSWORD") or (Path(args.password_file).read_text(encoding="utf-8").strip() if args.password_file else None)
+        node_recs = [r for n in collect_nodes(cfg, pw) for r in n.get("topic_records", [])]
+    topics = merged_topics(topics_dir(cfg), cfg, node_recs)
     if not topics:
         print("주제 없음")
         return
     for t in sorted(topics, key=lambda x: x["created_at"], reverse=True):
-        print(f"{t['id']}  [{t['status']:<6}] {t['priority']}  담당={t.get('assignee') or '-':<6} 차례={t.get('turn') or '-':<6} {t['title']}")
+        print(f"{t['id']}  [{t['status']:<6}] {t['priority']}  담당={t.get('assignee') or '-':<13} 차례={t.get('turn') or '-':<13} {t['title']}")
+        if t.get("dispatch_reason"):
+            print(f"    배분 근거: {t['dispatch_reason']}")
+
+
+# ---------------------------------------------------------------- 자동 배분 (허브 한 곳에서만 실행)
+
+def load_routing(cfg) -> dict:
+    p = ROOT / cfg.get("routing_file", "routing.json")
+    r = read_json(p, None) or read_json(ROOT / "routing.example.json", {}) or {}
+    return r
+
+
+def score_agents(topic: dict, agents: list[dict], loads: dict, routing: dict) -> list[tuple[float, str, list[str]]]:
+    text = " ".join(str(topic.get(k, "")) for k in ("title", "body", "kind")).lower()
+    now = datetime.now(KST)
+    stale = routing.get("stale_minutes", 120)
+    rows = []
+    for a in agents:
+        if a.get("accept_topics") is False:
+            continue
+        s, why = 0.0, []
+        for rule in routing.get("rules", []):
+            hits = [w for w in rule.get("match", []) if w.lower() in text]
+            if not hits:
+                continue
+            w = float(rule.get("weight", 3))
+            if rule.get("prefer_pc") and a["pc"] == rule["prefer_pc"]:
+                s += w; why.append(f"'{hits[0]}' → {a['pc_label']} +{w:g}")
+            if rule.get("prefer_ai") and a.get("ai") == rule["prefer_ai"]:
+                s += w; why.append(f"'{hits[0]}' → {a.get('ai')} +{w:g}")
+        km = (routing.get("kind_map") or {}).get(topic.get("kind"), {})
+        if km.get("prefer_pc") == a["pc"]:
+            s += float(km.get("weight", 2)); why.append(f"유형 {topic.get('kind')} → {a['pc_label']}")
+        if km.get("prefer_ai") == a.get("ai"):
+            s += float(km.get("weight", 2)); why.append(f"유형 {topic.get('kind')} → {a.get('ai')}")
+        pref = topic.get("prefer") or "auto"
+        if norm_agent(pref) == a["id"]:
+            s += 20; why.append("사용자 선호 +20")
+        elif pref in ("claude", "gpt") and a.get("ai") == pref:
+            s += 5; why.append(f"사용자 선호 {pref} +5")
+        load = loads.get(a["id"], 0)
+        if load:
+            pen = load * float(routing.get("load_penalty", 1.5))
+            s -= pen; why.append(f"맡은 주제 {load}건 −{pen:g}")
+        seen = a.get("last_seen") or a.get("pc_synced")
+        if not seen:
+            s -= float(routing.get("unknown_penalty", 15)); why.append("신호 기록 없음")
+        else:
+            try:
+                mins = (now - datetime.fromisoformat(seen.replace("Z", "+00:00"))).total_seconds() / 60
+            except ValueError:
+                mins = 10 ** 6
+            if mins > stale:
+                pen = float(routing.get("offline_penalty", 8))
+                s -= pen; why.append(f"{int(mins // 60)}시간 신호 없음 −{pen:g}")
+            elif a.get("last_seen"):
+                s += 1; why.append("최근 직접 활동 +1")  # PC만 살아 있는 것보다 본인이 활동 중인 작업자를 우대
+        if a["id"] == routing.get("default_agent", LEAD):
+            s += 0.5  # 동점이면 사령탑
+        rows.append((round(s, 2), a["id"], why))
+    rows.sort(key=lambda r: -r[0])
+    return rows
+
+
+def cmd_dispatch(args, cfg):
+    """분배되지 않은 새 주제를 규칙 점수로 작업자 한 명에게 배정하고 근거를 사령탑 기록에 남긴다."""
+    from node import collect_nodes, all_agents  # 같은 폴더의 PC 도구
+    if (cfg.get("pc") or {}).get("role") != "hub":
+        sys.exit("자동 배분은 허브 PC(role=hub)에서만 실행합니다. 중복 배분을 막기 위한 규칙입니다.")
+    routing = load_routing(cfg)
+    if routing.get("auto") is False:
+        print("자동 배분 꺼짐(routing.json auto=false)")
+        return
+    pw = os.environ.get("REAL_OPS_PASSWORD") or (Path(args.password_file).read_text(encoding="utf-8").strip() if args.password_file else None)
+    nodes = collect_nodes(cfg, pw)
+    agents = all_agents(nodes)
+    if not agents:
+        sys.exit("등록된 작업자가 없습니다. node.py init으로 이 PC 작업자를 등록하세요.")
+    node_recs = [r for n in nodes for r in n.get("topic_records", [])]
+    topics = merged_topics(topics_dir(cfg), cfg, node_recs)
+    loads: dict[str, int] = {}
+    for t in topics:
+        if t.get("assignee") and t["status"] not in ("done", "parked"):
+            loads[t["assignee"]] = loads.get(t["assignee"], 0) + 1
+    labels = {a["id"]: f"{a['pc_label']} {a.get('label', a['id'])}" for a in agents}
+    done = 0
+    for t in topics:
+        if t.get("assignee") or t["status"] in ("done", "parked"):
+            continue
+        rows = score_agents(t, agents, loads, routing)
+        if not rows:
+            continue
+        best = rows[0]
+        runner = rows[1] if len(rows) > 1 else None
+        reason = f"{labels[best[1]]} (점수 {best[0]:g}: {', '.join(best[2]) or '규칙 일치 없음 → 기본 담당'})"
+        if runner:
+            reason += f" · 차점 {labels[runner[1]]} {runner[0]:g}"
+        path, rec = author_file(cfg, t["id"], "claude")
+        ts = now_iso()
+        rec.update({"assignee": best[1], "status": rec.get("status") if rec.get("status") not in (None, "new") else "triage",
+                    "dispatch_reason": reason, "dispatch_scores": {r[1]: r[0] for r in rows}, "assigned_at": ts, "status_at": ts, "updated_at": ts})
+        add_note(rec, "triage", f"자동 배분: {reason}")
+        write_json(path, rec)
+        loads[best[1]] = loads.get(best[1], 0) + 1
+        done += 1
+        print(f"{t['id']} → {best[1]} · {reason}")
+    print(f"자동 배분 {done}건")
 
 
 # ---------------------------------------------------------------- 알림 (수신함 메시지, 중복 없음)
@@ -528,33 +720,46 @@ def write_inbox(folder: Path, mid: str, first_line: str, headers: dict, body: st
 
 
 def cmd_announce(args, cfg):
+    """허브 PC 작업자(dev-*)에게 배정·검토 차례를 수신함 메시지로 한 번씩 알린다. 다른 PC 작업자는 그 PC의 node.py inbox가 맡는다."""
+    from node import collect_nodes
     bridge = Path(cfg["bridge_dir"])
     folder = topics_dir(cfg)
+    pw = os.environ.get("REAL_OPS_PASSWORD") or (Path(args.password_file).read_text(encoding="utf-8").strip() if args.password_file else None)
+    node_recs = [r for n in collect_nodes(cfg, pw) for r in n.get("topic_records", [])] if cfg.get("pc") else []
+    boxes = {"dev-claude": bridge / "inbox-claude", "dev-astra": bridge / "inbox-astra"}
+    file_of = {"dev-claude": "claude", "dev-astra": "astra"}
     sent = 0
-    for t in merged_topics(folder):
+    for t in merged_topics(folder, cfg, node_recs):
         state_path = folder / t["id"] / ".announced.json"
         done = set(read_json(state_path, []))
-        turn, short = t.get("turn"), t["id"]
-        brief = f"주제: {t['title']}\n유형: {t.get('kind')} · 우선순위: {t['priority']} · 선호: {t.get('prefer')}\n\n원래 메모:\n{t.get('body') or '(없음)'}"
+        turn, short, a = t.get("turn"), t["id"], t.get("assignee")
+        brief = (f"주제: {t['title']}\n유형: {t.get('kind')} · 우선순위: {t['priority']} · 선호: {t.get('prefer')}\n"
+                 f"배분 근거: {t.get('dispatch_reason') or '-'}\n\n원래 메모:\n{t.get('body') or '(없음)'}")
         jobs = []
-        if t["status"] == "new" and not t["authors"]:
-            jobs.append(("new", bridge / "inbox-claude", f"DASH-TOPIC-NEW-{short}",
-                         f"[대시보드 → Claude] 새 주제 분배 필요: {t['title']}",
-                         {"sender": "dashboard", "recipient": "Claude lead", "kind": "topic new; triage needed", "task_id": short},
-                         brief + f"\n\n다음: python topics.py triage {short} --by claude --assign <claude|astra> --note \"이유\""))
-        if turn == "astra" and t.get("assignee") == "astra" and not t.get("plan"):
-            jobs.append(("assign-astra", bridge / "inbox-astra", f"C2A-TOPIC-ASSIGN-{short}",
-                         f"[Claude → Astra] 주제 배정 — 진행 베이스 작성 요청: {t['title']}",
-                         {"sender": "Claude (사령탑)", "recipient": "Astra", "kind": "topic assignment; plan requested", "task_id": short},
-                         brief + "\n\n요청: 목표·범위·필요한 입력·첫 단계·위험·완료 기준을 진행 베이스로 남겨주세요. 구현·설치·DB 변경은 하지 않습니다.\n"
-                         f"기록: python \"{ROOT / 'topics.py'}\" plan {short} --by astra --goal \"...\" --scope \"...\" --first-step \"...\" --done-when \"...\"\n"
-                         f"(직접 편집 시 {folder / short / 'astra.json'} 만 수정)"))
-        if turn == "astra" and t.get("assignee") == "claude" and t.get("plan"):
-            jobs.append(("review-astra", bridge / "inbox-astra", f"C2A-TOPIC-REVIEW-{short}",
-                         f"[Claude → Astra] 주제 진행 베이스 교차 검토 요청: {t['title']}",
-                         {"sender": "Claude (사령탑)", "recipient": "Astra", "kind": "topic review request", "task_id": short},
-                         brief + "\n\nClaude 진행 베이스:\n" + json.dumps(t["plan"], ensure_ascii=False, indent=1) +
-                         f"\n\n기록: python \"{ROOT / 'topics.py'}\" note {short} --by astra --kind review --body \"검토 의견\""))
+        if t["status"] == "new" and not a:
+            jobs.append(("new", boxes["dev-claude"], f"DASH-TOPIC-NEW-{short}",
+                         f"[대시보드 → Claude] 새 주제 (자동 배분 대기): {t['title']}",
+                         {"sender": "dashboard", "recipient": "Claude lead", "kind": "topic new", "task_id": short},
+                         brief + f"\n\n자동 배분이 꺼져 있으면: python topics.py triage {short} --by claude --assign <작업자ID> --note \"이유\""))
+        if a in boxes and turn == a and not t.get("plan"):
+            who = file_of[a]
+            jobs.append((f"assign-{a}", boxes[a], f"DASH-TOPIC-ASSIGN-{short}-{a}",
+                         f"[대시보드 → {who.capitalize()}] 주제 배정 — 진행 베이스 작성 요청: {t['title']}",
+                         {"sender": "dashboard (허브 배분)", "recipient": who, "kind": "topic assignment; plan requested", "task_id": short},
+                         brief + "\n\n요청: 목표·범위·필요한 입력·첫 단계·위험·완료 기준을 진행 베이스로 남겨주세요. 배정은 구현·설치·DB 변경 승인이 아닙니다.\n"
+                         f"기록: python \"{ROOT / 'topics.py'}\" plan {short} --by {who} --goal \"...\" --scope \"...\" --first-step \"...\" --done-when \"...\""))
+        if turn in boxes and turn != a and t.get("plan"):
+            who = file_of[turn]
+            jobs.append((f"review-{turn}", boxes[turn], f"DASH-TOPIC-REVIEW-{short}-{turn}",
+                         f"[대시보드 → {who.capitalize()}] 진행 베이스 교차 검토 요청: {t['title']}",
+                         {"sender": "dashboard", "recipient": who, "kind": "topic review request", "task_id": short},
+                         brief + f"\n\n담당 {a}의 진행 베이스:\n" + json.dumps(t["plan"], ensure_ascii=False, indent=1) +
+                         f"\n\n기록: python \"{ROOT / 'topics.py'}\" note {short} --by {who} --kind review --body \"검토 의견\""))
+        for c in t.get("conflict") or []:
+            jobs.append((f"conflict-{c}", boxes["dev-claude"], f"DASH-TOPIC-CONFLICT-{short}-{c}",
+                         f"[대시보드 → Claude] 중복 착수 감지: {t['title']}",
+                         {"sender": "dashboard", "recipient": "Claude lead", "kind": "duplicate claim", "task_id": short},
+                         f"담당은 {a}인데 {c}도 착수했습니다. 한쪽을 멈추거나 담당을 바꿔주세요."))
         for key, box, mid, first, headers, body in jobs:
             if key in done:
                 continue
@@ -564,7 +769,7 @@ def cmd_announce(args, cfg):
             print(f"작성: {p}")
         if jobs:
             write_json(state_path, sorted(done))
-    print(f"새 알림 {sent}건" + (" — Astra가 쉬는 중이면 delegate.py queue로 같은 message_id를 한 번 전달하세요." if sent else ""))
+    print(f"새 알림 {sent}건" + (" — Astra 수신함에 쓴 경우 Astra가 쉬는 중이면 delegate.py queue로 같은 message_id를 한 번 전달하세요." if sent else ""))
 
 
 # ---------------------------------------------------------------- CLI
@@ -580,8 +785,10 @@ def main():
     p.add_argument("--prefer", default="auto", choices=["auto", "claude", "astra"])
     sub.add_parser("list")
     sub.add_parser("announce")
+    sub.add_parser("dispatch", help="새 주제 자동 배분(허브 PC에서만)")
     p = sub.add_parser("triage"); p.add_argument("id"); p.add_argument("--by", required=True, choices=AUTHORS)
-    p.add_argument("--assign", required=True, choices=AUTHORS); p.add_argument("--status", choices=STATUSES); p.add_argument("--note")
+    p.add_argument("--assign", required=True, help="작업자 ID (예: dev-claude, server-gpt). claude/astra도 허용")
+    p.add_argument("--status", choices=STATUSES); p.add_argument("--note")
     p = sub.add_parser("plan"); p.add_argument("id"); p.add_argument("--by", required=True, choices=AUTHORS)
     p.add_argument("--goal"); p.add_argument("--scope", action="append"); p.add_argument("--input", action="append")
     p.add_argument("--first-step", action="append"); p.add_argument("--risk", action="append"); p.add_argument("--done-when")
@@ -596,7 +803,8 @@ def main():
     args = ap.parse_args()
     cfg = load_cfg()
     {"pull": cmd_pull, "add-blob": cmd_add_blob, "add": cmd_add, "list": cmd_list, "announce": cmd_announce,
-     "triage": cmd_triage, "plan": cmd_plan, "note": cmd_note, "status": cmd_status, "comment": cmd_comment}[args.cmd](args, cfg)
+     "triage": cmd_triage, "plan": cmd_plan, "note": cmd_note, "status": cmd_status, "comment": cmd_comment,
+     "dispatch": cmd_dispatch}[args.cmd](args, cfg)
 
 
 if __name__ == "__main__":

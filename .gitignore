@@ -9,6 +9,9 @@
 !/publish.ps1
 !/sync.ps1
 !/setup-auto.ps1
+!/node.py
+!/routing.example.json
+!/서버컴-연결.md
 !/docs/
 !/tests/
 !/data/

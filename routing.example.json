@@ -1,0 +1,19 @@
+{
+  "_설명": "자동 배분 규칙. routing.json으로 복사해 고친다(routing.json은 커밋하지 않음). 점수가 가장 높은 작업자 한 명에게 배정한다.",
+  "auto": true,
+  "default_agent": "dev-claude",
+  "stale_minutes": 120,
+  "load_penalty": 1.5,
+  "offline_penalty": 8,
+  "unknown_penalty": 15,
+  "rules": [
+    { "이름": "서버 쪽 일", "match": ["서버", "맵서버", "캐릭서버", "로그인서버", "map-server", "char-server", "DB", "SQL", "NPC", "스크립트", "퀘스트", "인스턴스", "YAML", "rAthena", "패킷 처리"], "prefer_pc": "server", "weight": 4 },
+    { "이름": "클라이언트·화면 쪽 일", "match": ["UI", "화면", "오버레이", "라운지", "클라", "클라이언트", "EXE", "디자인", "아이콘", "네이티브", "GRF", "HUD"], "prefer_pc": "dev", "weight": 4 },
+    { "이름": "검증·분석은 GPT 우대", "match": ["검증", "리뷰", "검토", "정적 분석", "디스어셈블", "대조"], "prefer_ai": "gpt", "weight": 2 },
+    { "이름": "설계·구현은 Claude 우대", "match": ["구현", "설계", "작성", "만들", "개선"], "prefer_ai": "claude", "weight": 1 }
+  ],
+  "kind_map": {
+    "디자인": { "prefer_pc": "dev", "weight": 2 },
+    "조사·분석": { "prefer_ai": "gpt", "weight": 1 }
+  }
+}

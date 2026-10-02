@@ -528,17 +528,39 @@ def merge_tasks(base: list[dict], curated: list[dict]):
     return base, conflicts
 
 
-def load_topics(cfg: dict, log: SourceLog):
+def load_nodes(cfg: dict, pw: str | None, log: SourceLog):
+    """각 PC(작업 노드)의 작업자 현황·주제 기록을 모은다."""
+    from node import collect_nodes, all_agents
+    if not cfg.get("pc"):
+        return [], [], []
+    nodes = collect_nodes(cfg, pw)
+    for n in nodes:
+        last = parse_iso(n.get("synced_at") or n.get("updated_at"))
+        log.add(f"node-{n['pc']}", f"PC · {n.get('label', n['pc'])}", "node", n.get("source", ""),
+                len(n.get("agents") or {}), last, error=n.get("error"),
+                note=f"주제 기록 {len(n.get('topic_records') or [])}건")
+    agents = all_agents(nodes)
+    summary = [{"pc": n["pc"], "label": n.get("label", n["pc"]), "role": n.get("role"), "synced_at": n.get("synced_at") or n.get("updated_at"),
+                "error": n.get("error"), "agents": sorted((n.get("agents") or {}).keys())} for n in nodes]
+    records = [r for n in nodes for r in n.get("topic_records") or []]
+    return summary, agents, records
+
+
+def load_topics(cfg: dict, log: SourceLog, node_records: list | None = None):
     from topics import merged_topics  # 같은 병합 규칙을 쓴다
     folder = (ROOT / cfg.get("topics_dir", "topics")).resolve()
     try:
-        rows = merged_topics(folder)
+        rows = merged_topics(folder, cfg, node_records or [])
     except Exception as exc:  # noqa: BLE001
         log.add("topics", "주제 보드", "topics", folder, 0, error=str(exc))
         return []
     last = max((parse_iso(t.get("updated_at")) for t in rows if parse_iso(t.get("updated_at"))), default=None)
+    turns: dict[str, int] = {}
+    for t in rows:
+        if t.get("turn"):
+            turns[t["turn"]] = turns.get(t["turn"], 0) + 1
     log.add("topics", "주제 보드", "topics", folder, len(rows), last,
-            note=f"차례: Claude {sum(t.get('turn') == 'claude' for t in rows)} · Astra {sum(t.get('turn') == 'astra' for t in rows)}")
+            note="차례: " + (", ".join(f"{k} {v}" for k, v in sorted(turns.items())) or "없음"))
     return rows
 
 
@@ -598,7 +620,7 @@ class Masker:
 
 # ---------------------------------------------------------------- 조립
 
-def build_payload(cfg: dict) -> dict:
+def build_payload(cfg: dict, pw: str | None = None) -> dict:
     log = SourceLog()
     bridge = Path(cfg["bridge_dir"])
     limits = cfg["limits"]
@@ -611,7 +633,10 @@ def build_payload(cfg: dict) -> dict:
     load_ai_runs(Path(cfg["ai_runs_dir"]), log)
     curated = load_curated(cfg.get("curated_files", []), log)
     tasks, conflicts = merge_tasks(tasks, curated["tasks"])
-    topics = load_topics(cfg, log)
+    nodes, agents, node_records = load_nodes(cfg, pw, log)
+    topics = load_topics(cfg, log, node_records)
+    from topics import load_routing
+    routing = load_routing(cfg)
 
     # tasks.json의 메시지 상태(ACK 대기)를 메시지 목록에 반영
     ack_pending = {m.get("id") for m in task_msgs if str(m.get("ack", "")).lower() in ("pending", "")
@@ -630,8 +655,13 @@ def build_payload(cfg: dict) -> dict:
             "conflicts": conflicts,
             "ack_pending": sorted(ack_pending),
             "repo": cfg.get("github_repo") or None,
+            "hub": (cfg.get("pc") or {}).get("id"),
+            "routing": {"auto": routing.get("auto", True), "default_agent": routing.get("default_agent", "dev-claude"),
+                        "rules": routing.get("rules", []), "stale_minutes": routing.get("stale_minutes", 120)},
         },
         "topics": topics,
+        "nodes": nodes,
+        "agents": agents,
         "sources": log.rows,
         "tasks": tasks,
         "messages": messages,
@@ -709,7 +739,14 @@ def main():
     cfg = json.loads(read_text(Path(args.config)))
     example = json.loads(read_text(ROOT / "config.example.json"))
     cfg["limits"] = {**example["limits"], **cfg.get("limits", {})}
-    payload = build_payload(cfg)
+    if args.output:
+        cfg["output"] = str(Path(args.output).resolve())
+    # 다른 PC 기록을 열 때도 비밀번호가 필요하므로 먼저 받는다(--no-encrypt면 있을 때만 쓴다)
+    if args.no_encrypt:
+        pw = Path(args.password_file).read_text(encoding="utf-8").strip() if args.password_file else os.environ.get("REAL_OPS_PASSWORD")
+    else:
+        pw = get_password(args)
+    payload = build_payload(cfg, pw)
 
     if args.dump:
         dump = Path(args.dump)
@@ -736,7 +773,7 @@ def main():
         print("변경 없음 — 다시 만들지 않습니다")
         sys.exit(10)
     stamp_assets()
-    size, info = encrypt(payload, out, get_password(args), args.new_salt)
+    size, info = encrypt(payload, out, pw, args.new_salt)
     marker.parent.mkdir(exist_ok=True)
     marker.write_text(f"{digest} {file_sha()}")
     print(f"암호화 완료: {out} (평문 {size:,} bytes) {info}")

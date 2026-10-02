@@ -38,8 +38,12 @@ if (mode === 'open-topic') {
   const plain = readFileSync(0);
   JSON.parse(plain.toString('utf8')); // 유효한 JSON인지 확인
   let salt = null;
-  if (!rest.includes('--new-salt') && existsSync(file)) {
-    try { salt = Buffer.from(JSON.parse(readFileSync(file, 'utf8')).salt, 'base64'); } catch { salt = null; }
+  // --salt-from <파일>: 다른 암호문(메인 게시본)과 같은 salt를 써서 대시보드가 한 키로 모두 열 수 있게 한다
+  const sf = rest.indexOf('--salt-from');
+  const saltSource = sf >= 0 ? rest[sf + 1] : (!rest.includes('--new-salt') && existsSync(file) ? file : null);
+  if (saltSource) {
+    try { salt = Buffer.from(JSON.parse(readFileSync(saltSource, 'utf8')).salt, 'base64'); } catch { salt = null; }
+    if (sf >= 0 && (!salt || salt.length !== 16)) { console.error('salt를 읽지 못했습니다: ' + saltSource); process.exit(5); }
   }
   if (!salt || salt.length !== 16) salt = randomBytes(16);
   const iv = randomBytes(12);

@@ -83,7 +83,8 @@ def main():
         for m in payload["messages"][:200]:
             probes.update(x for x in (m.get("id"), m.get("title")) if x and len(x) >= 10)
         for s in payload["sources"]:
-            probes.add(s["path"])
+            if len(s["path"]) >= 8 and ("/" in s["path"] or "\\" in s["path"]):
+                probes.add(s["path"])  # 실제 경로만 검사(짧은 설명 문구는 화면 글과 겹쳐 오탐이 남)
         for m in payload["memory"]:
             if len(m["id"]) >= 8:
                 probes.add(m["id"])

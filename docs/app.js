@@ -66,6 +66,7 @@ const ICON_PATHS = {
   user: '<circle cx="12" cy="8.5" r="3.5"/><path d="M5 20a7 7 0 0 1 14 0"/>',
   link: '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>',
   install: '<path d="M12 4v11M7.5 10.5L12 15l4.5-4.5"/><path d="M5 19.5h14"/>',
+  agents: '<circle cx="9" cy="8.5" r="3"/><path d="M3.5 19a5.5 5.5 0 0 1 11 0"/><circle cx="17" cy="9.5" r="2.5"/><path d="M15.5 14.2a4.5 4.5 0 0 1 5 4.8"/>',
 };
 function icon(name) {
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -108,12 +109,39 @@ const PEOPLE = {
   cli: { name: 'CLI', full: 'Claude CLI 작업자', role: '지정 사본 구현·조사', ini: 'W' },
   dashboard: { name: '대시보드', full: '대시보드', role: '자동 기록', ini: 'D' },
 };
-const person = id => PEOPLE[id] || { name: id || '?', full: id || '?', role: '', ini: (id || '?').slice(0, 1).toUpperCase() };
+// 작업자(PC + AI) 표시. 예: dev-claude → "개발컴 · Claude"
+const LEGACY = { claude: 'dev-claude', astra: 'dev-astra' };
+function agentOf(id) {
+  const ag = S.data?.agents || [];
+  return ag.find(a => a.id === id) || ag.find(a => a.id === LEGACY[id]) || null;
+}
+function person(id) {
+  if (PEOPLE[id] && !agentOf(id)) return PEOPLE[id];
+  const a = agentOf(id);
+  if (a) {
+    const short = (a.label || a.id).replace(/\s*\(.*\)$/, '');
+    return { name: `${a.pc_label} ${short}`, full: `${a.pc_label} · ${a.label || a.id}`, role: a.ai === 'gpt' ? 'GPT 계열' : 'Claude 계열',
+      ini: a.ai === 'gpt' ? 'G' : 'C', ai: a.ai, pc: a.pc };
+  }
+  if (PEOPLE[id]) return PEOPLE[id];
+  return { name: id || '?', full: id || '?', role: '', ini: (id || '?').slice(0, 1).toUpperCase() };
+}
 function av(id, small) {
   const p = person(id);
-  const known = PEOPLE[id] ? id : 'cli';
-  return h('span', { class: `av ${known}${small ? ' sm' : ''}`, title: p.full, 'aria-label': p.full }, p.ini);
+  const a = agentOf(id);
+  const cls = a ? (a.ai === 'gpt' ? 'astra' : 'claude') : PEOPLE[id] ? id : 'cli';
+  const pcTag = a && a.pc !== S.data?.meta?.hub ? h('i', { class: 'pc-dot', 'aria-hidden': 'true' }) : null;
+  return h('span', { class: `av ${cls}${small ? ' sm' : ''}`, title: p.full, 'aria-label': p.full }, p.ini, pcTag);
 }
+const agentState = a => {
+  const seen = a?.last_seen || a?.pc_synced;
+  const stale = S.data?.meta?.routing?.stale_minutes || 120;
+  if (!seen) return { cls: 'neutral', label: '신호 없음', icon: 'clock' };
+  const m = (Date.now() - toMs(seen)) / 6e4;
+  if (m > stale) return { cls: 'blocked', label: '끊김', icon: 'alert' };
+  if (!a.current) return { cls: 'neutral', label: '쉬는 중', icon: 'pause' };
+  return { cls: 'done', label: '작업 중', icon: 'play' };
+};
 
 const STAGES = [
   { id: 'request', label: '요청', icon: 'inbox' },
@@ -320,7 +348,10 @@ function derive(data) {
   const unprocessed = msgs.filter(m => m.unprocessed && !pendAckMsgs.has(m.id));
   const unanswered = msgs.filter(m => m.box === 'inbox-astra' && m.sender === 'claude' && !m.replies.length && !(m.followups || []).length
     && REQ_RE.test((m.kind || '') + ' ' + m.title) && hoursSince(m.ts) > unansH && hoursSince(m.ts) < 72);
-  const topics = (data.topics || []).map(t => ({ ...t, _age: hoursSince(t.created_at) }));
+  const pendAssign = {};
+  for (const p of pend.filter(p => p.type === 'assign')) pendAssign[p.topic] = p.agent;
+  const topics = (data.topics || []).map(t => ({ ...t, _age: hoursSince(t.created_at),
+    ...(pendAssign[t.id] && pendAssign[t.id] !== t.assignee ? { assignee: pendAssign[t.id], assign_by: 'user', dispatch_reason: '사용자 지정(반영 대기)', status: t.status === 'new' ? 'triage' : t.status } : {}) }));
 
   const missed = [];
   if (unprocessed.length) {
@@ -340,8 +371,17 @@ function derive(data) {
     title: `기록 충돌: ${c.id}`, sub: `${c.authors.join(' · ')}가 같은 작업을 기록`, go: () => go('sources') });
   for (const s of data.sources.filter(s => !s.ok && !/선택/.test(s.error || ''))) missed.push({ key: `source:${s.id}:${s.error}`, level: 'bad', icon: 'sources',
     title: `출처 오류: ${s.name}`, sub: s.error, go: () => go('sources') });
-  for (const t of topics.filter(t => t.status === 'new' && t._age > 12)) missed.push({ key: `topic:${t.id}`, level: 'warn', icon: 'topics',
-    title: `분배되지 않은 주제: ${t.title}`, sub: `${Math.round(t._age)}시간 경과`, go: () => openTopic(t) });
+  for (const t of topics.filter(t => t.status === 'new' && !t.assignee && t._age > 1)) missed.push({ key: `topic:${t.id}`, level: 'warn', icon: 'topics',
+    title: `배분되지 않은 주제: ${t.title}`, sub: `${Math.round(t._age)}시간 경과 · 허브 자동 동기화 확인`, go: () => openTopic(t) });
+  for (const t of topics.filter(t => (t.conflict || []).length)) missed.push({ key: `conflict-topic:${t.id}:${t.conflict.join(',')}`, level: 'bad', icon: 'alert',
+    title: `중복 착수: ${t.title}`, sub: `담당 ${t.assignee} · 추가 착수 ${t.conflict.join(', ')}`, go: () => openTopic(t) });
+  const staleMin = data.meta.routing?.stale_minutes || 120;
+  for (const a of data.agents || []) {
+    const mine = topics.filter(t => t.assignee === a.id && !['done', 'parked'].includes(t.status));
+    const seen = a.last_seen || a.pc_synced;
+    if (mine.length && (!seen || (Date.now() - toMs(seen)) / 6e4 > staleMin)) missed.push({ key: `agent-off:${a.id}:${seen || 'none'}`, level: 'bad', icon: 'agents',
+      title: `작업자 신호 끊김: ${a.pc_label} · ${a.label || a.id}`, sub: `맡은 주제 ${mine.length}건 · 마지막 신호 ${fmtRel(seen)}`, go: () => go('agents') });
+  }
 
   const lastBy = who => msgs.find(m => m.sender === who)?.ts || null;
   return { tasks, unprocessed, unanswered, missed, topics, lastBy, answers, pend, pendAckMsgs };
@@ -365,6 +405,7 @@ function filterTasks(list, owner) {
 // ------------------------------------------------------------ 앱 골격
 const NAV = [
   { id: 'overview', label: '개요', icon: 'overview' },
+  { id: 'agents', label: '작업자', icon: 'agents' },
   { id: 'topics', label: '주제', icon: 'topics' },
   { id: 'tasks', label: '업무', icon: 'tasks' },
   { id: 'messages', label: '메시지', icon: 'messages' },
@@ -480,7 +521,7 @@ function openMissedDrawer() {
 }
 
 function page() {
-  const views = { overview: vOverview, topics: vTopics, tasks: vTasks, messages: vMessages, verify: vVerify, brain: vBrain, sources: vSources };
+  const views = { overview: vOverview, agents: vAgents, topics: vTopics, tasks: vTasks, messages: vMessages, verify: vVerify, brain: vBrain, sources: vSources };
   return h('div', { class: 'page' }, (views[S.view] || vOverview)());
 }
 function head(eyebrow, title, small, ...tools) {
@@ -667,6 +708,11 @@ function weekCard(tasks) {
 }
 function teamGrid() {
   const d = S.d, data = S.data;
+  if ((data.agents || []).length) {
+    return h('div', { style: { display: 'grid', gap: '12px' } },
+      h('div', { class: 'agent-grid' }, data.agents.map(agentCard)),
+      h('button', { class: 'btn', style: { 'justify-self': 'start' }, onclick: () => go('agents') }, icon('agents'), 'PC별 작업자 현황 전체 보기'));
+  }
   const owned = id => d.tasks.filter(t => t.owner === id && t.stage !== 'done').length;
   const waiting = id => d.tasks.filter(t => t.waiting_on === id && t.stage !== 'done').length;
   const lastVal = data.validations[0]?.ts;
@@ -698,6 +744,56 @@ function timeline(n) {
     h('span', { class: 'tm' }, e.dateOnly ? fmtAbs(e.ts, true) : fmtAbs(e.ts)),
     h('span', { class: 'pip' }, h('i', { style: { background: e.color } })),
     h('span', { class: 'tx' }, h('b', { class: 'clamp-2' }, e.t), e.s ? h('div', { class: 's clamp-2' }, e.s) : null))));
+}
+
+// ------------------------------------------------------------ 작업자 (PC별 AI 현황)
+function agentStats(id) {
+  const topics = S.d.topics.filter(t => t.status !== 'done' && t.status !== 'parked');
+  return {
+    assigned: topics.filter(t => t.assignee === id),
+    turn: topics.filter(t => t.turn === id),
+    tasks: S.d.tasks.filter(t => t.stage !== 'done' && (t.owner === id || LEGACY[t.owner] === id || t.waiting_on === id || LEGACY[t.waiting_on] === id)),
+  };
+}
+function agentCard(a) {
+  const st = agentState(a), s = agentStats(a.id), cur = a.current;
+  return h('div', { class: 'agent' },
+    h('div', { class: 'hd' }, av(a.id), h('div', { style: { 'min-width': '0' } }, h('div', { class: 'nm' }, a.label || a.id), h('div', { class: 'rl' }, `${a.pc_label} · ${a.ai === 'gpt' ? 'GPT 계열' : 'Claude 계열'} · ${a.id}`)),
+      h('span', { class: `st ${st.cls}`, style: { 'margin-left': 'auto' } }, icon(st.icon), st.label)),
+    cur ? h('div', { class: 'now' }, h('b', null, cur.project), (cur.task || cur.topic) ? h('div', { class: 'muted', style: { 'font-size': '12px' } }, [cur.task, cur.topic].filter(Boolean).join(' · ')) : null,
+      cur.note ? h('div', { class: 'muted', style: { 'font-size': '12px' } }, cur.note) : null,
+      h('div', { class: 'muted', style: { 'font-size': '12px' } }, `${fmtRel(cur.since)}부터`))
+      : h('div', { class: 'now idle' }, '지금 하는 일을 알리지 않았습니다.'),
+    h('div', { class: 'stats' }, h('div', null, h('b', null, s.assigned.length), h('span', null, '맡은 주제')), h('div', null, h('b', null, s.turn.length), h('span', null, '내 차례')),
+      h('div', null, h('b', null, s.tasks.length), h('span', null, '관련 작업'))),
+    s.assigned.length ? h('div', { class: 'list' }, s.assigned.slice(0, 4).map(t => h('button', { class: 'item', onclick: () => openTopic(t) },
+      h('span', { class: 'body' }, h('div', { class: 't clamp-2' }, t.title), h('div', { class: 'meta' }, topicChip(t.status), priChip(t.priority), t.turn === a.id ? h('span', { class: 'tag' }, '내 차례') : null))))) : null,
+    h('div', { class: 'muted', style: { 'font-size': '12px' } }, `마지막 신호 ${fmtRel(a.last_seen || a.pc_synced)}`));
+}
+function vAgents() {
+  const nodes = S.data.nodes || [], agents = S.data.agents || [];
+  const r = S.data.meta.routing || {};
+  if (!agents.length) return [head('AGENTS', '작업자', null), card('작업자 없음', null, empty('아직 등록된 작업자가 없습니다. 각 PC에서 node.py init으로 등록합니다.'))];
+  const groups = nodes.map(n => ({ ...n, list: agents.filter(a => a.pc === n.pc) }));
+  return [
+    head('AGENTS', '작업자 현황', `${nodes.length}대 · ${agents.length}명`),
+    h('div', { style: { display: 'grid', gap: '18px' } }, groups.map(g => h('section', { class: 'pc-group' },
+      h('div', { class: 'pc-head' }, h('h3', null, g.label || g.pc), h('span', { class: 'tag' }, g.role === 'hub' ? '허브 · 배분 담당' : '작업 노드'),
+        g.error ? h('span', { class: 'st blocked' }, icon('alert'), g.error) : h('span', { class: 'muted', style: { 'font-size': '12px' } }, `마지막 동기화 ${fmtRel(g.synced_at)}`)),
+      g.list.length ? h('div', { class: 'agent-grid' }, g.list.map(agentCard)) : empty('이 PC의 작업자 정보가 없습니다.')))),
+    h('div', { class: 'grid g-2 section-gap' },
+      card('자동 배분 규칙', { right: h('span', { class: `st ${r.auto === false ? 'neutral' : 'done'}` }, icon(r.auto === false ? 'pause' : 'check'), r.auto === false ? '꺼짐' : '켜짐') },
+        h('div', { class: 'hint', style: { display: 'grid', gap: '6px' } },
+          h('div', null, '새 주제는 허브(', h('b', null, (nodes.find(n => n.role === 'hub') || {}).label || '개발컴'), ')가 한 곳에서만 배분합니다. 같은 일이 두 곳에서 시작되지 않게 하는 핵심 규칙입니다.'),
+          (r.rules || []).map(x => h('div', null, '• ', h('b', null, x['이름'] || '규칙'), ` — ${(x.match || []).slice(0, 6).join(', ')}${(x.match || []).length > 6 ? ' …' : ''} → `,
+            x.prefer_pc ? `${(nodes.find(n => n.pc === x.prefer_pc) || {}).label || x.prefer_pc} ` : '', x.prefer_ai ? `${x.prefer_ai} ` : '', `+${x.weight}`)),
+          h('div', null, `맡은 주제가 많으면 감점, ${Math.round((r.stale_minutes || 120) / 60)}시간 넘게 신호가 없으면 크게 감점합니다. 동점이면 사령탑이 맡습니다.`),
+          h('div', null, '주제 상세에서 담당을 직접 바꾸면 그 지정이 우선합니다.'))),
+      card('PC 연결', null, h('div', { class: 'hint', style: { display: 'grid', gap: '6px' } },
+        h('div', null, '다른 PC를 연결하려면 그 PC에서 저장소를 받고, ', h('span', { class: 'mono' }, '서버컴-연결.md'), ' 안내를 그 PC의 AI에게 따르게 하면 됩니다.'),
+        h('div', null, '각 PC는 자기 기록만 암호화해서 올리고(docs/nodes/<PC>.enc.json), 배분된 주제는 그 PC 작업자의 수신 폴더로 들어갑니다.'),
+        h('div', null, '작업자는 일을 시작할 때 ', h('span', { class: 'mono' }, 'node.py status'), '로 지금 하는 일을 알려야 이 화면에 보입니다.')))),
+  ];
 }
 
 // ------------------------------------------------------------ 주제
@@ -732,7 +828,9 @@ function composerCard(repo) {
   const body = h('textarea', { id: 'tp-body', placeholder: '대략적인 내용·배경·원하는 결과. 정리 안 된 메모여도 됩니다.' });
   const kind = h('select', { id: 'tp-kind', 'aria-label': '유형' }, ['기능·개선', '버그', '조사·분석', '디자인', '운영·도구', '기타'].map(k => h('option', null, k)));
   const pri = h('select', { id: 'tp-pri', 'aria-label': '우선순위' }, ['P2 보통', 'P1 높음', 'P0 긴급', 'P3 낮음'].map(k => h('option', { value: k.slice(0, 2) }, k)));
-  const prefer = h('select', { id: 'tp-prefer', 'aria-label': '담당 선호' }, [['auto', '자동 분배'], ['claude', 'Claude 우선'], ['astra', 'Astra 우선']].map(([v, l]) => h('option', { value: v }, l)));
+  const prefer = h('select', { id: 'tp-prefer', 'aria-label': '담당 선호' }, (S.data.agents || []).length
+    ? agentOptions(null, [h('option', { value: 'auto' }, '자동 배분 (추천)')]).map(o => { if (o.value !== 'auto') o.textContent += ' 우선'; return o; })
+    : [['auto', '자동 배분'], ['claude', 'Claude 우선'], ['astra', 'Astra 우선']].map(([v, l]) => h('option', { value: v }, l)));
   const status = h('div', { class: 'hint', role: 'status', 'aria-live': 'polite' });
   function make() {
     if (!title.value.trim()) { title.focus(); status.textContent = '주제를 적어주세요.'; return null; }
@@ -769,7 +867,8 @@ function composerCard(repo) {
 function topicCard(t) {
   const last = (t.notes || []).at(-1);
   return h('button', { class: 'proj', onclick: () => openTopic(t) },
-    h('div', { class: 'row' }, priChip(t.priority), t.kind ? h('span', { class: 'tag' }, t.kind) : null, t.linked_task_id ? h('span', { class: 'tag' }, '작업 연결') : null),
+    h('div', { class: 'row' }, priChip(t.priority), t.kind ? h('span', { class: 'tag' }, t.kind) : null, t.linked_task_id ? h('span', { class: 'tag' }, '작업 연결') : null,
+      (t.conflict || []).length ? h('span', { class: 'st blocked' }, icon('alert'), '중복 착수') : null),
     h('div', { class: 'ttl' }, t.title),
     t.body ? h('div', { class: 'next clamp-2' }, t.body) : null,
     last ? h('div', { class: 's clamp-2', style: { 'font-size': '12px', color: 'var(--ink-3)' } }, `${person(last.by).name} · ${NOTE_KIND[last.kind] || last.kind}: ${last.body}`) : null,
@@ -1039,8 +1138,10 @@ function sendHint() {
 function thread(target, redraw, opts = {}) {
   const items = commentsFor(target);
   const ta = h('textarea', { placeholder: opts.placeholder || '여기에 답을 적으면 Claude에게 전달됩니다', rows: '3', 'aria-label': '답 입력' });
-  const to = h('select', { 'aria-label': '받는 사람' }, h('option', { value: 'claude' }, 'Claude에게'), h('option', { value: 'astra' }, 'Astra에게'));
-  if (opts.to) to.value = opts.to;
+  const to = h('select', { 'aria-label': '받는 사람' }, (S.data.agents || []).length
+    ? agentOptions(LEGACY[opts.to] || opts.to || 'dev-claude').map(o => { o.textContent += '에게'; return o; })
+    : [h('option', { value: 'dev-claude' }, 'Claude에게'), h('option', { value: 'dev-astra' }, 'Astra에게')]);
+  if (opts.to) to.value = LEGACY[opts.to] || opts.to;
   const send = h('button', { class: 'btn primary', onclick: async () => {
     const body = ta.value.trim();
     if (!body) { ta.focus(); return; }
@@ -1065,6 +1166,23 @@ async function decide(q, choice, note, redraw) {
     await sendOps('decide', { decision_id: q.id, choice, note: note || '' }, `결정: ${choice || '메모'}`);
     render(); if (redraw) redraw();
   } catch (e) { toast(e.message); }
+}
+function agentOptions(selected, extra) {
+  const list = S.data.agents || [];
+  return [...(extra || []), ...list.map(a => h('option', { value: a.id, selected: a.id === selected ? true : null }, `${a.pc_label} · ${a.label || a.id}`))];
+}
+function assignControl(t) {
+  if (!(S.data.agents || []).length || t.status === 'done') return null;
+  const pend = pending.all().find(p => p.type === 'assign' && p.topic === t.id);
+  const sel = h('select', { 'aria-label': '담당 바꾸기' }, agentOptions(pend ? pend.agent : t.assignee, t.assignee ? [] : [h('option', { value: '' }, '담당 고르기')]));
+  const btn = h('button', { class: 'btn', onclick: async () => {
+    if (!sel.value || sel.value === t.assignee) { toast('바뀐 담당이 없습니다'); return; }
+    btn.disabled = true;
+    try { await sendOps('assign', { topic: t.id, agent: sel.value, note: '' }, `주제 담당 → ${person(sel.value).name}`); render(); openTopic(S.d.topics.find(x => x.id === t.id) || t); }
+    catch (e) { toast(e.message); } finally { btn.disabled = false; }
+  } }, icon('agents'), '담당 바꾸기');
+  return h('div', { class: 'composer' }, h('div', { class: 'row' }, sel, btn),
+    pend ? h('div', { class: 'hint' }, `담당 변경 반영 대기: ${person(pend.agent).full}`) : null);
 }
 function openDecisionNeeded(q) {
   const redraw = () => openDecisionNeeded(q);
@@ -1188,6 +1306,9 @@ function openTopic(t) {
     h('div', { style: { display: 'flex', gap: '6px', 'flex-wrap': 'wrap' } }, topicChip(t.status), priChip(t.priority), t.kind ? h('span', { class: 'tag' }, t.kind) : null,
       h('span', { class: 'tag' }, t.id), t.linked_task_id ? h('button', { class: 'tag', style: { cursor: 'pointer' }, onclick: () => openTaskById(t.linked_task_id) }, '작업 ' + t.linked_task_id) : null),
     h('h3', null, t.title),
+    (t.conflict || []).length ? h('div', { class: 'callout warn' }, h('b', null, '중복 착수: '), `담당은 ${person(t.assignee).full}인데 ${t.conflict.map(c => person(c).full).join(', ')}도 착수했습니다. 한쪽을 멈추거나 담당을 바꿔주세요.`) : null,
+    t.dispatch_reason ? h('div', { class: 'reason' }, h('b', null, t.assign_by === 'user' ? '담당 지정: ' : '배분 근거: '), t.dispatch_reason) : null,
+    assignControl(t),
     h('dl', { class: 'fields' }, h('dt', null, '담당'), h('dd', null, t.assignee ? person(t.assignee).full : '미배정'),
       h('dt', null, '지금 차례'), h('dd', null, t.turn ? `${person(t.turn).full} · ${t.status === 'new' ? '분배' : !t.plan ? '진행 베이스 작성' : t.turn !== t.assignee ? '교차 검토' : '진행'}` : '—'),
       h('dt', null, '선호'), h('dd', null, ({ auto: '자동 분배', claude: 'Claude 우선', astra: 'Astra 우선' })[t.prefer] || '—'),
