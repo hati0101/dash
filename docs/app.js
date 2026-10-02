@@ -609,7 +609,11 @@ const empty = text => h('div', { class: 'empty' }, text);
 function vOverview() {
   const d = S.d, data = S.data, now = new Date();
   const tasks = filterTasks(d.tasks, S.f.owner);
-  const total = tasks.length, done = tasks.filter(t => t.stage === 'done').length;
+  // 완료율은 주제 기준: 완료 ÷ 착수한 주제(새 주제·검토·준비·진행·완료). 미처리·보류·삭제는 뺀다
+  const aiOf = id => ((data.agents || []).find(a => a.id === id) || {}).ai || (/claude/.test(id || '') ? 'claude' : /astra|gpt/.test(id || '') ? 'gpt' : '');
+  const started = d.topics.filter(t => ['new', 'triage', 'ready', 'active', 'done'].includes(t.status))
+    .filter(t => S.f.owner === 'claude' ? aiOf(t.assignee) === 'claude' : S.f.owner === 'astra' ? aiOf(t.assignee) === 'gpt' : true);
+  const total = started.length, done = started.filter(t => t.status === 'done').length;
   const pct = total ? Math.round(done / total * 100) : 0;
   const ownerChips = chips([['all', '전체'], ['claude', 'Claude', av('claude', true)], ['astra', 'Astra', av('astra', true)], ['user', '나', av('user', true)]],
     S.f.owner, v => { S.f.owner = v; render(); }, '담당 필터');
@@ -618,7 +622,7 @@ function vOverview() {
     head('OVERVIEW', '전체 현황', `${pad(now.getMonth() + 1)}.${pad(now.getDate())} (${DAY[now.getDay()]})`, ownerChips),
     mineBanner(),
     h('div', { class: 'grid g-4' },
-      completionCard(pct, done, total - done, tasks),
+      completionCard(pct, done, total - done, tasks, S.f.owner),
       collectedCard(),
       pipelineCard(tasks),
       missedCard()),
@@ -638,19 +642,24 @@ function taskSort(a, b) {
   return (PRI_ORDER[a.priority] ?? 9) - (PRI_ORDER[b.priority] ?? 9) || STAGE_ORDER[a.stage] - STAGE_ORDER[b.stage] || toMs(b.updated_at) - toMs(a.updated_at);
 }
 
-function completionCard(pct, done, left, tasks) {
+function completionCard(pct, done, left, tasks, owner) {
   const r = 52, C = 2 * Math.PI * r;
   const ring = h('div', { class: 'ring', role: 'img', 'aria-label': `완료율 ${pct}퍼센트` });
   ring.innerHTML = `<svg viewBox="0 0 132 132"><circle class="track" cx="66" cy="66" r="${r}" fill="none" stroke-width="12"/>` +
     `<circle class="val" cx="66" cy="66" r="${r}" fill="none" stroke-width="12" stroke-linecap="round" stroke-dasharray="${C.toFixed(2)}" stroke-dashoffset="${C.toFixed(2)}"/></svg>`;
   ring.append(h('div', { class: 'pct' }, h('b', null, pct, h('small', null, '%'))));
   requestAnimationFrame(() => requestAnimationFrame(() => { const v = ring.querySelector('.val'); if (v) v.style.strokeDashoffset = (C * (1 - pct / 100)).toFixed(2); }));
+  // 업무 보드는 그래프에 넣지 않고 따로 알린다(상태는 바꾸지 않는다)
   const waiting = tasks.filter(t => t.stage === 'user_test').length;
-  return card('Completion', null,
+  const old = tasks.filter(t => t.stage !== 'done' && t.stage !== 'user_test' && t._stale).length;
+  const board = [waiting && `실게임 대기 ${waiting}건(내 차례에서 확인)`, old && `갱신 멈춘 옛 작업표 ${old}건`].filter(Boolean).join(' · ');
+  return card('완료율 · 주제 기준', null,
     h('div', { class: 'ring-wrap' }, ring,
-      h('div', { class: 'kv' }, h('div', null, h('div', { class: 'k' }, 'DONE'), h('div', { class: 'v' }, done)),
-        h('div', null, h('div', { class: 'k' }, 'LEFT'), h('div', { class: 'v' }, left)))),
-    h('div', { class: 'foot-note' }, waiting ? `실게임 대기 ${waiting}건은 완료로 세지 않습니다.` : '실게임 확인 전에는 완료로 세지 않습니다.'));
+      h('div', { class: 'kv' }, h('div', null, h('div', { class: 'k' }, '완료'), h('div', { class: 'v' }, done)),
+        h('div', null, h('div', { class: 'k' }, '남음'), h('div', { class: 'v' }, left)))),
+    h('div', { class: 'foot-note' }, done + left ? `착수한 주제 ${done + left}건 중 완료 ${done}건 (미처리·보류·삭제 제외)` : '아직 착수한 주제가 없습니다.',
+      owner === 'user' ? h('div', null, '아키텍트 담당 주제는 없어서 전체 기준으로 보여 줍니다.') : null,
+      board ? h('div', null, `업무 보드: ${board}`) : null));
 }
 
 function inWindow(ts, hours, dateOnly) {
@@ -1029,7 +1038,14 @@ function teamCompact() {
     const st = agentState(a), s = agentStats(a.id);
     return h('button', { class: 'team-row-item', onclick: () => go('agents') },
       av(a.id), h('div', { class: 'body' }, h('div', { class: 't' }, `${a.pc_label} · ${a.label || a.id}`),
-        h('div', { class: 's clamp-2' }, a.current ? a.current.project : '지금 하는 일을 알리지 않음')),
+        h('div', { class: 's clamp-2' }, (() => {  // 대화 세션 알림이 없으면 자동 실행기 기록으로 보여 준다
+          const run = (S.data.runs || []).find(r => r.agent === a.id);
+          const tt = r => (topicById(r.topic) || {}).title || r.topic || '질문 답 반영';
+          if (run && isRunning(run)) return `자동 실행 중 · ${tt(run)}`;
+          if (a.current) return a.current.project;
+          if (run) return `마지막 자동 실행 · ${tt(run)} · ${fmtRel(run.ended || run.started)}`;
+          return '아직 실행 기록 없음';
+        })())),
       h('span', { class: `st ${st.cls}` }, icon(st.icon), st.label),
       h('span', { class: 'tag' }, `주제 ${s.assigned.length}`), s.turn.length ? h('span', { class: 'tag' }, `차례 ${s.turn.length}`) : null);
   }));

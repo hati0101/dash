@@ -698,7 +698,8 @@ mark { background: color-mix(in srgb, var(--st-user_test) 35%, transparent); col
 /* ---------------- 1920×1080 기준 넓은 화면 배치 */
 .stack { display: grid; gap: 14px; align-content: start; }
 .ov-main, .wide-2 { grid-template-columns: minmax(0, 1fr); }
-.team-rows { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 8px; }
+.team-rows { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(360px, 100%), 1fr)); gap: 8px; }
+.team-row-item { flex-wrap: wrap; }
 .team-row-item {
   display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line);
   background: var(--card-2); color: inherit; text-align: left; min-width: 0;
