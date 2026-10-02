@@ -186,7 +186,7 @@ button.card-foot:hover { color: var(--ink); }
 .rules-fold summary { cursor: pointer; display: flex; gap: 8px; align-items: baseline; }
 .fit-hint { margin: 8px 0 0; }
 /* 넓고 높은 화면: 화면 높이에 맞춘 배치. 칸은 높이가 고정되고 내용은 칸 안에서 스크롤(페이지 스크롤 없음) */
-@media (min-width: 1500px) and (min-height: 860px) {
+@media (min-width: 1500px) and (min-height: 900px) {
   .main:has(.fit-page) { height: 100vh; }
   .page:has(> .fit-page) { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; padding-bottom: 18px; }
   .page:has(> .fit-page) .page-head { margin-bottom: 14px; }
@@ -224,7 +224,7 @@ button.card-foot:hover { color: var(--ink); }
 .team-strip .team-row-item .cnt { font-size: 11.5px; color: var(--ink-3); white-space: nowrap; }
 .team-row-item.pc-dev, .team-row-item.pc-server { --pc: var(--pc-other); border-left: 3px solid var(--pc); }
 .team-row-item.pc-dev { --pc: var(--pc-dev); } .team-row-item.pc-server { --pc: var(--pc-server); }
-@media (min-width: 1500px) and (min-height: 860px) {
+@media (min-width: 1500px) and (min-height: 900px) {
   .main:has(.ov-fit) { height: 100vh; }
   /* 세 줄로 화면을 채운다: 요약(내용 높이) / 목록 4칸(남는 높이 전부) / 팀 현황 띠(내용 높이) */
   .ov-fit { grid-template-rows: auto minmax(0, 1fr) auto !important; }
@@ -900,7 +900,7 @@ mark { background: color-mix(in srgb, var(--st-user_test) 35%, transparent); col
 }
 
 /* 낮은 화면(높이 1000 미만)에서는 개요 목록의 요약 줄을 숨겨 3건이 겹치지 않고 들어가게 */
-@media (min-width: 1500px) and (min-height: 860px) and (max-height: 999px) {
+@media (min-width: 1500px) and (min-height: 900px) and (max-height: 999px) {
   .ov-bottom .c-row .s { display: none; }
   .ov-bottom .c-row { padding: 8px 6px; }
   .ov-bottom .c-row .t { font-size: 14.5px; }
@@ -908,7 +908,22 @@ mark { background: color-mix(in srgb, var(--st-user_test) 35%, transparent); col
 
 /* 목록 카드의 정보 줄은 항상 한 줄(기존 .item .meta 줄바꿈 규칙보다 우선) */
 .c-row .meta.one-line { flex-wrap: nowrap; }
-@media (min-width: 1500px) and (min-height: 860px) {
+@media (min-width: 1500px) and (min-height: 900px) {
   .ov-bottom .c-row { padding: 9px 6px; }
   .ov-bottom .c-row .t { line-height: 1.4; }
+}
+
+/* 낮은 화면(860~999): 윗줄 요약과 팀 현황 띠를 촘촘하게 해서 가운데 목록 3건이 들어갈 자리를 만든다 */
+@media (min-width: 1500px) and (min-height: 900px) and (max-height: 999px) {
+  .ov-top .sum-card { padding: 10px 14px 8px; }
+  .ov-top .sum-card .card-h { margin-bottom: 4px; min-height: 22px; }
+  .ov-top .ring { width: 84px !important; height: 84px !important; }
+  .ov-top .ring .pct b { font-size: 21px !important; }
+  .ov-top .kv { gap: 2px; } .ov-top .kv .v { font-size: 20px !important; }
+  .ov-top .ring-break { margin-top: 4px; } .ring-break .rb { padding: 2px; font-size: 10.5px; } .ring-break .rb b { font-size: 13px; }
+  .ov-top .bars { gap: 0; } .ov-top .bars .bar-row { min-height: 21px; font-size: 12px; }
+  .ov-top .foot-note { font-size: 11px; line-height: 1.35; }
+  .team-strip { padding: 8px 14px; } .team-strip .card-h { margin-bottom: 4px; min-height: 22px; }
+  .team-strip .team-row-item { padding: 5px 10px; } .team-strip .team-row-item .s { -webkit-line-clamp: 1; }
+  .ov-bottom .card { padding: 12px 14px 10px; } .ov-bottom .card-h { margin-bottom: 6px; }
 }
