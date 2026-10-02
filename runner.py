@@ -769,11 +769,22 @@ def apply(job: dict, result: dict, data: dict | None = None) -> tuple[list[str],
             failed.append(f"{typ} 거부: {exc}")
     if work_touched:
         r = run_work("sync", "--agent", agent, "--message", f"자동 실행기 {tid or ''}")
-        if r.returncode == 0:
-            done.append("작업물 올림")
-        else:
-            failed.append(f"작업물 올리기 실패: {(r.stdout or r.stderr).strip()[-300:]}")
+        note_sync(r, done, failed)
     return done, failed
+
+
+def note_sync(r: subprocess.CompletedProcess, done: list, failed: list):
+    """작업물 올리기 결과를 기록한다. 0=다 올림, 3=검사에 걸린 파일만 빼고 올림(보류 목록을 남김), 그 밖=실패."""
+    out = (r.stdout or r.stderr or "").strip()
+    if r.returncode == 0:
+        done.append("작업물 올림")
+    elif r.returncode == 3:
+        done.append("작업물 올림")
+        held = out.split("보류한 파일", 1)[-1]
+        if f"작업물 일부 보류{held[:200]}" not in " ".join(failed):  # 같은 보류를 한 실행에 두 번 적지 않게
+            failed.append(f"작업물 일부 보류(비밀값 의심 파일은 [가림] 사본이나 patch로): 보류한 파일{held[:400]}")
+    else:
+        failed.append(f"작업물 올리기 실패: {out[-300:]}")
 
 
 def clear_inbox(agent_id: str, topic_id: str | None, before: datetime | None = None) -> int:
@@ -957,10 +968,7 @@ def run_job(j: dict, data: dict, state: dict) -> bool:
             node.ack_notice(CFG, n["id"], agent_id, "runner")
     if ws:  # 작업 공간 결과물 올리기(비밀값 검사 포함)
         r = run_work("sync", "--agent", agent_id, "--message", f"작업 모드 {t.get('id')}")
-        if r.returncode == 0:
-            done.append("작업물 올림")
-        else:
-            failed.append(f"작업물 올리기 보류: {(r.stdout or r.stderr).strip()[-300:]}")
+        note_sync(r, done, failed)
         files = [p for p in ws.rglob("*") if p.is_file() and p.name not in ("NOTES.md", "MANIFEST.md")]
         stopped = any(isinstance(a, dict) and (a.get("type") in ("ask", "handoff", "request", "reply") or (a.get("type") == "state" and a.get("status") in ("done", "parked")))
                       for a in result.get("actions", []))
