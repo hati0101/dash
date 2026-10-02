@@ -88,6 +88,7 @@ def load_records(cfg) -> dict:
     rec = read_json(records_path(cfg), None) or {}
     rec.update({"pc": pc["id"], "label": pc.get("label", pc["id"]), "role": pc.get("role", "node")})
     rec.setdefault("topic_records", [])
+    rec.setdefault("proposals", [])
     # 설정에서 빠진 작업자는 현황에서도 뺀다(이름을 바꾸거나 정리한 경우)
     rec["agents"] = {k: v for k, v in (rec.get("agents") or {}).items() if k in my_agents(cfg)}
     for aid, a in my_agents(cfg).items():
@@ -182,6 +183,26 @@ def add_topic_record(cfg, topic: str, agent: str, kind: str, **fields):
     rec["agents"][agent]["last_seen"] = ts
     rec["updated_at"] = ts
     write_json(records_path(cfg), rec)
+
+
+def cmd_propose(args, cfg):
+    """이 PC에서 모은 아이디어·이슈 메모를 한 건씩 올린다. 허브가 '미처리' 주제로 가져간다(배분은 착수 지시 후)."""
+    import secrets
+    check_agent(cfg, args.agent)
+    title = args.title.strip()[:200]
+    if not title:
+        sys.exit("--title이 비어 있습니다.")
+    rec = load_records(cfg)
+    if any(p.get("title") == title and p.get("agent") == args.agent for p in rec["proposals"]):
+        print(f"이미 올린 메모입니다: {title}")
+        return
+    pid = f"P-{pc_info(cfg)['id']}-{datetime.now(KST):%Y%m%d}-{secrets.token_hex(3)}"
+    rec["proposals"].append({"id": pid, "agent": args.agent, "title": title, "body": (args.body or "").strip()[:8000],
+                             "kind": args.kind, "priority": args.priority, "origin": (args.origin or "")[:300], "ts": now_iso()})
+    rec["proposals"] = rec["proposals"][-2000:]
+    rec["updated_at"] = now_iso()
+    write_json(records_path(cfg), rec)
+    print(f"메모 올림 {pid}: {title} — 다음 동기화 때 허브가 미처리 주제로 가져갑니다")
 
 
 def cmd_claim(args, cfg):
@@ -355,6 +376,7 @@ def collect_nodes(cfg: dict, pw: str | None) -> list[dict]:
         # 다른 PC 파일은 자기 PC 작업자만 기록할 수 있다(이름 사칭 방지)
         rec["agents"] = {k: v for k, v in (rec.get("agents") or {}).items() if k.startswith(pcid + "-")}
         rec["topic_records"] = [r for r in rec.get("topic_records") or [] if str(r.get("agent", "")).startswith(pcid + "-")]
+        rec["proposals"] = [p for p in rec.get("proposals") or [] if str(p.get("agent", "")).startswith(pcid + "-")]
         rec["pc"] = pcid
         rec["source"] = f.name
         out.append(rec)
@@ -380,6 +402,10 @@ def main():
     sub.add_parser("mine"); sub.add_parser("inbox")
     p = sub.add_parser("pack"); p.add_argument("--if-changed", action="store_true",
                                                help="기록이 바뀌었거나 마지막 업로드가 60분 지났을 때만 만듦(아니면 종료 코드 10)")
+    p = sub.add_parser("propose", help="이 PC의 아이디어·이슈 메모를 한 건씩 올리기(허브가 미처리 주제로 가져감)")
+    p.add_argument("--agent", required=True); p.add_argument("--title", required=True); p.add_argument("--body")
+    p.add_argument("--kind", default="기타", choices=["기능·개선", "버그", "조사·분석", "디자인", "운영·도구", "기타"])
+    p.add_argument("--priority", default="P2", choices=["P0", "P1", "P2", "P3"]); p.add_argument("--origin", help="원래 메모 위치(예: 스티커 메모, 파일 경로)")
     p = sub.add_parser("claim"); p.add_argument("id"); p.add_argument("--agent", required=True); p.add_argument("--note")
     p = sub.add_parser("plan"); p.add_argument("id"); p.add_argument("--agent", required=True)
     p.add_argument("--goal"); p.add_argument("--scope", action="append"); p.add_argument("--input", action="append")
@@ -391,7 +417,7 @@ def main():
     p.add_argument("--status", required=True, choices=STATUSES); p.add_argument("--task"); p.add_argument("--note")
     args = ap.parse_args()
     cfg = load_cfg()
-    {"init": cmd_init, "status": cmd_status, "mine": cmd_mine, "inbox": cmd_inbox, "pack": cmd_pack, "claim": cmd_claim,
+    {"init": cmd_init, "status": cmd_status, "mine": cmd_mine, "inbox": cmd_inbox, "pack": cmd_pack, "claim": cmd_claim, "propose": cmd_propose,
      "plan": cmd_plan, "note": cmd_note, "state": cmd_state}[args.cmd](args, cfg)
 
 

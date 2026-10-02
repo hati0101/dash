@@ -50,7 +50,7 @@ ACTION_ID_RE = re.compile(r"^A-\d{8}-[a-z0-9]{3,10}$")
 REF_RE = re.compile(r"^[A-Za-z0-9_.:\-]{1,200}$")
 TARGET_KINDS = ("task", "message", "topic", "decision", "general")
 STAGES = ("request", "progress", "validating", "user_test", "blocked", "done")
-ACTION_TYPES = ("reply", "ack", "task-state", "decide", "assign")
+ACTION_TYPES = ("reply", "ack", "task-state", "decide", "assign", "activate")
 AGENT_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,30}$")
 
 
@@ -283,6 +283,11 @@ def clean_action(raw: dict) -> dict:
         if not ID_RE.match(topic) or not AGENT_RE.match(agent or ""):
             raise ValueError("담당 지정 형식 오류")
         a.update(topic=topic, agent=agent, note=str(raw.get("note", ""))[:1000])
+    elif kind == "activate":
+        topic = str(raw.get("topic", ""))
+        if not ID_RE.match(topic):
+            raise ValueError("착수 지시 형식 오류")
+        a.update(topic=topic)
     return a
 
 
@@ -293,7 +298,7 @@ def data_dir(cfg) -> Path:
 def user_file(cfg) -> tuple[Path, dict]:
     path = data_dir(cfg) / "user.json"
     rec = read_json(path, None) or {"author": "user", "_rule": "이 파일은 topics.py가 사용자 요청을 받아서만 쓴다."}
-    for key in ("processed_actions", "comments", "tasks", "acks", "decisions_answered", "topic_assign"):
+    for key in ("processed_actions", "comments", "tasks", "acks", "decisions_answered", "topic_assign", "topic_activate"):
         rec.setdefault(key, [])
     return path, rec
 
@@ -373,6 +378,10 @@ def apply_action(cfg, a: dict, source: str) -> str:
                     {"sender": "user (대시보드)", "recipient": "claude", "kind": "user topic assignment", "task_id": a["topic"]},
                     a["note"] or "대시보드에서 담당을 바꿨습니다.")
         result = f"주제 담당 지정 {a['topic']} → {a['agent']}"
+    elif a["type"] == "activate":
+        rec["topic_activate"] = [r for r in rec["topic_activate"] if r.get("topic") != a["topic"]]
+        rec["topic_activate"].append({"topic": a["topic"], "ts": a["created_at"] or ts, "by": "dashboard"})
+        result = f"미처리 주제 착수 지시 {a['topic']} — 다음 자동 배분 때 담당 지정"
     else:  # decide
         rec["decisions_answered"] = [r for r in rec["decisions_answered"] if r.get("id") != a["target"]]
         rec["decisions_answered"].append({"id": a["target"], "choice": a["choice"], "note": a["note"], "ts": a["created_at"] or ts})
@@ -404,8 +413,53 @@ def cmd_add(args, cfg):
     tid = f"T-{d:%Y%m%d}-{secrets.token_hex(3)}"
     topic = clean_topic({"id": tid, "title": args.title, "body": args.body or "", "kind": args.kind,
                          "priority": args.priority, "prefer": args.prefer, "created_at": now_iso(), "from": "pc"})
-    save_topic(cfg, topic, "PC 직접 입력")
-    print(f"추가 {tid} — {topic['title']}")
+    extra = {"backlog": True} if getattr(args, "backlog", False) else None
+    save_topic(cfg, topic, getattr(args, "source", None) or "PC 직접 입력", extra)
+    print(f"추가 {tid}{' (미처리)' if extra else ''} — {topic['title']}")
+
+
+def cmd_activate(args, cfg):
+    """미처리(백로그) 주제를 착수 대상으로 바꾼다. 다음 자동 배분 때 담당이 정해진다."""
+    path, rec = user_file(cfg)
+    if not (topic_path(cfg, args.id) / "topic.json").exists():
+        sys.exit(f"주제가 없습니다: {args.id}")
+    rec["topic_activate"] = [r for r in rec.get("topic_activate", []) if r.get("topic") != args.id]
+    rec["topic_activate"].append({"topic": args.id, "ts": now_iso(), "by": "pc"})
+    rec["updated_at"] = now_iso()
+    write_json(path, rec)
+    print(f"{args.id}: 착수 대상으로 전환 — 다음 자동 배분 때 담당 지정")
+
+
+def cmd_import_proposals(args, cfg):
+    """각 PC 작업자가 node.py propose로 올린 메모를 미처리 주제로 한 건씩 가져온다(허브 전용, 중복 없음)."""
+    import hashlib
+    from node import collect_nodes
+    if (cfg.get("pc") or {}).get("role") != "hub":
+        sys.exit("메모 가져오기는 허브 PC에서만 실행합니다.")
+    pw = os.environ.get("REAL_OPS_PASSWORD") or (Path(args.password_file).read_text(encoding="utf-8").strip() if args.password_file else None)
+    state_path = topics_dir(cfg) / ".imported-proposals.json"
+    done = read_json(state_path, {})
+    added = 0
+    for n in collect_nodes(cfg, pw):
+        for p in n.get("proposals") or []:
+            pid = str(p.get("id", ""))
+            if not pid or pid in done:
+                continue
+            day = str(p.get("ts", now_iso()))[:10].replace("-", "")
+            tid = f"T-{day}-{hashlib.sha1(pid.encode()).hexdigest()[:6]}"
+            try:
+                topic = clean_topic({"id": tid, "title": p.get("title"), "body": p.get("body", ""), "kind": p.get("kind", "기타"),
+                                     "priority": p.get("priority", "P2"), "prefer": "auto", "created_at": p.get("ts"), "from": n["pc"]})
+            except ValueError as exc:
+                done[pid] = {"error": str(exc), "at": now_iso()}
+                continue
+            label = f"{n.get('label', n['pc'])} {p.get('agent')} 메모"
+            if save_topic(cfg, topic, label, {"backlog": True, "proposal_id": pid, "proposed_by": p.get("agent")}):
+                added += 1
+                print(f"가져옴 {tid} ← {label}: {topic['title']}")
+            done[pid] = {"topic": tid, "at": now_iso()}
+    write_json(state_path, done)
+    print(f"메모 가져오기 {added}건")
 
 
 # ---------------------------------------------------------------- 작성자 기록
@@ -515,6 +569,7 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
     if not folder.is_dir():
         return out
     assigns = user_assigns(cfg)
+    activations = {r.get("topic") for r in (read_json(data_dir(cfg) / "user.json", None) or {}).get("topic_activate", [])} if cfg else set()
     by_topic: dict[str, list[dict]] = {}
     for r in node_records or []:
         by_topic.setdefault(r.get("topic"), []).append(r)
@@ -557,6 +612,9 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
         ua = assigns.get(t["id"])
         if ua and to_dt(ua.get("ts")) >= to_dt(lead.get("assigned_at")):
             t["assignee"], t["assign_by"], t["dispatch_reason"] = ua["agent"], "user", "사용자가 대시보드에서 지정"
+        # 미처리(백로그): 착수 지시·담당 지정·작업 기록이 없으면 배분하지 않고 '미처리'로 둔다
+        if base.get("backlog") and not t.get("assignee") and t["status"] == "new" and t["id"] not in activations:
+            t["status"] = "backlog"
             if t["status"] == "new":
                 t["status"] = "triage"
         planner = t["assignee"] if t["assignee"] in plans else (next(iter(plans)) if plans else None)
@@ -572,7 +630,7 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
 
 
 def whose_turn(t: dict) -> str | None:
-    if t["status"] in ("done", "parked"):
+    if t["status"] in ("done", "parked", "backlog"):
         return None
     a = t.get("assignee")
     if not a:
@@ -691,7 +749,7 @@ def cmd_dispatch(args, cfg):
     labels = {a["id"]: f"{a['pc_label']} {a.get('label', a['id'])}" for a in agents}
     done = 0
     for t in topics:
-        if t.get("assignee") or t["status"] in ("done", "parked"):
+        if t.get("assignee") or t["status"] in ("done", "parked", "backlog"):
             continue
         rows = score_agents(t, agents, loads, routing)
         if not rows:
@@ -789,7 +847,11 @@ def main():
     p = sub.add_parser("add-blob"); p.add_argument("blob")
     p = sub.add_parser("add"); p.add_argument("--title", required=True); p.add_argument("--body")
     p.add_argument("--kind", default="기타", choices=KINDS); p.add_argument("--priority", default="P2", choices=["P0", "P1", "P2", "P3"])
-    p.add_argument("--prefer", default="auto", choices=["auto", "claude", "astra"])
+    p.add_argument("--prefer", default="auto")
+    p.add_argument("--backlog", action="store_true", help="미처리(백로그)로 올림 — 착수 지시 전에는 배분하지 않음")
+    p.add_argument("--source", help="출처 표기(예: 스티커 메모(개발컴))")
+    p = sub.add_parser("activate", help="미처리 주제를 착수 대상으로"); p.add_argument("id")
+    sub.add_parser("import-proposals", help="각 PC 작업자가 올린 메모를 미처리 주제로 가져오기(허브)")
     sub.add_parser("list")
     sub.add_parser("announce")
     sub.add_parser("dispatch", help="새 주제 자동 배분(허브 PC에서만)")
@@ -811,7 +873,7 @@ def main():
     cfg = load_cfg()
     {"pull": cmd_pull, "add-blob": cmd_add_blob, "add": cmd_add, "list": cmd_list, "announce": cmd_announce,
      "triage": cmd_triage, "plan": cmd_plan, "note": cmd_note, "status": cmd_status, "comment": cmd_comment,
-     "dispatch": cmd_dispatch}[args.cmd](args, cfg)
+     "dispatch": cmd_dispatch, "activate": cmd_activate, "import-proposals": cmd_import_proposals}[args.cmd](args, cfg)
 
 
 if __name__ == "__main__":
