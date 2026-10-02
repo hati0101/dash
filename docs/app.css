@@ -234,7 +234,8 @@ button.card-foot:hover { color: var(--ink); }
   .ov-top .kv .v { font-size: 28px !important; }
   .ov-top .bars .bar-row { min-height: 26px; font-size: 13px; }
   /* 목록 칸: 3건이 칸 높이를 고르게 나눠 쓴다 */
-  .ov-bottom .list-card > .list { flex: 1; min-height: 0; display: grid; grid-template-rows: repeat(3, minmax(0, 1fr)); }
+  /* 각 건은 내용보다 작아지지 않고(겹침 방지), 남는 높이만 고르게 나눠 갖는다 */
+  .ov-bottom .list-card > .list { flex: 1; min-height: 0; display: grid; grid-template-rows: repeat(3, auto); align-content: stretch; overflow: hidden; }
   .ov-bottom .c-row { padding: 12px 6px; align-items: flex-start; }
   .ov-bottom .c-row .t { font-size: 15.5px; line-height: 1.5; }
   .ov-bottom .c-row .s { font-size: 13px; color: var(--ink-2); }
@@ -896,4 +897,18 @@ mark { background: color-mix(in srgb, var(--st-user_test) 35%, transparent); col
 @media (max-width: 880px) {
   .board.fit-page .col { max-height: 70vh; overflow-y: auto; }
   .fit-page .fill > .list, .fit-page .fill > .tbl-wrap { max-height: 70vh; overflow-y: auto; }
+}
+
+/* 낮은 화면(높이 1000 미만)에서는 개요 목록의 요약 줄을 숨겨 3건이 겹치지 않고 들어가게 */
+@media (min-width: 1500px) and (min-height: 860px) and (max-height: 999px) {
+  .ov-bottom .c-row .s { display: none; }
+  .ov-bottom .c-row { padding: 8px 6px; }
+  .ov-bottom .c-row .t { font-size: 14.5px; }
+}
+
+/* 목록 카드의 정보 줄은 항상 한 줄(기존 .item .meta 줄바꿈 규칙보다 우선) */
+.c-row .meta.one-line { flex-wrap: nowrap; }
+@media (min-width: 1500px) and (min-height: 860px) {
+  .ov-bottom .c-row { padding: 9px 6px; }
+  .ov-bottom .c-row .t { line-height: 1.4; }
 }
