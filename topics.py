@@ -870,13 +870,15 @@ def review_partner(a: str | None, known: set | None, locked=frozenset()) -> str 
     아키텍트가 잠근 작업자는 검토도 맡기지 않는다(2026-10-03: 잠근 개발컴 Astra에 교차 검토가 계속 간 문제). 맡길 사람이 없으면 None(검토 생략)."""
     if not a:
         return None
-    avail = {x for x in (known or {LEAD, "dev-astra"}) if x != a and x not in locked}
+    avail = {x for x in (known or set()) if x != a and x not in locked}
     pc = a.split("-", 1)[0]
     mates = sorted(x for x in avail if x.split("-", 1)[0] == pc)
     if mates:
         return mates[0]
-    if LEAD in avail:
-        return LEAD
+    # 기본 짝: 다른 작업자 일은 사령탑, 사령탑 일은 개발컴 Astra(작업자 목록이 덜 들어와도). 잠겼으면 건너뜀
+    default = LEAD if a != LEAD else "dev-astra"
+    if default not in locked:
+        return default
     return sorted(avail)[0] if avail else None
 
 
