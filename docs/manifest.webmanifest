@@ -1,8 +1,8 @@
 {
   "id": "./",
-  "name": "REAL 운영체제",
+  "name": "REAL 작업실",
   "short_name": "REAL",
-  "description": "REAL 작업 현황 대시보드",
+  "description": "REAL 작업실 — 아키텍트와 AI 작업자들의 작업 현황",
   "lang": "ko",
   "start_url": "./#/overview",
   "scope": "./",

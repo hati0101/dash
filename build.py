@@ -760,7 +760,7 @@ def build_payload(cfg: dict, pw: str | None = None) -> dict:
 
     payload = {
         "meta": {
-            "project": cfg.get("project_name", "REAL 운영체제"),
+            "project": cfg.get("project_name", "REAL 작업실"),
             "generated_at": iso(now()),
             "generator_version": GENERATOR_VERSION,
             "limits": limits,

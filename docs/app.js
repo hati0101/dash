@@ -1,5 +1,5 @@
 'use strict';
-/* REAL 운영체제 대시보드 — 브라우저에서 복호화 후 렌더링. 외부 요청 없음. */
+/* REAL 작업실 대시보드 — 브라우저에서 복호화 후 렌더링. 외부 요청 없음. */
 
 // ------------------------------------------------------------ 기본 유틸
 const $ = (s, r = document) => r.querySelector(s);
@@ -265,7 +265,7 @@ async function sendBlob(kind, obj) {
   if (!repo) throw new Error('GitHub 저장소가 연결되지 않았습니다.');
   const blob = await sealTopic(obj);
   const title = `[${kind}] ${obj.id}`;
-  const body = `REAL 운영체제 ${kind === 'topic' ? '주제' : '요청'} (암호화됨 · 대시보드 비밀번호로만 열립니다)\n\n아래 줄을 수정하지 마세요.\n\n${blob}\n`;
+  const body = `REAL 작업실 ${kind === 'topic' ? '주제' : '요청'} (암호화됨 · 대시보드 비밀번호로만 열립니다)\n\n아래 줄을 수정하지 마세요.\n\n${blob}\n`;
   const token = await tokenGet();
   if (token) {
     try {
@@ -564,7 +564,7 @@ function sidebar() {
   ];
   return h('nav', { class: 'side', 'aria-label': '주 메뉴' },
     h('button', { class: 'side-brand', title: '개요로', 'aria-label': '개요로 가기', onclick: () => { $('.side')?.classList.remove('on'); go('overview'); } },
-      h('span', { class: 'brand-mark', 'aria-hidden': 'true' }), data.meta.project || 'REAL 운영체제'),
+      h('span', { class: 'brand-mark', 'aria-hidden': 'true' }), data.meta.project || 'REAL 작업실'),
     NAV.map(n => h('button', { class: 'nav-btn', 'aria-current': S.view === n.id ? 'page' : null, onclick: () => go(n.id) },
       icon(n.icon), n.label, badges[n.id] ? h('span', { class: `badge${hot[n.id] ? ' hot' : ''}` }, badges[n.id]) : null)),
     h('div', { class: 'side-h' }, 'SOURCES'),

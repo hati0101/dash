@@ -1,6 +1,6 @@
 {
   "_comment": "config.local.json으로 복사해 실제 경로를 적습니다. config.local.json은 커밋하지 않습니다.",
-  "project_name": "REAL 운영체제",
+  "project_name": "REAL 작업실",
   "bridge_dir": "C:/path/to/codex-claude-bridge",
   "ledger_path": "C:/path/to/server-dev/AUDIT_LEDGER.md",
   "ai_runs_dir": "C:/path/to/AI/runs",
