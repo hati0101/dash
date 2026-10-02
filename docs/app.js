@@ -489,6 +489,7 @@ function checkNewGates() {
 }
 const newGates = () => (store.get('newGates') || []).filter(id => gateQueue().some(x => x.q.id === id));
 function enterApp() {
+  mergeLocalGates();
   S.d = derive(S.data);
   $('#lock').hidden = true;
   $('#app').hidden = false;
@@ -504,7 +505,7 @@ async function refresh(manual) {
     // 바뀐 게 없으면 다시 그리지 않는다(쓰던 글·스크롤이 흔들리지 않게)
     if (env.published_at === S.env?.published_at) { if (manual) toast('이미 최신입니다 · 게시 ' + fmtRel(env.published_at)); return; }
     if (env.salt !== S.env.salt) { S.env = env; toast('비밀번호가 바뀌었습니다. 다시 열어주세요.'); return lockNow(); }
-    S.env = env; S.data = await openEnvelope(env, S.key); S.d = derive(S.data);
+    S.env = env; S.data = await openEnvelope(env, S.key); mergeLocalGates(); S.d = derive(S.data);
     checkNewGates();
     S._keepScroll = true; render(); toast('새 데이터를 반영했습니다');
   } catch (e) { if (manual) toast('갱신 실패: ' + e.message); }
@@ -824,7 +825,7 @@ function myQueue() {
   return { decisions, tests, actions, questions, backlog, total: decisions.length + tests.length + actions.length + questions.length };
 }
 // 아키텍트 관문 대기열: 주제가 관문에 도착하면 여기서 끝까지 추적한다(답할 때까지 내 차례·개요·새 도착 알림에 남음)
-const GATE_ORDER = { 4: 0, 40: 1, 5: 2, 7: 3, 9: 4 };
+const GATE_ORDER = { 9: 0, 7: 1, 5: 2, 4: 3, 40: 4 };  // 완료에 가까운 단계부터(뒤 단계가 목록 끝에 묻히지 않게)
 const GATE_LATE_H = 24;  // 이보다 오래 기다리면 '오래 대기'로 강조하고 놓친 항목에 올린다
 function waitText(ts) {
   const hh = hoursSince(ts);
@@ -1694,9 +1695,44 @@ async function decide(q, choice, note, redraw) {
   try {
     await sendOps('decide', { decision_id: q.id, choice, note: note || '' }, `결정: ${choice || '메모'}`);
     clearDraft(`decide:${q.id}`);
+    const next = chainNextGate(q, choice);
+    if (next) { S.mineSel = `d:${next}`; S.kbChained = S.mineSel; toast('★5 배포본 결정이 바로 이어집니다'); }
     render(); if (redraw) redraw();
     return true;
   } catch (e) { toast(e.message); return false; }
+}
+// ★4 통과 직후: 같은 주제의 ★5(배포본 결정)를 바로 띄워 이어서 답하게 한다.
+// 번호는 허브와 같은 규칙(G4-… → G5-…)이라 허브 게시 전에 답해도 그대로 반영된다. 허브 게시본에 생기면 임시본은 지운다
+function chainNextGate(q, choice) {
+  if (!q || q.kind !== 'gate' || !/^G4-/.test(q.id) || !/^통과/.test(choice || '')) return null;
+  const id = 'G5-' + q.id.slice(3);
+  const list = S.data.decisions_needed || (S.data.decisions_needed = []);
+  if (!list.some(x => x.id === id)) {
+    const title = (topicById(q.task_id) || {}).title || q.task_id;
+    const body = (q.question || '').replace(/^\[[^\]]*\][^\n]*\n*/, '');
+    const nq = { id, kind: 'gate', gate: 5, owner: 'user', task_id: q.task_id, since: new Date().toISOString(), _author: q._author, _local: true,
+      question: `[5/9 배포본 결정] ${title}\n\n${body}`, options: ['배포본 만들기', '보류', '수정', '즉시 완료 확정(남은 단계 건너뜀)'] };
+    list.push(nq);
+    store.set('localGates', [...(store.get('localGates') || []).filter(x => x.id !== id), nq].slice(-50));
+  }
+  S.d = derive(S.data);
+  return id;
+}
+// 데이터를 새로 받을 때: 아직 허브 게시본에 없는 임시 ★5만 다시 붙인다(6시간 지나면 버림)
+function mergeLocalGates() {
+  const list = S.data.decisions_needed || (S.data.decisions_needed = []);
+  const keep = (store.get('localGates') || []).filter(x => !list.some(y => y.id === x.id) && hoursSince(x.since) < 6);
+  store.set('localGates', keep);
+  list.push(...keep);
+}
+// 주제 화면에서도 지금 관문을 바로 고를 수 있게(내 차례까지 가지 않아도 됨)
+function gateBox(t) {
+  if (!t || t.status !== 'review_user' || !t.gate) return null;
+  const q = (S.data.decisions_needed || []).find(x => x.id === t.gate.id && !S.d.answers[x.id]);
+  if (!q || !(q.options || []).length) return null;
+  const again = () => { const x = S.d.topics.find(y => y.id === t.id); x ? openTopic(x) : closeDrawer(); };
+  return h('div', { class: 'callout warn gate-box' }, h('b', null, `★${t.gate.step || t.gate.n}/9 ${t.gate.label} — 여기서 바로 결정`),
+    optionList(q, o => decide(q, o, '', again)));
 }
 function lockOf(id) {
   let l = (S.data.agent_locks || {})[id] || null;
@@ -2124,6 +2160,7 @@ function openTopic(t) {
     h('h3', null, t.title),
     (t.conflict || []).length ? h('div', { class: 'callout warn' }, h('b', null, '중복 착수: '), `담당은 ${person(t.assignee).full}인데 ${t.conflict.map(c => person(c).full).join(', ')}도 착수했습니다. 한쪽을 멈추거나 담당을 바꿔주세요.`) : null,
     phaseLine(t),
+    gateBox(t),
     liveBox(t),
     t.dispatch_reason ? h('div', { class: 'reason' }, h('b', null, t.assign_by === 'user' ? '담당 지정: ' : t.assign_by === 'handoff' ? '인계: ' : '배분 근거: '), t.dispatch_reason) : null,
     workBox(t, true),
@@ -2208,16 +2245,19 @@ function kbTab(sc, d) {
 }
 // 보내기 → 성공하면 다음 항목으로(보낸 항목이 목록에 남아 있으면 그 다음, 빠졌으면 같은 자리)
 async function kbSend(sc, fn) {
-  const before = mineList(), at = before.findIndex(x => x.key === sc.key);
+  const before = mineList(), at = before.findIndex(x => x.key === sc.key), topicId = before[at]?.topic?.id;
   const ok = await fn();
   if (!ok) return;
   S.kbPick = null; S.kbIntent = null;
   const now = mineList(), still = now.findIndex(x => x.key === sc.key);
-  const next = still >= 0 ? now[still + 1] || null : now[Math.min(Math.max(at, 0), now.length - 1)] || null;
+  // 다음 항목: 이어지는 ★5 → 같은 주제에 남은 것 → 목록의 다음
+  const chained = S.kbChained && now.find(x => x.key === S.kbChained); S.kbChained = null;
+  const same = topicId && now.find(x => x.key !== sc.key && x.topic?.id === topicId && x.type !== 'backlog');
+  const next = chained || same || (still >= 0 ? now[still + 1] || null : now[Math.min(Math.max(at, 0), now.length - 1)] || null);
   S.mineSel = next ? next.key : null;
   if (sc.modal) { closeDrawer(true); if (next) openMineItem(next); }
   S._keepScroll = true; render(); if (next) kbShowRow(next.key);
-  toast(next ? '보냄 · 다음 항목' : '보냄 · 남은 항목 없음');
+  toast(chained ? '보냄 · 이어서 ★5 배포본 결정' : same ? '보냄 · 같은 주제의 다음 결정' : next ? '보냄 · 다음 항목' : '보냄 · 남은 항목 없음');
 }
 function kbEnter(sc) {
   const it = kbItem(sc.key);

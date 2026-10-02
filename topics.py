@@ -625,10 +625,13 @@ def is_research(t: dict, body: str = "") -> bool:
     return t.get("kind") == "조사·분석" or bool(NO_TEST_RE.search(t.get("title") or "")) or bool(NO_TEST_SAID.search(body or ""))
 
 
+SKIP_DONE = "즉시 완료 확정(남은 단계 건너뜀)"  # 아키텍트가 어느 관문에서든 바로 끝낼 수 있게(2026-10-03)
+
+
 def gate_options(n: int, t: dict, tested: bool = False) -> list[str]:
-    return {4: ["통과", "문제 있음(메모에 내용 적기 → 진행으로 되돌림)", "보류"],
-            5: ["배포본 만들기", "보류", "수정"],
-            7: ["서버컴에 반영", "보류"],
+    return {4: ["통과", "문제 있음(메모에 내용 적기 → 진행으로 되돌림)", "보류", SKIP_DONE],
+            5: ["배포본 만들기", "보류", "수정", SKIP_DONE],
+            7: ["서버컴에 반영", "보류", SKIP_DONE],
             9: ["완료 확정", "문제 있음(진행으로 되돌림)"],
             40: ["후속 구현 주제 만들기", "보류", "완료 확정(배포할 것 없음)"]}[n]
 
@@ -636,6 +639,8 @@ def gate_options(n: int, t: dict, tested: bool = False) -> list[str]:
 def gate_action(n: int, ans: dict) -> str:
     """관문 답 → 다음: work|pack|deploy|park|done|open5. 선택지 없이 메모만 오면 수정(진행으로)."""
     c = ans.get("choice") or ""
+    if c.startswith("즉시 완료"):
+        return "done"
     if "보류" in c:
         return "park"
     if n == 4:
