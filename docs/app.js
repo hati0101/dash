@@ -1695,7 +1695,8 @@ async function decide(q, choice, note, redraw) {
     await sendOps('decide', { decision_id: q.id, choice, note: note || '' }, `결정: ${choice || '메모'}`);
     clearDraft(`decide:${q.id}`);
     render(); if (redraw) redraw();
-  } catch (e) { toast(e.message); }
+    return true;
+  } catch (e) { toast(e.message); return false; }
 }
 function lockOf(id) {
   let l = (S.data.agent_locks || {})[id] || null;
