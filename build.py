@@ -914,15 +914,24 @@ def get_password(args) -> str:
     return pw
 
 
+# GitHub 푸시 보호가 비밀키로 오인하는 형식(10-03: 암호문 속 'AKID…'를 Tencent 키로 오탐해 14:13~17:58 게시가 모두 거부됨).
+# 암호문은 무작위라 우연히 생길 수 있다 → 생기면 새 IV로 다시 암호화한다
+PUSH_SECRET_LIKE = re.compile(r"AKID[0-9A-Za-z]{32}|(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA|ANVA|AIPA)[0-9A-Z]{16}|AIza[0-9A-Za-z_\-]{35}|LTAI[0-9A-Za-z]{12,20}")
+
+
 def encrypt(payload: dict, out_path: Path, password: str, new_salt: bool):
     data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     env = dict(os.environ, REAL_OPS_PASSWORD=password)
-    cmd = ["node", str(ROOT / "encrypt.mjs"), "encrypt", str(out_path)]
-    if new_salt:
-        cmd.append("--new-salt")
-    res = subprocess.run(cmd, input=data, env=env, capture_output=True)
-    if res.returncode != 0:
-        sys.exit("암호화 실패: " + res.stderr.decode("utf-8", errors="replace"))
+    for attempt in range(8):
+        cmd = ["node", str(ROOT / "encrypt.mjs"), "encrypt", str(out_path)]
+        if new_salt and attempt == 0:
+            cmd.append("--new-salt")
+        res = subprocess.run(cmd, input=data, env=env, capture_output=True)
+        if res.returncode != 0:
+            sys.exit("암호화 실패: " + res.stderr.decode("utf-8", errors="replace"))
+        if not PUSH_SECRET_LIKE.search(out_path.read_text(encoding="utf-8", errors="replace")):
+            break
+        print(f"암호문에 키 형식 글자가 우연히 생겨 다시 암호화({attempt + 1})")
     return len(data), res.stdout.decode("utf-8", errors="replace").strip()
 
 

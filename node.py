@@ -685,11 +685,16 @@ def cmd_pack(args, cfg):
     main = main_file(cfg)
     if not main.exists():
         sys.exit("게시본(docs/data.enc.json)이 없습니다. 먼저 git pull 하세요.")
-    res = subprocess.run(["node", str(ROOT / "encrypt.mjs"), "encrypt", str(out), "--salt-from", str(main)],
-                         input=json.dumps(public, ensure_ascii=False).encode("utf-8"),
-                         env=dict(os.environ, REAL_OPS_PASSWORD=password(args)), capture_output=True)
-    if res.returncode != 0:
-        sys.exit("암호화 실패: " + res.stderr.decode("utf-8", "replace"))
+    # GitHub 푸시 보호 오탐 방지: 암호문에 클라우드 키 형식 글자가 우연히 생기면 새 IV로 다시(build.py PUSH_SECRET_LIKE와 같음)
+    like = re.compile(r"AKID[0-9A-Za-z]{32}|(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA|ANVA|AIPA)[0-9A-Z]{16}|AIza[0-9A-Za-z_\-]{35}|LTAI[0-9A-Za-z]{12,20}")
+    for _ in range(8):
+        res = subprocess.run(["node", str(ROOT / "encrypt.mjs"), "encrypt", str(out), "--salt-from", str(main)],
+                             input=json.dumps(public, ensure_ascii=False).encode("utf-8"),
+                             env=dict(os.environ, REAL_OPS_PASSWORD=password(args)), capture_output=True)
+        if res.returncode != 0:
+            sys.exit("암호화 실패: " + res.stderr.decode("utf-8", "replace"))
+        if not like.search(out.read_text(encoding="utf-8", errors="replace")):
+            break
     # 같은 비밀번호로 다시 열리는지 바로 확인한다(다른 비밀번호로 올리는 사고 방지)
     chk = subprocess.run(["node", str(ROOT / "encrypt.mjs"), "decrypt", str(out)],
                          env=dict(os.environ, REAL_OPS_PASSWORD=password(args)), capture_output=True)
