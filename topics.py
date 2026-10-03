@@ -50,7 +50,9 @@ ACTION_ID_RE = re.compile(r"^A-\d{8}-[a-z0-9]{3,10}$")
 REF_RE = re.compile(r"^[A-Za-z0-9_.:\-]{1,200}$")
 TARGET_KINDS = ("task", "message", "topic", "decision", "general")
 STAGES = ("request", "progress", "validating", "user_test", "blocked", "done")
-ACTION_TYPES = ("reply", "ack", "task-state", "decide", "assign", "activate", "topic-edit", "topic-drop", "agent-lock")
+ACTION_TYPES = ("reply", "ack", "task-state", "decide", "assign", "activate", "topic-edit", "topic-drop", "agent-lock",
+                "topic-resume", "deploy-batch")
+BATCH_RE = re.compile(r"^R-\d{8}(-[0-9a-z]{1,8})?$")  # 배포 묶음 번호(예: R-20261005, R-20261005-2)
 AGENT_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,30}$")
 
 
@@ -316,6 +318,17 @@ def clean_action(raw: dict) -> dict:
         if not ID_RE.match(topic):
             raise ValueError("다시 진행 형식 오류")
         a.update(topic=topic, note=str(raw.get("note", "")).strip()[:1000])
+    elif kind == "deploy-batch":
+        # 배포 묶음: op=add(대기열 주제를 묶음에 넣기, 묶음이 없으면 만듦) · remove(묶음에서 빼서 대기열로) · date(날짜·메모만 고침)
+        ids = raw.get("topics") or []
+        op, batch, date = raw.get("op") or "add", str(raw.get("batch", "")), str(raw.get("date") or "")
+        if op not in ("add", "remove", "date") or not BATCH_RE.match(batch):
+            raise ValueError("배포 묶음 형식 오류(묶음 번호 R-YYYYMMDD)")
+        if not isinstance(ids, list) or len(ids) > 100 or not all(isinstance(x, str) and ID_RE.match(x) for x in ids) or (op != "date" and not ids):
+            raise ValueError("배포 묶음 주제 목록 형식 오류")
+        if date and not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
+            raise ValueError("배포 날짜 형식 오류(YYYY-MM-DD)")
+        a.update(op=op, batch=batch, date=date or None, topics=ids, note=str(raw.get("note", "")).strip()[:1000])
     elif kind == "topic-drop":
         ids = raw.get("topics") or []
         if not isinstance(ids, list) or not ids or len(ids) > 300 or not all(isinstance(x, str) and ID_RE.match(x) for x in ids):
@@ -331,7 +344,8 @@ def data_dir(cfg) -> Path:
 def user_file(cfg) -> tuple[Path, dict]:
     path = data_dir(cfg) / "user.json"
     rec = read_json(path, None) or {"author": "user", "_rule": "이 파일은 topics.py가 사용자 요청을 받아서만 쓴다."}
-    for key in ("processed_actions", "comments", "tasks", "acks", "decisions_answered", "topic_assign", "topic_activate", "topic_edit", "topic_drop", "topic_resume"):
+    for key in ("processed_actions", "comments", "tasks", "acks", "decisions_answered", "topic_assign", "topic_activate", "topic_edit", "topic_drop", "topic_resume",
+                "deploy_batches", "batch_moves"):
         rec.setdefault(key, [])
     return path, rec
 
@@ -444,6 +458,27 @@ def apply_action(cfg, a: dict, source: str) -> str:
                     {"sender": "user (대시보드)", "recipient": "claude", "kind": "user resume parked topic", "task_id": a["topic"]},
                     a["note"] or "대시보드 '보류' 메뉴에서 다시 진행을 골랐습니다.")
         result = f"보류 주제 다시 진행 {a['topic']}"
+    elif a["type"] == "deploy-batch":
+        # 배포 묶음(아키텍트 2026-10-03): 묶음 정보와 주제 들고 나기 기록. 엔진이 대기열 ↔ 8b 배포(서버컴 대화) 단계를 정한다
+        cur = next((b for b in rec["deploy_batches"] if b.get("id") == a["batch"]), None)
+        if not cur:
+            cur = {"id": a["batch"], "created_at": a["created_at"] or ts}
+            rec["deploy_batches"].append(cur)
+        if a.get("date"):
+            cur["date"] = a["date"]
+        if a.get("note"):
+            cur["note"] = a["note"]
+        cur["updated_at"] = a["created_at"] or ts
+        for tid in a["topics"] if a["op"] != "date" else []:
+            rec["batch_moves"].append({"topic": tid, "batch": a["batch"] if a["op"] == "add" else None, "from": a["batch"],
+                                       "note": a["note"] or None, "ts": a["created_at"] or ts})
+        rec["batch_moves"] = rec["batch_moves"][-3000:]
+        if a["op"] == "add":
+            write_inbox(bridge / "inbox-claude", f"USR-BATCH-{a['id']}", f"[사용자 → Claude] 배포 묶음 {a['batch']}에 {len(a['topics'])}건",
+                        {"sender": "user (대시보드)", "recipient": "claude", "kind": "user deploy batch"},
+                        f"배포 날짜: {cur.get('date') or '-'}\n" + "\n".join(f"- {x}" for x in a["topics"]) + (f"\n\n메모: {a['note']}" if a["note"] else ""))
+        result = {"add": f"배포 묶음 {a['batch']}에 {len(a['topics'])}건 넣음", "remove": f"배포 묶음 {a['batch']}에서 {len(a['topics'])}건 뺌(대기열로)",
+                  "date": f"배포 묶음 {a['batch']} 날짜·메모 고침"}[a["op"]]
     elif a["type"] == "topic-drop":
         # 지우기 = 목록에서 빼기. 주제 폴더는 지우지 않으므로 '되살리기'로 복구된다
         drop = set(a["topics"])
@@ -688,10 +723,14 @@ def user_assigns(cfg: dict | None) -> dict:
 # ---------------------------------------------------------------- 단계·관문 (아키텍트 결정 2026-10-02, 정정본)
 # 1 등록 → 2 진행 → 3 AI 자체 시험(자동, 관문 없음) → ★4 실게임 시험 → ★5 배포본 결정 → 6 배포본 작성(AI)
 # → ★7 운영 반영 승인 → 8 운영 반영(서버컴) → ★9 완료 확정.  ★ = 아키텍트 관문(내 차례에 자동으로 올라옴).
+# 8 운영 반영은 바로 반영이 아니다(아키텍트 2026-10-03): ★7 '배포 대기열에 넣기' → 8a 배포 준비(서버컴 자동: 실서버 기준 diff·겹침·순서·백업·복구,
+# 운영 서버에는 쓰지 않음) → 배포 대기열 → 아키텍트가 날을 잡아 배포 묶음(R-YYYYMMDD)을 만듦 → 8b 배포(서버컴 Astra 대화 세션, 자동 실행기 안 깨움)
+# → 서버컴이 '배포 완료' 끝냄 → ★9(묶음 단위로 한 번에 완료 확정 가능).
 # AI는 done을 직접 만들지 못한다. AI의 '끝냄'(state done)은 다음 단계·관문으로 넘기는 신호다. 완료(done)는 ★9에서만.
 # 조사·분석 주제는 시험·배포가 없으므로 2 진행을 끝내면 바로 ★결과 확인(후속 구현 / 보류 / 완료 확정)으로 온다.
 GATE_LABEL = {4: "실게임 시험", 5: "배포본 결정", 7: "운영 반영 승인", 9: "완료 확정", 40: "결과 확인"}
-STAGE_STEP = {"work": (2, "진행"), "test": (3, "AI 자체 시험"), "pack": (6, "배포본 작성"), "deploy": (8, "운영 반영")}
+STAGE_STEP = {"work": (2, "진행"), "test": (3, "AI 자체 시험"), "pack": (6, "배포본 작성"), "prep": (8, "배포 준비(서버컴)"),
+              "queue": (8, "배포 대기열"), "deploy": (8, "배포(서버컴 대화)")}
 STAGE_GATE = {"test": 4, "pack": 7, "deploy": 9}  # 그 단계에서 AI가 끝내면 열리는 관문(진행은 자체 시험으로 자동으로 넘어감)
 
 
@@ -700,6 +739,8 @@ STAGE_GATE = {"test": 4, "pack": 7, "deploy": 9}  # 그 단계에서 AI가 끝�
 RULES_V2_FROM = datetime(2026, 10, 3, 3, 0, tzinfo=timezone(timedelta(hours=9)))
 # 판정 규칙 3판(2026-10-03 가지 시뮬레이션): ★7 메모만 보내기 = 배포본 수정(전에는 같은 관문 다시 열기 — 아무도 안 깨움). 이 시각 이후 답부터
 RULES_V3_FROM = datetime(2026, 10, 3, 12, 0, tzinfo=timezone(timedelta(hours=9)))
+# 배포 대기열(2026-10-03): 옛 ★7 '서버컴에 반영' 답도 배포 준비 → 대기열로 간다(아키텍트 요청). 바꿀 때 허브 기록에 ★7·★9 답이 하나도 없음을 확인했다
+# (관문 답은 허브 data/user.json에만 쌓인다) — 옛 흐름으로 이미 ★9까지 간 주제가 없어 다시 판정해도 바뀌는 관문이 없다
 # 시험·배포할 것이 없는 주제(옛 규칙): 제목에 기획·검토 등이 있으면 조사로 봤다 → 구현 주제를 잘못 분류해 새 규칙에서는 쓰지 않음
 NO_TEST_RE = re.compile(r"기획|구상|조사|연구|분석|검토|여부|\[연결 시험\]|\[메모 수집\]|실사용 시험|자동실행 테스트")
 NO_TEST_META = re.compile(r"\[연결 시험\]|\[메모 수집\]")  # 새 규칙에서도 시험할 것이 없는 운영용 주제
@@ -787,9 +828,9 @@ def finish_counts(by: str, stage: str, live: bool, t: dict, known, ts) -> bool:
         return by in owners
     if stage in ("test", "pack"):
         return by == stage_owner(stage, t, known, a) or (by in owners and (str(by).startswith("dev-") or by == LEAD))
-    if stage == "deploy":
+    if stage in ("prep", "deploy"):
         return str(by).startswith("server-")
-    return False
+    return False  # 배포 대기열(queue): 묶음에 들어가기 전 끝냄은 세지 않는다
 
 
 SKIP_DONE = "즉시 완료 확정(남은 단계 건너뜀)"  # 아키텍트가 어느 관문에서든 바로 끝낼 수 있게(2026-10-03)
@@ -798,14 +839,15 @@ SKIP_DONE = "즉시 완료 확정(남은 단계 건너뜀)"  # 아키텍트가 �
 def gate_options(n: int, t: dict, tested: bool = False) -> list[str]:
     return {4: ["통과", "문제 있음(메모에 내용 적기 → 진행으로 되돌림)", "보류", SKIP_DONE],
             5: ["배포본 만들기", "보류", "수정", SKIP_DONE],
-            7: ["서버컴에 반영", "배포본 수정(메모에 고칠 내용)", "보류", SKIP_DONE],
-            9: ["완료 확정", "문제 있음 — 운영 반영만 다시(배포본 고침)", "문제 있음 — 실게임부터 다시(진행으로 되돌림)"],
+            7: ["배포 대기열에 넣기", "배포본 수정(메모에 고칠 내용)", "보류", SKIP_DONE],
+            9: ["완료 확정", "배포 실패·되돌림 — 다시 대기열로(배포본 그대로)", "문제 있음 — 배포본 고침(배포본 작성으로)",
+                "문제 있음 — 실게임부터 다시(진행으로 되돌림)"],
             40: (["완료 확정(후속 주제 있음)", "보류"] if t.get("followups")  # 후속이 이미 있으면 또 만들지 않는다(중복 방지)
                  else ["후속 구현 주제 만들기", "보류", "완료 확정(배포할 것 없음)"])}[n]
 
 
 def gate_action(n: int, ans: dict) -> str:
-    """관문 답 → 다음: work|pack|deploy|park|done|open5|followup|regate. 선택지 없이 메모만 오면 수정(진행으로).
+    """관문 답 → 다음: work|pack|prep|queue|park|done|open5|followup|regate. 선택지 없이 메모만 오면 수정(진행으로).
     ★7에 메모만 오면 조용히 보류하지 않고 같은 관문을 메모와 함께 다시 연다(regate).
     ★결과 확인의 '후속 구현 주제 만들기'는 이 주제를 끝내고 새 구현 주제를 만든다(followup)."""
     c = ans.get("choice") or ""
@@ -818,8 +860,8 @@ def gate_action(n: int, ans: dict) -> str:
     if n == 5:
         return "pack" if "배포본" in c else "work"
     if n == 7:
-        if "서버컴" in c:
-            return "deploy"
+        if "서버컴" in c or "대기열" in c:
+            return "prep"  # 바로 반영이 아니라 8a 배포 준비 → 배포 대기열(옛 '서버컴에 반영' 답도 같은 길, 2026-10-03)
         if "배포본 수정" in c or (not c and to_dt(ans.get("ts")) >= RULES_V3_FROM):
             return "pack"  # 배포본 작성으로 돌아가 메모를 담당에게(고친 배포본 끝냄 → ★7 다시)
         return "regate"
@@ -829,8 +871,10 @@ def gate_action(n: int, ans: dict) -> str:
         if c.startswith("후속 구현") and to_dt(ans.get("ts")) >= RULES_V2_FROM:
             return "followup"
         return "work"
-    if "운영 반영만" in c:
-        return "pack"  # ★9 문제 → 배포본만 고쳐 ★7 → 운영 반영 → ★9(실게임·배포본 결정 생략, 2026-10-03)
+    if "대기열" in c:
+        return "queue"  # ★9 배포 실패·되돌림 → 배포본 그대로 다시 대기열(다음 묶음에)
+    if "운영 반영만" in c or "배포본 고침" in c:
+        return "pack"  # ★9 문제 → 배포본만 고쳐 ★7 → 배포 준비 → ★9(실게임·배포본 결정 생략, 2026-10-03)
     return "done" if c.startswith("완료") else "work"
 
 
@@ -843,6 +887,8 @@ def run_gates(t: dict, finishes: list, answered: dict, known=None) -> dict:
     # live: ★4 실게임(격리 서버) 시험이 열린 뒤 통과할 때까지는 개발컴 Claude 대화 세션 단계(아키텍트 결정 2026-10-02).
     # 이 동안 자동 실행기는 깨우지 않고, '문제 있음'으로 되돌아온 수정도 대화에서 고쳐 끝내면 자체 시험 없이 바로 ★4로 돌아온다.
     stage, since, gate, history, final, live = "work", None, None, [], None, False
+    batch, prep = None, None  # 8b 배포 묶음 번호, 마지막 배포 준비 끝냄
+    moves = sorted((m for m in t.get("_batch_moves") or () if m.get("ts")), key=lambda m: to_dt(m["ts"]))
     fin = sorted(finishes, key=lambda f: to_dt(f[0]))
     # 아키텍트가 이미 답한 관문을 연 끝냄은 그때 인정된 것이다: 담당 정보가 나중에 바뀌어도 다시 판정하지 않는다(답한 관문이 떨어져 나가지 않게)
     gid_re = re.compile(r"^G(\d+)-" + re.escape(t["id"][2:]) + r"-(\d{14})$")
@@ -855,6 +901,24 @@ def run_gates(t: dict, finishes: list, answered: dict, known=None) -> dict:
     early = {st for n, st in gids if n in ("4", "5", "40")}
     t["_anchor_by"] = {f[1] for f in fin if stamp(f[0]) in early}
     for _ in range(300):
+        if gate is None and stage in ("queue", "deploy"):
+            later = [m for m in moves if since is None or to_dt(m["ts"]) >= to_dt(since)]
+            if stage == "queue":  # 배포 대기열: 아키텍트가 묶음에 넣으면 8b 배포(서버컴 대화)
+                add = next((m for m in later if m.get("batch")), None)
+                if not add:
+                    break
+                stage, since, batch = "deploy", add["ts"], add["batch"]
+                continue
+            # 8b 배포 중 묶음에서 빼면(또는 다른 묶음으로 옮기면) 배포 완료 끝냄보다 먼저인 것부터 따른다
+            nf = next((f for f in fin if to_dt(f[0]) > to_dt(since) and str(f[1]).startswith("server-")), None)
+            mv = next((m for m in later if m.get("batch") != batch), None)
+            if mv and (not nf or to_dt(mv["ts"]) < to_dt(nf[0])):
+                since = mv["ts"]
+                if mv.get("batch"):
+                    batch = mv["batch"]
+                else:
+                    stage, batch = "queue", None
+                continue
         if gate is None:
             nxt = next((f for f in fin if since is None or to_dt(f[0]) > to_dt(since)), None)
             if not nxt:
@@ -864,11 +928,15 @@ def run_gates(t: dict, finishes: list, answered: dict, known=None) -> dict:
                 fin = [f for f in fin if f is not nxt]  # 그 단계 담당이 아닌 작업자의 끝냄: 단계를 넘기지 않는다
                 continue
             since = ts
+            if stage == "prep":  # 배포 준비 끝 → 배포 대기열(관문 없음, 아키텍트가 묶음을 만들 때까지 기다림)
+                stage, prep = "queue", {"at": ts, "by": by, "summary": body}
+                continue
             if stage == "work" and not live and not is_research(t, body, ts):
                 stage = "test"  # 진행 끝 → AI 자체 시험(관문 없음)
                 continue
             n = (4 if live else 40) if stage == "work" else STAGE_GATE[stage]
-            gate = {"n": n, "id": gate_id(n, t["id"], ts), "opened_at": ts, "by": by, "summary": body, "from_stage": stage}
+            gate = {"n": n, "id": gate_id(n, t["id"], ts), "opened_at": ts, "by": by, "summary": body, "from_stage": stage,
+                    **({"batch": batch} if stage == "deploy" and batch else {})}
             live = live or n == 4
         ans = answered.get(gate["id"])
         if not ans and gate.get("legacy_id") and answered.get(gate["legacy_id"]):
@@ -890,6 +958,19 @@ def run_gates(t: dict, finishes: list, answered: dict, known=None) -> dict:
                 gate.pop("legacy_id", None)
                 since = later[0]
                 continue
+        if act == "followup":
+            # 후속 주제가 모두 삭제되면 ★결과 확인을 다시 연다(삭제 시각 번호). 이미 그 번호로 답했으면(후속을 다시 만든 뒤) 같은 길로 재판정
+            used = {h_.get("id") for h_ in history}
+            reo = [st for n_, st in gids if n_ == "40" and st > stamp(since) and gate_id(40, t["id"], datetime.strptime(st, "%Y%m%d%H%M%S").replace(tzinfo=KST)) not in used]
+            re_at = (datetime.strptime(min(reo), "%Y%m%d%H%M%S").replace(tzinfo=KST).isoformat() if reo
+                     else t.get("_followups_dropped_at") if t.get("_followups_dropped_at") and to_dt(t["_followups_dropped_at"]) > to_dt(since) else None)
+            if re_at:
+                history[-1]["followup_dropped_at"] = re_at
+                gate = {**prev, "id": gate_id(40, t["id"], re_at), "opened_at": re_at,
+                        "summary": f"{prev.get('summary') or ''}\n\n[후속 주제가 삭제됨 — 후속 구현을 다시 만들지, 완료로 둘지 정해 주세요]".strip()}
+                gate.pop("legacy_id", None)
+                since = re_at
+                continue
         if act in ("park", "done", "followup"):
             final, live = ("done" if act == "followup" else act), False
             break
@@ -905,7 +986,10 @@ def run_gates(t: dict, finishes: list, answered: dict, known=None) -> dict:
                     "summary": prev["summary"], "from_stage": prev["from_stage"]}
             continue
         stage = act
-    return {"stage": stage, "since": since, "gate": gate, "history": history[-10:], "final": final, "live": live}
+        if act in ("queue", "prep", "pack", "work"):
+            batch = None
+    return {"stage": stage, "since": since, "gate": gate, "history": history[-10:], "final": final, "live": live,
+            "batch": batch if stage == "deploy" else None, "prep": prep}
 
 
 LIVE_AGENT = "dev-claude"  # 실게임(격리 서버) 시험·즉시 수정은 개발컴 Claude 대화 세션에서
@@ -917,7 +1001,7 @@ def stage_owner(stage: str, t: dict, known, assignee: str | None = None) -> str 
     a = assignee or t.get("assignee") or LEAD
     if stage in ("test", "pack"):
         return a if a.startswith("dev-") else LEAD
-    if stage == "deploy":
+    if stage in ("prep", "deploy"):  # 8a 배포 준비(자동)·8b 배포(대화 세션)는 서버컴 메인 Astra
         for cand in ("server-astra", *[p for p in peers if p.startswith("server-")]):
             if cand in (known or {cand}):
                 return cand
@@ -938,6 +1022,10 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
     activations = {r.get("topic") for r in urec.get("topic_activate", [])}
     edits = {r.get("topic"): r for r in urec.get("topic_edit", [])}
     drops = {r.get("topic"): r for r in urec.get("topic_drop", [])}
+    batch_moves: dict[str, list] = {}
+    for r in urec.get("batch_moves", []):
+        batch_moves.setdefault(r.get("topic"), []).append(r)
+    batch_info = {b.get("id"): b for b in urec.get("deploy_batches", [])}
     resumes: dict[str, list] = {}
     for r in urec.get("topic_resume", []):
         resumes.setdefault(r.get("topic"), []).append(r)
@@ -1052,8 +1140,12 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
             # 끝냄 시점 담당 판정용: 허브가 남긴 담당 변경 이력 + 지금 담당이 정해진 시각
             t["_owner_log"], t["_assigned_at"], t["_base_assignee"] = lead.get("owner_log"), assigned_at, t.get("assignee")
             t["_resume"] = resume_ts
+            t["_batch_moves"] = batch_moves.get(t["id"])
+            lk = linked_of.get(t["id"]) or []
+            if lk and all(x in drops for x in lk):  # 후속이 모두 삭제됨 → ★결과 확인 다시(run_gates)
+                t["_followups_dropped_at"] = max(drops[x].get("ts") or "" for x in lk)
             g = run_gates(t, finishes, gate_answers, known or peers)
-            for k in ("_owners", "_owner_log", "_assigned_at", "_base_assignee", "_anchor_by", "_resume"):
+            for k in ("_owners", "_owner_log", "_assigned_at", "_base_assignee", "_anchor_by", "_resume", "_batch_moves", "_followups_dropped_at"):
                 t.pop(k, None)
             t["gate_history"] = g["history"]
             if g["live"] and not g["final"]:  # 실게임 시험 단계: 담당을 개발컴 Claude로 옮기고 대화 세션에서 진행
@@ -1067,6 +1159,8 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
                 t["gate"], t["status"], t["status_at"] = gt, "review_user", gt["opened_at"]
             elif g["final"]:
                 t["status"], t["confirmed"] = ("done", True) if g["final"] == "done" else ("parked", False)
+                if g["final"] == "done" and (g["history"] or [{}])[-1].get("act") == "followup":
+                    t["followed"] = True  # 후속으로 이어짐: 완료 메뉴·완료율에서는 줄기 끝이 완료될 때 한 번만 센다
                 t["status_at"] = g["since"]
             elif park_ts and not resumed and to_dt(park_ts) > to_dt(g["since"]):
                 # 끝냄 뒤에 남은 보류 기록(아키텍트 보류 결정): 엔진이 진행 중으로 덮지 않는다(2026-10-03 — 보류가 무시되던 결함)
@@ -1076,6 +1170,17 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
                 # 진행 중 보류를 다시 진행했으면 상태 시각 = 재개 시각(노드가 자기 PC의 옛 보류 기록으로 다시 덮지 않게, overlay_local)
                 t["status_at"] = last_resume if resumed and to_dt(last_resume) > to_dt(g["since"]) else g["since"]
                 t["stage_owner"] = stage_owner(g["stage"], t, known)
+                if g["stage"] == "deploy":  # 8b 배포: 서버컴 Astra 대화 세션 몫(자동 실행기는 깨우지 않음 — ★4 실게임 대화와 같은 원리)
+                    t["deploy_session"] = True
+            if g.get("batch"):
+                b = batch_info.get(g["batch"]) or {}
+                t["deploy_batch"] = {"id": g["batch"], "date": b.get("date"), "note": b.get("note")}
+            elif t.get("gate") and t["gate"].get("batch"):
+                b = batch_info.get(t["gate"]["batch"]) or {}
+                t["deploy_batch"] = {"id": t["gate"]["batch"], "date": b.get("date"), "note": b.get("note")}
+            if g.get("prep") and t.get("stage") in ("queue", "deploy") or (g.get("prep") and (t.get("gate") or {}).get("n") == 9):
+                t["deploy_prep"] = {**g["prep"], "summary": str(g["prep"].get("summary") or "")[:4000],
+                                    "files": deploy_files(g["prep"].get("summary") or "")}
             step = (t["gate"]["step"], t["gate"]["label"] + " 대기") if t.get("gate") else STAGE_STEP.get(t.get("stage") or "work")
             t["step"] = {"n": step[0], "label": step[1]} if t["status"] not in ("done", "parked") else None
         ed = edits.get(t["id"])
@@ -1118,6 +1223,17 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
         t["authors"] = sorted(set(list(recs) + [r.get("agent") for r in by_topic.get(t["id"], [])]))
         t["turn"] = whose_turn(t)
         out.append(t)
+    # 배포 대기열 겹침: 배포 준비가 적은 '대상 파일'이 같은 주제끼리(준비 중·대기열·배포 중). 준비 요약의 '겹침: T-…'도 잇는다
+    pool = [x for x in out if x.get("status") not in ("done", "dropped") and (x.get("stage") in ("prep", "queue", "deploy") or (x.get("gate") or {}).get("n") == 9)]
+    for x in pool:
+        mine = set((x.get("deploy_prep") or {}).get("files") or ())
+        said = set(re.findall(r"T-\d{8}-[a-z0-9]{6}", ((x.get("deploy_prep") or {}).get("summary") or "").split("겹침", 1)[-1])) if "겹침" in ((x.get("deploy_prep") or {}).get("summary") or "") else set()
+        hits = [{"id": y["id"], "files": sorted(mine & set((y.get("deploy_prep") or {}).get("files") or ()))} for y in pool if y is not x]
+        hits = [h for h in hits if h["files"] or h["id"] in said]
+        if hits:
+            x["deploy_conflicts"] = hits
+    # 후속 줄기(원래 → 후속 → …): 어느 주제를 열어도 같은 줄기 전체와 지금 위치를 보이게 한다
+    chain_info(out)
     # 연결 표시용 제목·상태(화면에서 원래 주제 ← / 후속 주제 → 로 오간다)
     brief = {x["id"]: {"id": x["id"], "title": x.get("title"), "status": x.get("status")} for x in out}
     for x in out:
@@ -1126,6 +1242,70 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
         if x.get("linked"):
             x["followup_topics"] = [brief[f] for f in x["linked"] if f in brief]  # 화면 연결: 미처리·삭제 포함 모두
     return out
+
+
+CHAIN_STATE = {"done": "줄기 완료", "active": "진행 중", "parked": "후속 보류", "backlog": "후속 미처리", "dropped": "후속 삭제"}
+
+
+def chain_info(out: list[dict]) -> None:
+    """원래 주제와 후속 주제를 줄기로 묶는다(아키텍트 2026-10-03 '한 라인으로'). 줄기가 둘 이상인 주제마다 x['chain']:
+    root, members(만든 순서: id·title·status·where·followed·origin), state(done|active|parked|backlog|dropped), head(한 줄 요약).
+    완료는 줄기 끝(후속으로 이어지지 않은 주제)이 모두 완료 확정됐을 때만."""
+    by = {x["id"]: x for x in out}
+    def root_of(x):
+        seen = set()
+        while x.get("origin_topic") in by and x["id"] not in seen:
+            seen.add(x["id"])
+            x = by[x["origin_topic"]]
+        return x
+    def where(x):
+        if x.get("status") == "review_user" and x.get("gate"):
+            return f"★{x['gate'].get('label') or ''} 대기".strip()
+        if x.get("followed"):
+            return "후속으로 이어짐"
+        st = {"done": "완료", "parked": "보류", "dropped": "삭제", "backlog": "미처리", "new": "새 주제", "triage": "검토", "ready": "준비"}.get(x.get("status"))
+        return st or ((x.get("step") or {}).get("label") or "진행 중")
+    for r in {root_of(x)["id"] for x in out if x.get("origin_topic") in by}:
+        root, members, todo, seen = by[r], [], [r], set()
+        while todo:
+            cur = todo.pop(0)
+            if cur in seen or cur not in by:
+                continue
+            seen.add(cur)
+            members.append(by[cur])
+            todo += sorted(by[cur].get("linked") or [], key=lambda i: str((by.get(i) or {}).get("created_at") or ""))
+        if len(members) < 2:
+            continue
+        members.sort(key=lambda x: to_dt(x.get("created_at")))
+        leaves = [m for m in members if not m.get("followed") and m.get("status") != "dropped"]
+        if leaves and all(m.get("status") == "done" for m in leaves):
+            state = "done"
+        elif any(m.get("status") in ("new", "triage", "ready", "active", "review_user") for m in leaves):
+            state = "active"
+        elif any(m.get("status") == "parked" for m in leaves):
+            state = "parked"
+        elif leaves:
+            state = "backlog"
+        else:
+            state = "dropped"
+        cur = next((m for m in reversed(leaves) if m.get("status") != "done"), leaves[-1] if leaves else members[-1])
+        head = f"{root.get('title')}" + (f" → {cur.get('title')}" if cur is not root else "") + f" · {'완료' if state == 'done' else '지금 ' + where(cur)}"
+        info = {"root": r, "state": state, "label": CHAIN_STATE[state], "head": head, "current": cur["id"],
+                "members": [{"id": m["id"], "title": m.get("title"), "status": m.get("status"), "where": where(m), "followed": bool(m.get("followed")),
+                             "origin": m.get("origin_topic"), "created_at": m.get("created_at")} for m in members]}
+        for m in members:
+            m["chain"] = info
+
+
+def deploy_files(text: str) -> list[str]:
+    """배포 준비 요약의 '대상 파일:' 줄(쉼표·줄바꿈 목록)에서 파일 경로를 뽑는다 — 대기열 겹침 확인용."""
+    out = []
+    for m in re.finditer(r"대상 파일\s*[:：]\s*(.+?)(?=\n\s*\n|\n[^\s\-*•]|\Z)", text or "", re.S):
+        for p in re.split(r"[,\n]", m.group(1)):
+            p = p.strip(" -*•`\t").split(" (")[0].strip()
+            if p and len(p) < 300 and ("/" in p or "\\" in p or "." in p):
+                out.append(p.replace("\\", "/"))
+    return sorted(set(out))[:200]
 
 
 def review_partner(a: str | None, known: set | None, locked=frozenset()) -> str | None:
@@ -1153,8 +1333,10 @@ def whose_turn(t: dict) -> str | None:
     req = t.get("open_request")
     if req and req.get("to"):
         return req["to"]  # 요청받은 쪽 차례. 답(reply)하면 담당에게 돌아간다
-    if t.get("stage_owner") and t.get("stage") in ("test", "pack", "deploy"):
-        return t["stage_owner"]  # 격리 시험·배포본 작성은 개발컴, 운영 반영은 서버컴
+    if t.get("stage") == "queue":
+        return None  # 배포 대기열: 아키텍트가 묶음을 만들 때까지 아무도 깨우지 않는다
+    if t.get("stage_owner") and t.get("stage") in ("test", "pack", "prep", "deploy"):
+        return t["stage_owner"]  # 격리 시험·배포본 작성은 개발컴, 배포 준비·배포(대화)는 서버컴
     a = t.get("assignee")
     if not a:
         return LEAD  # 배분 대기
@@ -1354,7 +1536,7 @@ def rescue(cfg, topics: list[dict], all_list: list[dict], agents_ok: list[dict],
                 print(f"{t['id']} 요청 닫음({why}): → {to}")
             continue
         cur = t.get("assignee")
-        if not cur or t["status"] not in ("new", "triage", "ready", "active") or t.get("live_session") or t.get("stage") == "deploy":
+        if not cur or t["status"] not in ("new", "triage", "ready", "active") or t.get("live_session") or t.get("stage") in ("prep", "queue", "deploy"):
             continue
         why = "배정 잠금" if cur in locks else ("PC 신호 끊김" if cur in known and not alive(known[cur]) else None)
         if not why:

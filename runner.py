@@ -181,7 +181,7 @@ def sig_parts(t: dict, who: str, mode: str, data: dict, st: dict) -> dict:
     if req.get("to") == who and who != t.get("assignee"):
         claimed = None
         stage = f"req-{req.get('id')}"
-    elif t.get("stage") in ("test", "pack", "deploy") and t.get("stage_owner") == who:
+    elif t.get("stage") in ("test", "pack", "prep", "deploy") and t.get("stage_owner") == who:
         stage = f"stage-{t['stage']}-{t.get('status_at')}"  # 새 단계가 시작될 때마다 한 번
     elif who == t.get("assignee"):
         claimed = any(n.get("by") == who and n.get("kind") == "claim" for n in notes)
@@ -257,11 +257,11 @@ def find_jobs(data: dict, state: dict, only: str | None = None) -> list[dict]:
         who = t.get("turn")
         if who not in agents or (only and who != only) or t.get("status") not in ACTIVE:
             continue
-        if t["id"] in holds or t.get("live_session"):
-            continue  # 대화 세션이 잡고 있다(실게임 시험 단계는 개발컴 Claude 대화 세션 몫)
+        if t["id"] in holds or t.get("live_session") or t.get("deploy_session") or t.get("stage") == "queue":
+            continue  # 대화 세션이 잡고 있다(실게임 시험은 개발컴 Claude, 8b 배포는 서버컴 Astra 대화 세션 몫). 배포 대기열은 아무도 안 깨움
         # 담당이고 진행 베이스가 있고 진행 중이면 '작업 모드'(작업물 저장소의 자기 폴더에 결과물을 직접 만든다)
         req_to_me = (t.get("open_request") or {}).get("to") == who
-        stage_mine = t.get("stage") in ("test", "pack") and t.get("stage_owner") == who
+        stage_mine = t.get("stage") in ("test", "pack", "prep") and t.get("stage_owner") == who
         mode = "impl" if (impl_allowed() and (req_to_me or stage_mine or (who == t.get("assignee") and t.get("plan") and t.get("status") == "active"))) else "plan"
         st = state.setdefault("topics", {}).setdefault(t["id"], {})
         parts = sig_parts(t, who, mode, data, st)
@@ -304,8 +304,8 @@ def find_jobs(data: dict, state: dict, only: str | None = None) -> list[dict]:
             if t and t.get("status") in ("done", "parked", "dropped", "review_user"):
                 used.append(q["id"])  # 이미 끝났거나 아키텍트 관문 대기: 이 답으로 AI가 할 일이 없으니 처리함으로(옛 답으로 나중에 다시 깨지 않게)
                 continue
-            if t and (t["id"] in holds or t.get("live_session")):
-                continue  # 대화 세션 처리 중·실게임 시험 단계(개발컴 Claude 대화)는 실행기가 깨우지 않는다
+            if t and (t["id"] in holds or t.get("live_session") or t.get("deploy_session") or t.get("stage") == "queue"):
+                continue  # 대화 세션 처리 중·실게임 시험 단계(개발컴 Claude 대화)·8b 배포(서버컴 대화)는 실행기가 깨우지 않는다
             ast_ = state.setdefault("topics", {}).setdefault(t["id"] if t else f"ans-{q['id']}", {})
             if limited(ast_) and not slowed(ast_):
                 continue  # 실행 실패 재시도 대기만 기다린다. 헛돎 감속 중이어도 아키텍트 답은 바로 전한다
@@ -732,7 +732,7 @@ def dev_revert(agent_id: str | None, tid: str, rel: str | None = None, force: bo
 def dev_passed(t: dict) -> bool:
     """정리해도 되는 '통과' 상태인가 — 지금 상태로만 판정한다(2026-10-03 검토 P1: ★4 통과 이력이 있어도 '문제 있음'·'수정'으로
     진행에 되돌아와 다시 고치는 중이면 백업·diff를 지우지 않는다). 완료, ★5·★7·★9 대기, 배포본 작성·운영 반영 단계."""
-    return t.get("status") == "done" or (t.get("gate") or {}).get("n") in (5, 7, 9) or t.get("stage") in ("pack", "deploy")
+    return t.get("status") == "done" or (t.get("gate") or {}).get("n") in (5, 7, 9) or t.get("stage") in ("pack", "prep", "queue", "deploy")
 
 
 def dev_cleanup(data: dict) -> list[str]:
@@ -945,8 +945,8 @@ def dev_blocked(job: dict) -> str | None:
     t = job.get("topic") or {}
     if job.get("mode") != "impl":
         return "계획 모드에서는 개발 트리를 고치거나 빌드하지 않음(진행 베이스·교차 검토 뒤 작업 모드에서)"
-    if t.get("stage") in ("pack", "deploy"):
-        return "배포본 작성·운영 반영 단계에서는 개발 트리를 고치지 않음"
+    if t.get("stage") in ("pack", "prep", "queue", "deploy"):
+        return "배포본 작성·배포 준비·배포 단계에서는 개발 트리를 고치지 않음"
     if t.get("gate") or t.get("live_session"):
         return "관문 대기·실게임 대화 단계에서는 자동 실행기가 개발 트리를 고치지 않음"
     return None
@@ -999,9 +999,15 @@ STAGE_GUIDE = {
             "★4부터는 담당이 개발컴 Claude로 옮겨지고 아키텍트와 대화 세션에서 바로 시험·수정한다(자동 실행기는 손대지 않음).",
     "pack": "6 배포본 작성: 아키텍트가 배포본 작성을 골랐다(★5 배포본 만들기, 또는 ★7·★9에서 배포본 수정 — 직전 관문 메모가 고칠 내용). real-work 작업물에 배포본을 만든다: 적용 파일, 정확한 대상 경로, 적용 절차, "
             "백업 방법, 복구 수단, 각 파일 SHA256, 적용 후 확인 방법. 끝냄(state done)으로 ★7 운영 반영 승인 관문을 연다.",
-    "deploy": "8 운영 반영: 아키텍트가 ★7에서 서버컴 반영을 승인했다. 자동 실행기에는 운영 파일을 바꾸는 도구가 없다. "
-              "실행기는 반영 준비 점검만 한다(배포본 파일 해시 확인, 대상 파일의 현재 해시·백업 경로 확인)을 note로 남긴다. "
-              "실제 반영은 서버컴 대화 세션이 hold를 걸고 배포본 절차대로 진행한 뒤, 반영 확인 보고와 함께 끝냄(state done) → ★9 완료 확정.",
+    "prep": "8a 배포 준비(아키텍트가 ★7에서 '배포 대기열에 넣기'를 골랐다 — 바로 반영이 아니다, 2026-10-03). 운영 서버에는 아무것도 쓰지 않는다"
+            "(적용·재시작·DB 변경 금지, 읽기와 real-work 작업물 쓰기만). 할 일: ① 실서버 기준 diff — 지금 운영본과 배포본을 대조한 diff를 작업물 deploy-prep/에 "
+            "② 배포 대기열의 다른 항목과 겹치는 파일·충돌 확인 ③ 적용 순서·백업 위치·되돌리기 절차·적용 후 확인 항목을 deploy-prep/DEPLOY-PREP.md에. "
+            "끝냄(state done) body는 '대상 파일: 경로1, 경로2'(운영 기준 상대 경로) 한 줄과 '겹침: 없음' 또는 '겹침: T-… (파일)' 한 줄을 반드시 넣고, "
+            "그 아래에 diff·순서·백업·복구·확인 항목 요약과 작업물 경로를 쓴다. 그러면 '배포 준비 완료'로 배포 대기열에 들어간다(관문 없음). "
+            "실제 배포는 아키텍트가 날을 잡아 배포 묶음을 만든 뒤 서버컴 Astra 대화에서 한다.",
+    "deploy": "8b 배포(서버컴 Astra 대화 세션 몫 — 자동 실행기는 이 단계를 하지 않는다). 아키텍트가 배포 묶음에 넣었다. "
+              "아키텍트와 대화하며 실서버 diff·패치를 검토하고 배포한 뒤, 묶음의 각 주제에 끝냄(state done)으로 "
+              "'배포 완료(묶음 R-…, 시각, 확인 결과)' 또는 '배포 실패·되돌림(이유, 되돌린 방법)'을 남긴다 → ★9.",
 }
 
 
@@ -1432,6 +1438,11 @@ def apply(job: dict, result: dict, data: dict | None = None) -> tuple[list[str],
                 failed.append("끝냄 거부: 결과 요약(무엇을 했나·작업물 위치·시험 방법·권장 다음 단계)이 없음 — 다시 깨워 요약을 받음")
                 job["redo"] = True
                 continue
+            elif typ == "state" and tid and a.get("status") == "done" and (job.get("topic") or {}).get("stage") == "prep" \
+                    and not (re.search(r"대상 파일\s*[:：]", body) and re.search(r"겹침\s*[:：]", body)):
+                failed.append("끝냄 거부: 배포 준비 요약에 '대상 파일:'·'겹침:' 줄이 없음(배포 대기열 겹침 확인에 씀) — 다시 깨워 요약을 받음")
+                job["redo"] = True
+                continue
             elif typ == "state" and tid and a.get("status") == "done" and opens_gate(job.get("topic") or {}, body) \
                     and not (re.search(r"정할 것", body[:1500]) and re.search(r"권장", body[:1500])):
                 # 관문을 여는 끝냄은 맨 앞에 핵심·정할 것·권장이 있어야 한다(아키텍트 2026-10-03 '어디서 찾아보냐'). 없으면 다시 요약을 받는다
@@ -1685,6 +1696,8 @@ def opens_gate(t: dict, body: str) -> bool:
     """이 끝냄이 아키텍트 관문을 여나: 자체 시험(→★4)·배포본(→★7)·운영 반영(→★9)·실게임 수정 대화(→★4), 조사 주제 진행(→결과 확인).
     구현 주제의 진행 끝냄(→ 자체 시험, 관문 없음)은 아니다."""
     from topics import is_research
+    if t.get("stage") == "prep":
+        return False  # 배포 준비 끝냄은 관문이 아니라 배포 대기열로(형식은 따로 검사: 대상 파일·겹침 줄)
     if t.get("live_session") or t.get("stage") in ("test", "pack", "deploy"):
         return True
     return is_research(t, body)
@@ -1695,7 +1708,7 @@ def stage_doer(t: dict) -> str | None:
     from topics import LIVE_AGENT
     if t.get("live_session"):
         return LIVE_AGENT
-    if t.get("stage") in ("test", "pack", "deploy") and t.get("stage_owner"):
+    if t.get("stage") in ("test", "pack", "prep", "deploy") and t.get("stage_owner"):
         return t["stage_owner"]
     return t.get("assignee")
 
@@ -1881,8 +1894,8 @@ def queue_summary(aid: str, data: dict, state: dict) -> dict:
             continue
         out["total"] += 1
         st = (state.get("topics") or {}).get(t["id"], {})
-        if t["id"] in holds or t.get("live_session"):
-            code = "held"  # 대화 세션 몫(실게임 시험 단계 포함)
+        if t["id"] in holds or t.get("live_session") or t.get("deploy_session"):
+            code = "held"  # 대화 세션 몫(실게임 시험·8b 배포 단계 포함)
         elif (st.get("skip_count") or 0) >= 3:
             code = "stalled"
             stalled.append({"topic": t["id"], "reason": st.get("skip_reason"), "since": st.get("skip_since")})

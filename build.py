@@ -701,7 +701,7 @@ def offline_actions(topics: list[dict], agents: list[dict], my_pc: str | None) -
     by_id = {a["id"]: a for a in agents}
     out = []
     for t in topics:
-        who = t.get("stage_owner") if t.get("stage") == "deploy" else None
+        who = t.get("stage_owner") if t.get("stage") in ("prep", "deploy") else None
         a = by_id.get(who) if who else None
         if t.get("status") == "active" and a and not agent_alive(a, my_pc, now):
             out.append({"id": f"offline-{t['id']}-{a.get('pc_synced') or ''}", "title": f"{a.get('pc_label', '')} 꺼짐 — 운영 반영 대기: {t.get('title') or t['id']}",

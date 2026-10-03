@@ -542,7 +542,11 @@ def cmd_brief(args, cfg):
     step, g = t.get("step") or {}, t.get("gate") or {}
     print(f"# {t['id']} {t.get('title')}\n유형 {t.get('kind')} · 우선순위 {t.get('priority')} · 상태 {t.get('status')}"
           + (f" · 단계 {step.get('n')}/9 {step.get('label')}" if step else "") + f"\n담당 {t.get('assignee')}"
-          + (f" (원래 담당 {t['live_from']})" if t.get("live_from") else "") + (" · 실게임 시험 대화 세션 단계" if t.get("live_session") else ""))
+          + (f" (원래 담당 {t['live_from']})" if t.get("live_from") else "") + (" · 실게임 시험 대화 세션 단계" if t.get("live_session") else "")
+          + (f" · 8b 배포 대화 세션 단계(묶음 {(t.get('deploy_batch') or {}).get('id')}, 날짜 {(t.get('deploy_batch') or {}).get('date') or '미정'}) — "
+             "자동 실행기는 손대지 않음. 아키텍트와 실서버 diff·패치를 검토해 승인받은 것만 배포하고, 끝나면 state done --note \"배포 완료(묶음·시각·확인 결과)\" 또는 \"배포 실패·되돌림(…)\""
+             if t.get("deploy_session") else "")
+          + (" · 배포 대기열(배포 준비 완료 — 아키텍트가 묶음을 만들 때까지 대기)" if t.get("stage") == "queue" else ""))
     print("\n## 원래 메모\n" + (t.get("body") or "(없음)"))
     if t.get("plan"):
         print("\n## 진행 베이스")

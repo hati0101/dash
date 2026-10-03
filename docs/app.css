@@ -996,3 +996,13 @@ button.ms-chip.on:hover { border-color: var(--accent); }
 .doc-fold { border: 1px solid var(--line); border-radius: 10px; padding: 6px 10px; background: var(--card-2); }
 .doc-fold > summary { cursor: pointer; font-size: 13px; color: var(--ink-2); }
 .doc-inline { max-height: 380px; overflow: auto; margin: 8px 0 2px; font-size: 12.5px; white-space: pre-wrap; }
+/* 배포 대기열(2026-10-03) */
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 14px; margin-bottom: 14px; }
+.link-btn { background: none; border: 0; padding: 0; color: inherit; font: inherit; text-align: left; cursor: pointer; max-width: 100%; }
+.link-btn:hover b { text-decoration: underline; }
+/* 후속 줄기(2026-10-03) */
+.hist-item.other .hist-body { opacity: .72; }
+.hist-sep { list-style: none; display: flex; gap: 8px; align-items: center; margin: 10px 0 4px; padding: 6px 10px; border-top: 2px dashed var(--line); font-size: 12.5px; font-weight: 600; }
+.hist-sep .when { margin-left: auto; color: var(--ink-3); font-weight: 400; }
+.chain-steps { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-top: 6px; }
+.chain-steps .tag-btn.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--card)); font-weight: 600; }
