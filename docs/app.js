@@ -157,7 +157,8 @@ function av(id, small) {
   return h('span', { class: `av ${cls}${small ? ' sm' : ''}`, title: p.full, 'aria-label': p.full }, p.ini, pcTag);
 }
 const agentState = a => {
-  const seen = a?.last_seen || a?.pc_synced;
+  const lastRun = (S.data?.runs || []).find(r => r.agent === a?.id);
+  const seen = [a?.last_seen, a?.pc_synced, lastRun && (lastRun.ended || lastRun.started)].filter(Boolean).sort((x, y) => toMs(y) - toMs(x))[0];
   const stale = S.data?.meta?.routing?.stale_minutes || 120;
   if (!seen) return { cls: 'neutral', label: '신호 없음', icon: 'clock' };
   const m = (Date.now() - toMs(seen)) / 6e4;
@@ -1453,7 +1454,8 @@ function timeline(n) {
 // ------------------------------------------------------------ 작업자 (PC별 AI 현황)
 function agentStats(id) {
   const topics = S.d.topics.filter(t => !['done', 'parked', 'dropped'].includes(t.status));
-  const assigned = topics.filter(t => t.assignee === id), turn = topics.filter(t => t.turn === id);
+  const work = agentWork(id).map(w => w.t);
+  const assigned = [...work, ...topics.filter(t => !t.command_mode && t.assignee === id && !work.includes(t))], turn = topics.filter(t => t.turn === id);
   const works = [...new Set([...assigned, ...turn].map(t => t.work_id).filter(Boolean))].map(w => (S.data.works || {})[w]).filter(Boolean);
   const legacy = S.d.tasks.filter(t => t.stage !== 'done' && (t.owner === id || LEGACY[t.owner] === id || t.waiting_on === id || LEGACY[t.waiting_on] === id));
   return { assigned, turn, works, legacy, tasks: [...works, ...legacy] };
@@ -1512,20 +1514,54 @@ function agentCard(a) {
     a.health && a.health.state && a.health.state !== 'ok' ? h('div', { class: `callout ${a.health.needs_user ? 'warn' : ''}` }, h('b', null, `${HEALTH[a.health.state] || '실행 오류'} · ${fmtRel(a.health.since || a.health.at)}부터`), h('div', null, a.health.fix || a.health.message)) : null,
     h('div', { class: 'muted', style: { 'font-size': '12px' } }, `마지막 신호 ${fmtRel(a.last_seen || a.pc_synced)}`));
 }
-// 작업자 카드 '맡은 일': 사령탑이 배정한 하위 작업·시험과 지금 이 작업자 차례인 주제(누가 무엇을 하는지 한눈에)
+// 배정·착수 상태(서버컴 DISPATCH-UI-REQUEST, 아키텍트 10-03): 실제 근거로만 — 사령탑 연결은 착수가 아니고, ready·계획 기록은 실행 중이 아니다
+//   배정 대기: 사령탑이 아직 작업을 나누지 않음 · 착수 대기: 차례가 왔지만 실행 기록 없음 · 순서 대기: 앞 작업이 끝나야 함
+//   실행 중: 지금 자동 실행 기록이 있음 · 진행함: 이 작업자가 이 주제를 실행한 기록이 있음(지금은 쉬는 중) · 검수 대기 · 막힘
+const runOf = (agentId, topicId) => runsFor(topicId).find(r => r.agent === agentId) || null;
+function workOf(t, agentId) {
+  if (t.archived || ['done', 'dropped', 'parked', 'backlog'].includes(t.status)) return null;
+  if (t.command_mode && t.assignee === agentId && !(t.command?.tasks || []).length) return null;  // 사령탑 연결만(작업 나누기 전) = 배정 대기 — 맡은 일로 세지 않음(commandOf)
+  const items = [];
+  for (const x of (t.command?.tasks || [])) if (x.assignee === agentId && ['ready', 'review', 'blocked'].includes(x.state)) items.push({ kind: '작업', x });
+  if (t.stage === 'test') for (const x of (t.command?.tests || [])) if (x.assignee === agentId && ['running', 'pending', 'failed', 'blocked'].includes(x.state)) items.push({ kind: '시험', x });
+  const myTurn = t.turn === agentId;
+  if (!items.length && !myTurn) return null;
+  const run = runOf(agentId, t.id);
+  let state;
+  if (isRunning(run)) state = { key: 'running', label: '실행 중', cls: 'progress' };
+  else if (items.some(i => i.x.state === 'blocked')) state = { key: 'blocked', label: '막힘 · Astra 조정', cls: 'blocked' };
+  else if (items.length && items.every(i => i.x.state === 'review')) state = { key: 'review', label: 'Astra 검수 대기', cls: 'user_test' };
+  else if (myTurn) state = run ? { key: 'started', label: `진행함 · 마지막 실행 ${fmtRel(run.ended || run.started)}`, cls: 'progress' } : { key: 'waiting', label: '착수 대기', cls: 'neutral' };
+  else state = { key: 'queued', label: '순서 대기(앞 작업 뒤)', cls: 'neutral' };
+  const n = k => items.filter(i => i.kind === k).length;
+  const what = [n('작업') ? `작업 ${n('작업')}` : null, n('시험') ? `시험 ${n('시험')}` : null].filter(Boolean).join(' · ') || turnWhy(t, agentId);
+  return { t, items, state, what };
+}
+function agentWork(agentId) {
+  return S.d.topics.map(t => workOf(t, agentId)).filter(Boolean)
+    .sort((a, b) => ['running', 'blocked', 'review', 'waiting', 'started', 'queued'].indexOf(a.state.key) - ['running', 'blocked', 'review', 'waiting', 'started', 'queued'].indexOf(b.state.key));
+}
+// 사령탑(총괄) 현황: 총괄 주제 중 아직 작업을 나누지 않은(배정 대기) 수
+function commandOf(agentId) {
+  const own = S.d.topics.filter(t => t.command_mode && !t.archived && t.assignee === agentId && !['done', 'dropped', 'parked', 'backlog'].includes(t.status));
+  const un = own.filter(t => !(t.command?.tasks || []).length);
+  return own.length ? { total: own.length, unassigned: un.length, planning: un.filter(t => isRunning(runOf(agentId, t.id))) } : null;
+}
+// 작업자 카드 '맡은 일': 주제당 한 줄(아키텍트 10-03 '같은 거 막 섞여 있고') — 제목 · 무엇 · 상태
 function agentWorkBox(a) {
-  const rows = [];
-  const TASK_ST = { ready: '작업 중', review: 'Astra 검수 대기', blocked: '막힘 · Astra 조정' };
-  for (const t of S.d.topics) {
-    if (t.archived || ['done', 'dropped', 'parked'].includes(t.status)) continue;
-    for (const x of (t.command?.tasks || [])) if (x.assignee === a.id && TASK_ST[x.state]) rows.push({ t, what: x.title, st: TASK_ST[x.state] });
-    for (const x of (t.command?.tests || [])) if (x.assignee === a.id && ['running', 'pending', 'failed', 'blocked'].includes(x.state)) rows.push({ t, what: `시험 · ${x.title}`, st: TEST_STATES[x.state] || x.state });
-    if (t.turn === a.id && !rows.some(r => r.t === t)) rows.push({ t, what: turnWhy(t, a.id), st: '차례' });
-  }
-  if (!rows.length) return null;
-  return h('div', { class: 'now' }, h('b', null, `맡은 일 ${rows.length}건`),
-    rows.slice(0, 3).map(r => h('button', { class: 'linkish', style: { display: 'block', 'text-align': 'left' }, onclick: () => openTopic(r.t) }, `${r.t.title} · ${r.what} · ${r.st}`)),
-    rows.length > 3 ? h('div', { class: 'muted', style: { 'font-size': '12px' } }, `외 ${rows.length - 3}건 — 아래 '차례' 칸에서 모두 보기`) : null);
+  const rows = agentWork(a.id), cmd = commandOf(a.id);
+  if (!rows.length && !cmd) return null;
+  S.workOpen = S.workOpen || {};
+  const open = !!S.workOpen[a.id];
+  const count = k => rows.filter(r => r.state.key === k).length;
+  const sum = [['running', '실행 중'], ['waiting', '착수 대기'], ['review', '검수 대기'], ['blocked', '막힘'], ['queued', '순서 대기']].map(([k, l]) => count(k) ? `${l} ${count(k)}` : null).filter(Boolean).join(' · ');
+  return h('div', { class: 'now agent-work' },
+    cmd ? h('div', null, h('b', null, `총괄 ${cmd.total}건`), h('span', { class: 'muted' }, ` · 배정 대기 ${cmd.unassigned} · 작업 나눔 ${cmd.total - cmd.unassigned}`),
+      cmd.planning.map(t => h('button', { class: 'work-row', onclick: () => openTopic(t) }, h('span', { class: 'clamp-1' }, t.title), h('small', { class: 'muted' }, '작업 나누기'), h('span', { class: 'st progress' }, '실행 중')))) : null,
+    rows.length ? [h('div', null, h('b', null, `맡은 주제 ${rows.length}건`), sum ? h('span', { class: 'muted' }, ` · ${sum}`) : null),
+      (open ? rows : rows.slice(0, 3)).map(r => h('button', { class: 'work-row', onclick: () => openTopic(r.t) },
+        h('span', { class: 'clamp-1' }, r.t.title), h('small', { class: 'muted' }, r.what), h('span', { class: `st ${r.state.cls}` }, r.state.label))),
+      rows.length > 3 ? h('button', { class: 'more-btn', onclick: () => { S.workOpen[a.id] = !open; S._keepScroll = true; render(); } }, open ? '접기' : `${rows.length - 3}건 더 보기`) : null] : null);
 }
 // 작업자 카드 숫자 칸: 눌러서 아래 목록을 그 기준으로(아키텍트 2026-10-03). 목록은 카드 안에서 스크롤
 function agentLists(a, s) {
@@ -3347,7 +3383,11 @@ function laneCard(t, id, label) {
   const state = id === 'decision' ? `${t.gate?.label || '아키텍트 결정'} · ${ans ? '답 보냄 · 반영 대기' : '결재함에서 결정'}`
     : testHeadline(t) || (id === 'queue' ? '배포 메뉴에서 묶음 고르기' : id === 'done' ? '완료 확정' : t.gate?.label || label);
   const tasks = t.command?.tasks || [];
-  const who = t.turn ? person(t.turn).name : id === 'decision' ? '아키텍트' : null;
+  const cur = t.turn ? workOf(t, t.turn) : null;
+  const astraRun = isRunning(runOf(t.assignee, t.id));
+  const now = id === 'goal' && t.command_mode ? (astraRun ? 'Astra가 작업 나누는 중' : '배정 대기 · Astra 작업 나누기 전')
+    : cur && ['execute', 'test', 'review'].includes(id) ? `${person(t.turn).name} ${cur.state.label}` : null;
+  const who = now || (t.turn ? person(t.turn).name : id === 'decision' ? '아키텍트' : null);
   const meta = [tasks.some(x => x.attempt > 1) ? '검토 의견 반영 중' : null, who, fmtRel(t.updated_at)].filter(Boolean).join(' · ');
   return h('button', { class: `command-card${id === 'decision' && !ans ? ' need' : ''}`, onclick: () => openTopic(t),
     title: [t.title, state, tasks.length ? `하위 작업 ${tasks.filter(x => x.state === 'accepted').length}/${tasks.length} 검수 통과` : null, meta].filter(Boolean).join('\n') },

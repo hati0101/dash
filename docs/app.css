@@ -1144,3 +1144,8 @@ button.ps-stat:hover { border-color: var(--ink-3); }
 .ps-card .test-legend { flex-wrap: nowrap; overflow: hidden; }
 @media (max-width: 760px) { .page-head:has(.progress-search) .tools { flex-wrap: wrap; } .page-head .tools .progress-search { flex: 1 1 100%; } }
 @media (min-width: 1401px) { .flow-overview { grid-template-columns: minmax(0, .8fr) repeat(11, minmax(0, 1fr)); } .flow-overview button { padding: 6px 7px; } .flow-overview b { font-size: 11.5px; letter-spacing: -.01em; } }
+/* 작업자 카드 맡은 일(주제당 한 줄, 10-03) */
+.agent-work { display: grid; gap: 6px; }
+.work-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; align-items: center; background: none; border: 0; padding: 4px 0; color: inherit; font: inherit; text-align: left; cursor: pointer; border-top: 1px solid var(--line); }
+.work-row:hover .clamp-1 { text-decoration: underline; }
+.work-row small { white-space: nowrap; }
