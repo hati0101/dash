@@ -313,6 +313,7 @@ def find_jobs(data: dict, state: dict, only: str | None = None) -> list[dict]:
                     or parts["talk"] > (st.get("last_parts") or {}).get("talk", 0))
         jobs.append({"kind": "topic", "agent": who, "topic": t, "sig": sig, "mode": mode, "parts": parts, "reason": reason, "decision": decision})
     jobs = batch_plan_jobs(jobs)
+    jobs = batch_review_jobs(jobs)
     # 배포 묶음은 AI·운영 반영 없이 로컬 ZIP을 준비한다. 최신 데이터로 매번 구성원을 검증한다.
     if "server-astra" in agents and (only is None or only == "server-astra"):
         batches = sorted({(t.get("deploy_batch") or {}).get("id") for t in data.get("topics", [])
@@ -1902,7 +1903,7 @@ def job_rank(j: dict) -> tuple:
     answer = j.get("kind") in ("answer", "park")
     lane = 0 if pr == 0 else 1 if answer or j.get("decision") else 2
     since = min((str(x.get("status_at") or x.get("created_at") or "") for x in subs), default=str(t.get("status_at") or t.get("created_at") or ""))
-    return (lane, pr, 0 if answer else 1 if j.get("kind") == "plan_batch" else 2, since or "~")  # 같은 우선순위면 최초 분해 묶음 먼저(다른 작업자 일을 연다)
+    return (lane, pr, 0 if answer else 1 if j.get("kind") in ("plan_batch", "review_batch") else 2, since or "~")  # 같은 우선순위면 최초 분해 묶음 먼저(다른 작업자 일을 연다)
 
 
 FAIL_STEPS = (10, 30, 60)  # 같은 주제의 연속 실행 실패 재시도 간격(분). 세 번째부터 '환경 차단'
@@ -1992,6 +1993,7 @@ def plan_batch_prompt(subs: list[dict], data: dict) -> str:
 
 ## 배정 규칙
 - 하위 작업은 1~24개. 각 항목: id(영문·숫자·하이픈, 주제 안에서 고유), title, scope, done_when, assignee, depends_on(앞에서 정의한 id만), reviewer(선택).
+- size를 꼭 정한다: small=메뉴·문구·설정처럼 작은 일(작업 1~2개, 시험 단계 없이 바로 ★4 실게임), normal=기본, risk=보상·재화·권한·데이터 변경(이때만 교차 검토 작업·추가 시험).
 - 작업자 역할: dev-claude = 구현·빌드·격리 시험(개발 트리 권한), dev-astra = 조사·기획·교차 검토, server-claude = 읽기 조사·근거 정리·독립 검토만(운영 쓰기 금지),
   server-astra(너) = 분배·최종 수락/반려만 — 너에게 구현 작업을 배정하지 않는다.
 - 검수 실무 위임(선택): 작업에 reviewer(그 작업 담당이 아닌 작업자, 보통 server-claude)를 적으면 제출 뒤 검수 담당이 근거를 대조해 보고하고, 너는 그 보고로 수락/반려만 한다.
@@ -2009,7 +2011,7 @@ def plan_batch_prompt(subs: list[dict], data: dict) -> str:
 {chr(10).join(blocks)}
 
 ## 답 형식(JSON 하나만)
-{{"summary": "한 줄 요약", "actions": [{{"type": "command", "cmd": "plan", "task": "<주제 ID>", "body": "<JSON 문자열: {{\"tasks\":[...],\"human_test\":true,\"test_reason\":\"...\"}}>",
+{{"summary": "한 줄 요약", "actions": [{{"type": "command", "cmd": "plan", "task": "<주제 ID>", "body": "<JSON 문자열: {{\"tasks\":[...],\"size\":\"small|normal|risk\",\"human_test\":true,\"test_reason\":\"...\"}}>",
   "kind": null, "status": null, "plan": null, "work_id": null, "question": null, "options": null, "title": null, "origin": null, "to": null, "file": null, "edits": null}}]}}
 주제마다 plan 행동은 정확히 하나. task 칸에 그 주제 ID를 넣는다. 다른 행동(note·ask·state 등)은 쓰지 않는다.
 """
@@ -2087,6 +2089,158 @@ def _plan_batch_body(j, data, state, agent, agent_id, subs, tag, rids) -> bool:
     return True
 
 
+REVIEW_BATCH = 5  # 한 번의 호출로 검수하는 최대 주제 수(아키텍트 10-04 흐름 경량화)
+REVIEW_OPS = {"work": ("accept", "revise"), "test": ("test-accept", "test-revise")}
+
+
+def review_item(t: dict) -> dict | None:
+    """사령탑이 수락/반려만 하면 되는 대기 항목: 진행 단계의 제출된 작업(검수 담당 보고가 남았으면 제외) 또는 시험 단계의 통과 제출."""
+    import command
+    import testflow
+    if not t.get("command_mode") or t.get("gate") or t.get("live_session") or t.get("test_reset_needed"):
+        return None
+    state = t.get("command") or {}
+    stage = t.get("stage") or "work"
+    try:
+        return _review_item(state, stage, command, testflow)
+    except (KeyError, TypeError, AttributeError):
+        return None  # 필드가 빠진 옛·부분 기록은 묶지 않고 예전처럼 주제 단위로 처리
+
+
+def _review_item(state, stage, command, testflow):
+    if stage == "work":
+        x = command.active(state)
+        if x and x.get("state") == "review" and not (x.get("reviewer") and not x.get("review")):
+            return {"stage": "work", "x": x}
+    if stage == "test":
+        x = testflow.current(state.get("tests", []))
+        if x and x.get("state") == "passed" and not x.get("accepted_by"):
+            return {"stage": "test", "x": x}
+    return None
+
+
+def batch_review_jobs(jobs: list[dict]) -> list[dict]:
+    """사령탑 차례 중 '수락/반려만 남은' 주제를 최대 REVIEW_BATCH건씩 한 번의 호출로 묶는다(2건 이상일 때만)."""
+    import command
+    revq = [j for j in jobs if j["kind"] == "topic" and j["agent"] == command.LEAD and review_item(j["topic"])]
+    if len(revq) < 2:
+        return jobs
+    rest = [j for j in jobs if j not in revq]
+    revq.sort(key=job_rank)
+    groups = [revq[i:i + REVIEW_BATCH] for i in range(0, len(revq), REVIEW_BATCH)]
+    out = []
+    for g in groups:
+        if len(g) == 1:
+            out += g
+            continue
+        out.append({"kind": "review_batch", "agent": command.LEAD, "topic": None, "subjobs": g, "mode": "impl",
+                    "decision": any(x.get("decision") for x in g),
+                    "sig": "review-batch:" + ",".join(x["topic"]["id"] for x in g), "reason": f"검수 {len(g)}건 일괄(수락/반려만)"})
+    return out + rest
+
+
+def review_batch_prompt(subs: list[dict]) -> str:
+    blocks = []
+    for j in subs:
+        t = j["topic"]
+        it = review_item(t)
+        x = it["x"]
+        res = x.get("result") or {}
+        ev = res.get("evidence") or x.get("evidence") or []
+        rv = x.get("review") or {}
+        blocks.append(
+            f"### {t['id']} · {t.get('title')} · 크기 {(t.get('command') or {}).get('size') or 'normal'}\n"
+            f"- {'작업' if it['stage'] == 'work' else '시험'} {x['id']} '{x.get('title')}' · 담당 {x.get('assignee')} · 시도 {x.get('attempt')}\n"
+            f"- 완료 기준: {x.get('done_when') or x.get('expected') or '-'}\n"
+            f"- 제출 요약: {(res.get('summary') or x.get('summary') or '').strip()[:1500]}\n"
+            f"- 근거: " + "; ".join(f"{e.get('path')} (SHA256 {str(e.get('sha256'))[:16]}…)" for e in ev[:8]) + "\n"
+            + (f"- 검수 담당 보고({rv.get('by')}, {rv.get('verdict')}): {str(rv.get('summary') or '')[:800]}\n" if rv else "")
+            + f"- 답할 cmd: {' 또는 '.join(REVIEW_OPS[it['stage']])}, file={x['id']}")
+    ids = ", ".join(j["topic"]["id"] for j in subs)
+    return f"""너는 REAL 작업실의 최종 사령탑 server-astra다. 아래 {len(subs)}개 주제는 작업자가 결과를 제출했고 너의 수락/반려만 남았다.
+이번 한 번의 답으로 주제마다 수락 또는 반려를 하나씩 정한다(아키텍트 10-04: 결재 병목을 줄이는 검수 묶음).
+
+## 검수 기준
+- 완료 기준과 제출 요약·근거를 대조한다. 필요하면 근거 파일을 직접 읽는다(읽기만). 실행기가 수락 직전에 근거 SHA256을 다시 확인한다.
+- 범위는 요청 크기에 맞춘다: 작은 일은 그 동작과 직접 영향이 확인됐으면 수락. 무관한 추가 검증·재검토를 요구하지 않는다.
+- 반려(revise·test-revise)는 고칠 점을 구체적으로 적는다. 수락·반려 모두 body에 이유 한두 문장.
+- 확신이 없으면 그 주제만 반려 대신 답에서 빼도 된다(다음에 그 주제만 다시 깨움). 다른 주제는 그대로 처리한다.
+
+## 주제({ids})
+{chr(10).join(blocks)}
+
+## 답 형식(JSON 하나만)
+{{"summary": "한 줄 요약", "actions": [{{"type": "command", "cmd": "accept|revise|test-accept|test-revise", "task": "<주제 ID>", "file": "<작업·시험 ID>", "body": "이유",
+  "kind": null, "status": null, "plan": null, "work_id": null, "question": null, "options": null, "title": null, "origin": null, "to": null, "edits": null}}]}}
+주제마다 행동은 정확히 하나. task 칸에 그 주제 ID. 다른 행동은 쓰지 않는다.
+"""
+
+
+def run_review_batch(j: dict, data: dict, state: dict) -> bool:
+    """검수 묶음: 모델 호출 1번 → 주제별로 기존 command 검증(근거 해시 재확인 포함)으로 적용. 빠지거나 틀린 주제만 다음 회차에."""
+    agent_id = j["agent"]
+    agent = node.my_agents(CFG)[agent_id]
+    subs = j["subjobs"]
+    tag = f"{now():%Y%m%d-%H%M%S}-{agent_id}-review{len(subs)}"
+    rids = {x["topic"]["id"]: node.start_run(CFG, agent_id, x["topic"]["id"], "topic", "impl", j["reason"]) for x in subs}
+    log(f"깨움 {agent_id} ← 검수 일괄 {len(subs)}건: {', '.join(rids)}")
+    j["runner"] = agent.get("runner") or ("codex" if agent.get("ai") == "gpt" else "claude")
+    try:
+        text, err, detail = run_ai(agent, review_batch_prompt(subs), tag, None)
+        result = None
+        if not err:
+            try:
+                result = parse_actions(text)
+            except ValueError as exc:
+                err, detail = f"답 해석 실패: {exc}", text[-500:]
+        if err:
+            cls, needs_user, fix = classify(err, detail, j["runner"])
+            log(f"  실패({cls}): {err} {detail[-200:]!r}")
+            node.set_health(CFG, agent_id, cls, f"{err} {detail[-300:]}".strip(), needs_user, fix)
+            for x in subs:
+                fail_backoff(job_state(state, x), needs_user, cls, err)
+                node.end_run(CFG, rids[x["topic"]["id"]], result="fail", error=f"{err} {detail[-300:]}".strip()[:500], error_class=cls, needs_user=needs_user, fix=fix)
+            return True
+        node.set_health(CFG, agent_id, "ok", "정상 실행")
+        by: dict[str, list] = {}
+        for a in result.get("actions") or []:
+            if isinstance(a, dict):
+                by.setdefault(str(a.get("task") or ""), []).append(a)
+        ok = 0
+        for x in subs:
+            t, st = x["topic"], job_state(state, x)
+            it = review_item(t)
+            allowed = REVIEW_OPS[it["stage"]] if it else ()
+            mine = by.get(t["id"], [])
+            acts = [a for a in mine if a.get("type") == "command" and a.get("cmd") in allowed]
+            failed = [f"검수 묶음에서 무시한 행동 {len(mine) - len(acts[:1])}건(수락/반려 하나만 받음)"] if len(mine) > len(acts[:1]) else []
+            done = []
+            if acts:
+                act = dict(acts[0])
+                act.pop("task", None)
+                done, more = apply(dict(x, mode="impl"), {"actions": [act], "summary": result.get("summary") or ""}, data)
+                failed += more
+            else:
+                failed.append("검수 묶음 답에 이 주제의 수락/반려가 없음 — 다음 회차에 이 주제만 다시")
+            if "command" in done:
+                ok += 1
+                mark_done(st, x)
+                for k in ("retry_after", "retry_kind", "idle_runs", "idle_since"):
+                    st.pop(k, None)
+                clear_fail(st)
+            node.end_run(CFG, rids[t["id"]], result="ok" if "command" in done and not failed else "partial",
+                         summary=(result.get("summary") or "")[:500], actions=done[:20], failed=failed[:10])
+        log(f"  검수 일괄 결과: {ok}/{len(subs)}건 처리")
+        return True
+    except Exception as exc:  # noqa: BLE001
+        for rid in rids.values():
+            node.end_run(CFG, rid, result="fail", error=f"실행기 예외 {type(exc).__name__}: {exc}"[:500], error_class="error",
+                         needs_user=False, fix="10분 뒤 자동으로 다시 시도합니다")
+        for x in subs:
+            fail_backoff(job_state(state, x), False, "error", f"실행기 예외 {type(exc).__name__}: {exc}")
+        raise
+
+
 def job_state(state: dict, j: dict) -> dict:
     """주제 단위 상태(하루 한도·재시도). 주제 없는 질문의 답은 그 신호 단위로."""
     t = j.get("topic") or {}
@@ -2148,6 +2302,8 @@ def note_skip(st: dict, agent_id: str, tid: str, reason: str):
 def run_job(j: dict, data: dict, state: dict) -> bool:
     if j.get("kind") == "plan_batch":
         return run_plan_batch(j, data, state)
+    if j.get("kind") == "review_batch":
+        return run_review_batch(j, data, state)
     if j.get("kind") == "batch":
         import release_queue
         rows = []

@@ -229,6 +229,20 @@ def validate_tasks(tasks, known):
     return result
 
 
+SIZES = ("small", "normal", "risk")
+
+
+def check_size(size, tasks):
+    """작업 크기(아키텍트 10-04 흐름 경량화). small: 메뉴·문구·설정처럼 작은 일 — 작업 1~2개, 시험 단계 없이 바로 ★4.
+    normal: 기본(지금 흐름). risk: 보상·재화·권한·데이터 — 교차 검토·시험을 위험에 맞게."""
+    size = size or "normal"
+    if size not in SIZES:
+        raise ValueError("size는 small·normal·risk 중 하나여야 합니다")
+    if size == "small" and len(tasks) > 2:
+        raise ValueError("작은 일(small)은 작업 1~2개(구현 + 필요하면 직접 확인)로 나눕니다")
+    return size
+
+
 def transition(state, event, known):
     """검증 후 새 상태 반환. revision으로 중복·낡은 응답이 새 작업을 덮지 못하게 한다."""
     if event.get("revision") != state["revision"]:
@@ -254,6 +268,7 @@ def transition(state, event, known):
             raise ValueError("실게임 시험 불필요 사유가 필요합니다")
         result["human_test"] = True  # D2: 요청 필드로 ★4를 생략할 수 없다.
         result["test_reason"] = str(event.get("test_reason") or "실게임 확인 필요")[:1000]
+        result["size"] = check_size(event.get("size"), result["tasks"])
     elif op == 'amend':
         if who != LEAD or not str(event.get('body') or '').strip():
             raise ValueError('작업표 변경은 사령탑이 이유를 기록해야 합니다')
@@ -428,7 +443,8 @@ def prompt(topic, who):
     return ("\n## 서버컴 Astra 사령탑 워크플로우\n"
             f"최종 사령탑은 {LEAD}. 개발컴 허브는 중계기이며 개발컴 Claude는 구현·검증 작업자다.\n"
             "사령탑은 command 행동으로 작업을 나누고 결과를 검수한다. 조사로 풀 수 있는 질문은 작업자에게 배정한다.\n"
-            "command: cmd=plan, body=JSON {tasks:[{id,title,scope,done_when,assignee,depends_on:[]}],human_test:true,test_reason:\"실게임 확인 필요\"}로 최초 분해.\n"
+            "command: cmd=plan, body=JSON {tasks:[{id,title,scope,done_when,assignee,depends_on:[]}],size:\"small|normal|risk\",human_test:true,test_reason:\"실게임 확인 필요\"}로 최초 분해.\n"
+            "size: small=메뉴·문구·설정처럼 작은 일(작업 1~2개, 시험 단계 없이 바로 ★4 실게임), normal=기본, risk=보상·재화·권한·데이터 변경. 교차 검토 작업은 risk에만 넣는다.\n"
             "작업자는 맡은 작업만 수행한 뒤 command: cmd=submit, file=작업ID, body=결과 요약,\n"
             "options=[작업물 저장소 기준 근거 파일 상대 경로]로 제출한다. 자기 폴더 파일의 실제 SHA256을 실행기가 기록한다.\n"
             "사령탑은 받은 파일을 직접 읽고 검증 근거를 대조하여 cmd=accept 또는 revise, file=작업ID, body=검수 이유로 처리한다.\n"
@@ -450,7 +466,7 @@ def prompt(topic, who):
             "운영 반영은 아키텍트와 서버컴 Astra 대화에서 승인된 묶음만 처리한다.\n"
             + _return_note(topic) +
             f"현재 revision={state['revision']}; 현재 작업={json.dumps(task, ensure_ascii=False)}\n"
-            f"현재 대행={topic.get('acting_commander') or '없음'}\n"
+            f"현재 대행={topic.get('acting_commander') or '없음'} · 크기={state.get('size') or 'normal'}\n"
             f"전체 작업={json.dumps(state['tasks'], ensure_ascii=False)}\n")
 
 
@@ -482,6 +498,9 @@ def apply_action(job, action, cfg, known, locked, work_root, authority=None):
         event["tests"] = spec.get("tests")
         event["human_test"] = spec.get("human_test", True)
         event["test_reason"] = spec.get("test_reason", "")
+        if event["op"] == "plan":
+            event["size"] = spec.get("size") or "normal"
+            check_size(event["size"], event["tasks"] or [])
         if any(t.get("assignee") in locked or t.get("reviewer") in locked for t in event["tasks"] or []):
             raise ValueError("잠긴 작업자에게 배정할 수 없습니다(검수 담당 포함)")
         if any(t.get('assignee') in locked for t in testflow.plan(event.get('tests'),known)):

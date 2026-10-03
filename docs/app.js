@@ -3356,7 +3356,8 @@ function commandBox(t) {
     h('p', null, '이전 이력과 결과물은 보존했습니다. 이전 결재는 새 작업을 진행시키지 않습니다.'),
     topicTag(t.restarted_as));
   const rows = t.command?.tasks || [], labels = { ready: '실행 대기', review: 'Astra 검수', accepted: '검수 통과', blocked: 'Astra 조정 중' };
-  return h('section', { class: 'command-box card' }, h('h3', null, '서버컴 Astra가 총괄합니다'),
+  const size = { small: '작은 일 · 시험 단계 없이 바로 실게임 확인', risk: '위험 작업 · 교차 검토·추가 시험' }[t.command?.size];
+  return h('section', { class: 'command-box card' }, h('h3', null, '서버컴 Astra가 총괄합니다'), size ? h('span', { class: 'tag' }, size) : null,
     h('p', { class: 'muted' }, rows.length ? `작업 ${rows.filter(x => x.state === 'accepted').length}/${rows.length} 검수 통과 · 현재 ${t.turn ? person(t.turn).full : '결재·배포 대기'}` : '원래 목표와 완료 기준을 정리한 뒤 실행 작업자에게 배정합니다.'),
     t.restart_of ? h('div', { class: 'row' }, h('span', null, '이전 기록'), topicTag(t.restart_of)) : null,
     rows.map(x => h('details', { class: 'command-task', open: x.state === 'review' || x.state === 'blocked' },

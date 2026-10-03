@@ -903,6 +903,11 @@ def gate_id(n: int, tid: str, ts) -> str:
     return f"G{n}-{tid[2:]}-{to_dt(ts).astimezone(KST):%Y%m%d%H%M%S}"
 
 
+def small_task(t: dict) -> bool:
+    """작은 일(command size=small, 아키텍트 10-04): 자체 시험 단계 없이 진행 끝 → ★4, ★4 반려는 진행으로(고칠 작업 amend)."""
+    return bool(t.get("command_mode") and (t.get("command") or {}).get("size") == "small")
+
+
 def answer_at(rec: dict):
     """아키텍트 기록(관문 답·다시 진행)의 판정 시각. 허브 수신 시각(rx)보다 늦은 브라우저 시각은 쓰지 않는다(시계가 빠른 기기, r5)."""
     ts, rx = rec.get("ts"), rec.get("rx")
@@ -982,10 +987,11 @@ def run_gates(t: dict, finishes: list, answered: dict, known=None) -> dict:
             if stage == "prep":  # 배포 준비 끝 → 배포 대기열(관문 없음, 아키텍트가 묶음을 만들 때까지 기다림)
                 stage, prep, mcur = "queue", {"at": ts, "by": by, "summary": body}, None
                 continue
-            if stage == "work" and not live and not is_research(t, body, ts):
+            small = small_task(t) and not is_research(t, body, ts)
+            if stage == "work" and not live and not small and not is_research(t, body, ts):
                 stage = "test"  # 진행 끝 → AI 자체 시험(관문 없음)
                 continue
-            n = (4 if live else 40) if stage == "work" else STAGE_GATE[stage]
+            n = (4 if live or small else 40) if stage == "work" else STAGE_GATE[stage]
             gate = {"n": n, "id": fresh(n, ts), "opened_at": ts, "by": by, "summary": body, "from_stage": stage,
                     **({"batch": batch} if stage == "deploy" and batch else {})}
             live = live or n == 4
@@ -998,7 +1004,7 @@ def run_gates(t: dict, finishes: list, answered: dict, known=None) -> dict:
         act = gate_action(gate["n"], ans)
         if t.get("command_mode"):
             if act == "work":
-                act = "work" if gate["n"] == 40 and is_research(t) else "test"
+                act = "work" if (gate["n"] == 40 and is_research(t)) or small_task(t) else "test"
                 live = False
         history.append({**gate, "choice": ans.get("choice"), "note": ans.get("note"), "answered_at": ans.get("ts"), "act": act})
         if t.get("command_mode") and act in ("work", "test"):
