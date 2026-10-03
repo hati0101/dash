@@ -2449,7 +2449,8 @@ function longText(s) {
 }
 // AI 질문은 "(1) … (2) …"처럼 한 줄로 오는 경우가 많아 번호마다 줄을 나눠 읽기 쉽게 한다
 function questionText(s) {
-  const text = String(s || '').replace(/\s*\((\d{1,2})\)\s*/g, '\n\n($1) ').replace(/^\s+/, '');
+  // 번호 항목 '(1) …'만 줄을 나눈다: 줄 머리나 빈칸 뒤에 오고 뒤에 빈칸이 있는 것(문장 중간 'reject(1),'은 그대로, 교차 검수 P3)
+  const text = String(s || '').replace(/(^|\s)\((\d{1,2})\)\s+/g, (m, pre, n) => `\n\n(${n}) `).replace(/^\s+/, '');
   return h('div', { class: 'q-text' }, text);
 }
 // 선택지: 마우스로 누르면 바로 결정, 키보드 1~9는 고른 표시만(Enter로 보냄)
