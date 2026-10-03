@@ -438,6 +438,7 @@ button.item:hover, a.item:hover { background: var(--card-2); border-radius: 10px
 .board .col { min-height: calc(100vh - 230px); }
 .board .col > .sel-wrap, .board .col > .proj { flex: none; }
 .board.topics { grid-template-columns: repeat(7, minmax(160px, 1fr)); }
+.board.flow { grid-template-columns: repeat(5, minmax(200px, 1fr)); }  /* 업무 보드는 5칸(FLOW) — 6칸이면 오른쪽이 빔 */
 .col { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px; min-height: 160px; display: flex; flex-direction: column; gap: 10px; }
 .col-h { display: flex; align-items: center; gap: 8px; font-weight: 800; font-size: 13px; }
 .col-h .badge { margin-left: auto; }

@@ -390,6 +390,7 @@ function derive(data) {
     if (((p.drop || []).length || p.confirm) && hoursSince(p.created_at) < 6) pendResolve[p.topic] = p; else delete pendResolve[p.topic];
   }
   const pendActivate = new Set(pend.filter(p => p.type === 'activate').map(p => p.topic));
+  const pendResume = new Set(pend.filter(p => p.type === 'topic-resume').map(p => p.topic));
   // 주제 수정·삭제·되살리기도 PC가 처리하기 전에 화면에 먼저 반영한다(마지막 요청이 이긴다)
   const pendEdit = {}, pendDrop = new Map();
   for (const p of pend.filter(p => p.type === 'topic-edit')) pendEdit[p.topic] = p;
@@ -398,6 +399,10 @@ function derive(data) {
     let x = { ...t, _age: hoursSince(t.created_at),
       ...(t.status === 'backlog' && pendActivate.has(t.id) ? { status: 'new' } : {}),
       ...(pendAssign[t.id] && pendAssign[t.id] !== t.assignee ? { assignee: pendAssign[t.id], assign_by: 'user', dispatch_reason: '사용자 지정(반영 대기)', status: t.status === 'new' ? 'triage' : t.status } : {}) };
+    if (pendResume.has(t.id) && x.status === 'parked') {  // 관문에서 보류했으면 그 관문 대기로, 진행 중 보류면 진행 중으로 돌아간다
+      const gp = (x.gate_history || []).at(-1);
+      x = { ...x, status: gp && gp.act === 'park' && !gp.resumed_at ? 'review_user' : 'active', _pendingResume: true };
+    }
     if (pendResolve[t.id] && (x.conflict || []).length) x = { ...x, conflict: [], _pendingResolve: pendResolve[t.id] };
     const e = pendEdit[t.id];
     if (e) x = { ...x, title: e.title, body: e.body, priority: e.priority || x.priority, kind: e.kind || x.kind, _pendingEdit: true };
@@ -483,6 +488,7 @@ const NAV = [
   { id: 'topics', label: '주제', icon: 'topics' },
   { id: 'tasks', label: '업무', icon: 'tasks' },
   { id: 'done', label: '완료', icon: 'done' },
+  { id: 'parked', label: '보류', icon: 'pause' },
   { id: 'messages', label: '메시지', icon: 'messages' },
   { id: 'verify', label: '검증', icon: 'verify' },
   { id: 'brain', label: '세컨드 브레인', icon: 'brain' },
@@ -651,7 +657,7 @@ function openMissedDrawer() {
 }
 
 function page() {
-  const views = { mine: vMine, overview: vOverview, agents: vAgents, topics: vTopics, tasks: vTasks, done: vDone, messages: vMessages, verify: vVerify, brain: vBrain, sources: vSources };
+  const views = { mine: vMine, overview: vOverview, agents: vAgents, topics: vTopics, tasks: vTasks, done: vDone, parked: vParked, messages: vMessages, verify: vVerify, brain: vBrain, sources: vSources };
   return h('div', { class: 'page' }, (views[S.view] || vOverview)());
 }
 function head(eyebrow, title, small, ...tools) {
@@ -1481,6 +1487,61 @@ function vDone() {
     h('p', { class: 'hint fit-hint' }, '완료한 주제는 주제 보드·업무 보드에서 빠지고 여기에 기록으로 남습니다. 항목을 펼치면 관문마다 언제 무엇을 골랐는지 보입니다.'),
   ];
 }
+// 보류 메뉴(아키텍트 2026-10-03): 보류한 주제를 따로 모아 보고, 필요할 때 '다시 진행'으로 꺼내 쓴다.
+// 관문에서 보류했으면 그 ★ 관문이 내 차례에 다시 열리고, 진행 중에 보류했으면 진행 중으로 돌아가 AI가 이어서 한다
+function parkInfo(t) {
+  const last = (t.gate_history || []).at(-1);
+  const h_ = last && last.act === 'park' && !last.resumed_at ? last : null;  // 마지막 관문 답이 보류이고 아직 재개 안 됐을 때만 관문 보류
+  if (h_) return { where: `★${h_.n === 40 ? 4 : h_.n} ${GATE_SHORT[h_.n] || '관문'}에서 보류`, note: h_.note || '', at: h_.answered_at, back: `★${h_.n === 40 ? 4 : h_.n} ${GATE_SHORT[h_.n] || '관문'}이 다시 열림` };
+  // 진행 중 보류의 메모: 보류 시각(status_at)까지의 기록 중 아키텍트 보류 결정 → 보류 언급 순으로
+  const upto = (t.notes || []).filter(x => !t.status_at || toMs(x.ts) <= toMs(t.status_at) + 1000);
+  const n = upto.filter(x => /^\[아키텍트 보류 결정\]/.test(x.body || '')).at(-1) || upto.filter(x => /보류/.test(x.body || '')).at(-1);
+  return { where: '진행 중 보류', note: n ? String(n.body || '').replace(/^\[아키텍트 보류 결정\]\s*/, '') : '', at: t.status_at, back: '진행 중으로 돌아가 AI가 이어서 함' };
+}
+async function resumeTopic(t, note) {
+  try {
+    await sendOps('topic-resume', { topic: t.id, note: note || '' }, `보류 주제 다시 진행: ${t.title}`);
+    toast('다시 진행합니다 · 다음 동기화 때 반영');
+    S._keepScroll = true; render();
+    return true;
+  } catch (e) { toast(e.message); return false; }
+}
+function resumeControl(t) {
+  const note = h('input', { placeholder: '다시 진행하며 전할 말(선택)', 'aria-label': '다시 진행 메모', maxlength: '1000', 'data-draft': `resume:${t.id}`, style: { flex: '1', 'min-width': '0' } });
+  return h('div', { class: 'row' }, note, h('button', { class: 'btn primary', onclick: () => resumeTopic(t, note.value.trim()) }, icon('play'), '다시 진행'));
+}
+function parkedBox(t) {
+  if (t._pendingResume) return h('div', { class: 'callout' }, h('b', null, '다시 진행 반영 대기 · '), '다음 동기화 때 보류가 풀립니다.');
+  if (t.status !== 'parked') return null;
+  const p = parkInfo(t);
+  return h('div', { class: 'callout' }, h('div', null, h('b', null, `보류 중 · ${p.where}`), p.at ? ` (${fmtAbs(p.at)})` : '', p.note ? h('div', { class: 'muted' }, p.note) : null,
+    h('div', { class: 'hint' }, `다시 진행하면 ${p.back}`)), resumeControl(t));
+}
+function vParked() {
+  const at = t => parkInfo(t).at || t.status_at || t.updated_at;
+  const list = S.d.topics.filter(t => t.status === 'parked' || t._pendingResume).sort((a, b) => toMs(at(b)) - toMs(at(a)));
+  const row = t => {
+    const p = parkInfo(t);
+    return h('details', { class: 'done-row' },
+      h('summary', null,
+        h('span', { class: 'lead-ico' }, icon('pause')),
+        h('span', { class: 'body' }, h('b', { class: 'clamp-1' }, t.title),
+          h('span', { class: 'meta' }, t.kind ? h('span', { class: 'tag' }, t.kind) : null, h('span', null, t._pendingResume ? '다시 진행 반영 대기' : p.where),
+            t.assignee ? h('span', { class: 'wait' }, av(t.live_from || t.assignee, true), person(t.live_from || t.assignee).name) : null)),
+        h('span', { class: 'when', title: fmtAbs(at(t)) }, fmtAbs(at(t)))),
+      h('div', { class: 'done-log' },
+        p.note ? h('div', { class: 'callout' }, h('b', null, '보류 메모: '), p.note) : null,
+        t._pendingResume ? h('div', { class: 'hint' }, '다음 동기화 때 보류가 풀립니다.') : [h('div', { class: 'hint' }, `다시 진행하면 ${p.back}`), resumeControl(t)],
+        h('button', { class: 'btn sm', onclick: () => openTopic(t) }, icon('topics'), '주제 전체 보기')));
+  };
+  return [
+    head('PARKED', '보류', `보류 ${list.length}건`),
+    h('div', { class: 'done-fit fit-page' },
+      card('보류한 주제', { big: list.length, unit: '건', cls: 'fill scroll-card' },
+        list.length ? h('div', { class: 'done-list' }, list.map(row)) : empty('보류한 주제가 없습니다.'))),
+    h('p', { class: 'hint fit-hint' }, '관문에서 보류를 고르거나 AI 보류 제안을 승인한 주제가 여기 모입니다. 필요할 때 펼쳐서 "다시 진행"을 누르면 보류했던 자리(관문 또는 진행 중)로 돌아갑니다.'),
+  ];
+}
 function vTasks() {
   const f = S.f.taskOwner || 'all', pcF = S.f.taskPc || 'all';
   const items = flowItems(f, pcF);
@@ -1502,7 +1563,7 @@ function vTasks() {
       chips([['all', '전체'], ['claude', 'Claude'], ['astra', 'Astra'], ['user', '나 대기']], f, v => { S.f.taskOwner = v; render(); }, '담당 필터'),
       chips([['all', '모든 PC'], ['dev', '개발컴'], ['server', '서버컴']], pcF, v => { S.f.taskPc = v; render(); }, 'PC 필터'),
       staleKeys.length ? h('button', { class: 'btn', onclick: () => ack(staleKeys) }, icon('check'), `멈춤 알림 ${staleKeys.length}건 끄기`) : null),
-    h('div', { class: 'board fit-page' }, FLOW.map(c => {
+    h('div', { class: 'board flow fit-page' }, FLOW.map(c => {
       const list = items.filter(i => i.col === c.id).sort((x, y) => toMs(y.ts) - toMs(x.ts));
       return h('div', { class: 'col', style: f === 'user' && c.id !== 'user_test' ? { opacity: '.45' } : null },
         h('div', { class: 'col-h' }, h('span', { style: { color: `var(--st-${c.id})`, display: 'grid' } }, icon(c.icon)), c.label, h('span', { class: 'badge' }, list.length)),
@@ -2320,6 +2381,7 @@ function openTopic(t) {
     S.editTopic === t.id ? topicEditForm(t, () => { S.editTopic = null; openTopic(S.d.topics.find(y => y.id === t.id) || t); }) : null,
     h('h3', null, t.title),
     conflictBox(t),
+    parkedBox(t),
     phaseLine(t),
     gateBox(t),
     liveBox(t),

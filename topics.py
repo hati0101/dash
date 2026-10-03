@@ -311,6 +311,11 @@ def clean_action(raw: dict) -> dict:
         if not AGENT_RE.match(agent or "") or mode not in ("assign", "all"):
             raise ValueError("배정 잠금 형식 오류")
         a.update(agent=agent, lock=bool(raw.get("lock")), mode=mode)
+    elif kind == "topic-resume":
+        topic = str(raw.get("topic", ""))
+        if not ID_RE.match(topic):
+            raise ValueError("다시 진행 형식 오류")
+        a.update(topic=topic, note=str(raw.get("note", "")).strip()[:1000])
     elif kind == "topic-drop":
         ids = raw.get("topics") or []
         if not isinstance(ids, list) or not ids or len(ids) > 300 or not all(isinstance(x, str) and ID_RE.match(x) for x in ids):
@@ -326,7 +331,7 @@ def data_dir(cfg) -> Path:
 def user_file(cfg) -> tuple[Path, dict]:
     path = data_dir(cfg) / "user.json"
     rec = read_json(path, None) or {"author": "user", "_rule": "이 파일은 topics.py가 사용자 요청을 받아서만 쓴다."}
-    for key in ("processed_actions", "comments", "tasks", "acks", "decisions_answered", "topic_assign", "topic_activate", "topic_edit", "topic_drop"):
+    for key in ("processed_actions", "comments", "tasks", "acks", "decisions_answered", "topic_assign", "topic_activate", "topic_edit", "topic_drop", "topic_resume"):
         rec.setdefault(key, [])
     return path, rec
 
@@ -432,6 +437,13 @@ def apply_action(cfg, a: dict, source: str) -> str:
         else:
             locks.pop(a["agent"], None)
         result = f"작업자 {a['agent']} " + (("배정 잠금" if a["mode"] == "assign" else "배정 잠금 + 자동 실행 멈춤") if a["lock"] else "잠금 풀림")
+    elif a["type"] == "topic-resume":
+        # 보류한 주제 다시 진행(아키텍트 2026-10-03): 관문에서 보류했으면 그 관문이 다시 열리고, 진행 중 보류면 진행 중으로 돌아간다(엔진)
+        rec["topic_resume"].append({"topic": a["topic"], "note": a["note"], "ts": a["created_at"] or ts})
+        write_inbox(bridge / "inbox-claude", f"USR-RESUME-{a['id']}", f"[사용자 → Claude] 보류 주제 다시 진행: {a['topic']}",
+                    {"sender": "user (대시보드)", "recipient": "claude", "kind": "user resume parked topic", "task_id": a["topic"]},
+                    a["note"] or "대시보드 '보류' 메뉴에서 다시 진행을 골랐습니다.")
+        result = f"보류 주제 다시 진행 {a['topic']}"
     elif a["type"] == "topic-drop":
         # 지우기 = 목록에서 빼기. 주제 폴더는 지우지 않으므로 '되살리기'로 복구된다
         drop = set(a["topics"])
@@ -838,6 +850,16 @@ def run_gates(t: dict, finishes: list, answered: dict, known=None) -> dict:
         history.append({**gate, "choice": ans.get("choice"), "note": ans.get("note"), "answered_at": ans.get("ts"), "act": act})
         since = ans.get("ts") or since
         prev, gate = gate, None
+        if act == "park":
+            # 보류 뒤 아키텍트가 '다시 진행'을 골랐으면 보류했던 관문을 그 시각으로 다시 연다(보류 메뉴, 2026-10-03)
+            later = sorted((r for r in t.get("_resume") or () if to_dt(r) > to_dt(since)), key=to_dt)
+            if later:
+                history[-1]["resumed_at"] = later[0]
+                gate = {**prev, "id": gate_id(prev["n"], t["id"], later[0]), "opened_at": later[0],
+                        "summary": f"{prev.get('summary') or ''}\n\n[아키텍트 다시 진행 — 보류 해제]".strip()}
+                gate.pop("legacy_id", None)
+                since = later[0]
+                continue
         if act in ("park", "done", "followup"):
             final, live = ("done" if act == "followup" else act), False
             break
@@ -886,6 +908,9 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
     activations = {r.get("topic") for r in urec.get("topic_activate", [])}
     edits = {r.get("topic"): r for r in urec.get("topic_edit", [])}
     drops = {r.get("topic"): r for r in urec.get("topic_drop", [])}
+    resumes: dict[str, list] = {}
+    for r in urec.get("topic_resume", []):
+        resumes.setdefault(r.get("topic"), []).append(r)
     locked = frozenset(urec.get("agent_locks", {}) or {})  # 잠근 작업자: 교차 검토도 맡기지 않음
     gate_answers = {r.get("id"): r for r in urec.get("decisions_answered", []) if str(r.get("id", "")).startswith("G")}
     by_topic: dict[str, list[dict]] = {}
@@ -908,6 +933,8 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
         for r in by_topic.get(t["id"], []):
             notes.append({"ts": r.get("ts"), "kind": r.get("kind"), "body": r.get("body", ""), "by": r.get("agent")})
             events.append((r.get("ts", ""), r.get("agent"), r))
+        for r in resumes.get(t["id"], []):  # 아키텍트 '다시 진행'(보류 메뉴): 실행기가 바로 깨우고 메모가 AI에게 간다
+            notes.append({"ts": r.get("ts"), "kind": "resume", "body": f"[아키텍트 다시 진행] {r.get('note') or ''}".strip(), "by": "user"})
         t["notes"] = sorted(notes, key=lambda n: n.get("ts") or "")
         t["status"] = "new"
         plans = {}
@@ -916,6 +943,8 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
         plan_ts: dict[str, str] = {}
         requests: dict[str, dict] = {}  # 요청 ID → 요청(담당은 그대로 두고 다른 작업자에게 자료·확인을 부탁)
         finishes: list[tuple] = []  # AI의 '끝냄'(state done) — 다음 관문을 여는 신호
+        park_ts = None  # 기록으로 남은 보류(아키텍트 보류 결정·옛 보류)의 시각
+        resume_ts = sorted((r.get("ts") for r in resumes.get(t["id"], []) if r.get("ts")), key=to_dt)
         for _ts, a, r in sorted(events, key=lambda e: e[0] or ""):
             if r.get("status") == "parked" and AGENT_RE.match(a or "") and "-" in (a or "") and to_dt(_ts) >= RULES_V2_FROM \
                     and not str(r.get("body") or "").startswith("[아키텍트 보류 결정]"):
@@ -923,6 +952,7 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
             elif r.get("status") in STATUSES:
                 t["status"] = r["status"]
                 t["status_at"] = _ts  # 실행기가 '이 PC에서 더 나중에 바꾼 상태'를 판단하는 기준
+                park_ts = _ts if r["status"] == "parked" else None  # 보류 뒤 다른 상태 기록이 오면 그 보류는 지난 것
                 if r["status"] == "done":
                     finishes.append((_ts, a, (r.get("body") or "")[:2000]))
             if r.get("work_id") and r.get("kind") in ("work", "handoff"):
@@ -942,6 +972,11 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
                 plan_ts[a] = _ts
             if r.get("kind") == "claim":
                 claims.append((a, _ts or ""))
+        resumed = park_ts and any(to_dt(r) > to_dt(park_ts) for r in resume_ts)
+        last_resume = max(resume_ts, key=to_dt) if resume_ts else None
+        if t["status"] == "parked" and resumed:  # 진행 중 보류 → 다시 진행: 진행 중으로(진행 베이스가 없으면 검토 중)
+            t["status"] = "active" if plans else "triage"
+            t["status_at"] = max(resume_ts, key=to_dt)
         lead = recs.get(LEAD) or {}
         t["assignee"] = norm_agent(lead.get("assignee") or (recs.get("dev-astra") or {}).get("assignee"))
         t["dispatch_reason"] = lead.get("dispatch_reason")
@@ -970,8 +1005,9 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
                             | set((recs.get(LEAD) or {}).get("prev_assignees") or []))  # 이 주제를 맡았던 작업자(착수·인계·자동 이관 전 담당)
             # 끝냄 시점 담당 판정용: 허브가 남긴 담당 변경 이력 + 지금 담당이 정해진 시각
             t["_owner_log"], t["_assigned_at"], t["_base_assignee"] = lead.get("owner_log"), assigned_at, t.get("assignee")
+            t["_resume"] = resume_ts
             g = run_gates(t, finishes, gate_answers, known or peers)
-            for k in ("_owners", "_owner_log", "_assigned_at", "_base_assignee", "_anchor_by"):
+            for k in ("_owners", "_owner_log", "_assigned_at", "_base_assignee", "_anchor_by", "_resume"):
                 t.pop(k, None)
             t["gate_history"] = g["history"]
             if g["live"] and not g["final"]:  # 실게임 시험 단계: 담당을 개발컴 Claude로 옮기고 대화 세션에서 진행
@@ -986,9 +1022,13 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
             elif g["final"]:
                 t["status"], t["confirmed"] = ("done", True) if g["final"] == "done" else ("parked", False)
                 t["status_at"] = g["since"]
+            elif park_ts and not resumed and to_dt(park_ts) > to_dt(g["since"]):
+                # 끝냄 뒤에 남은 보류 기록(아키텍트 보류 결정): 엔진이 진행 중으로 덮지 않는다(2026-10-03 — 보류가 무시되던 결함)
+                t["status"], t["status_at"], t["stage"] = "parked", park_ts, g["stage"]
             else:
                 t["status"], t["stage"] = "active", g["stage"]
-                t["status_at"] = g["since"]
+                # 진행 중 보류를 다시 진행했으면 상태 시각 = 재개 시각(노드가 자기 PC의 옛 보류 기록으로 다시 덮지 않게, overlay_local)
+                t["status_at"] = last_resume if resumed and to_dt(last_resume) > to_dt(g["since"]) else g["since"]
                 t["stage_owner"] = stage_owner(g["stage"], t, known)
             step = (t["gate"]["step"], t["gate"]["label"] + " 대기") if t.get("gate") else STAGE_STEP.get(t.get("stage") or "work")
             t["step"] = {"n": step[0], "label": step[1]} if t["status"] not in ("done", "parked") else None
