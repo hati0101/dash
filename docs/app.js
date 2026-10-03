@@ -288,8 +288,87 @@ function afterSend(res) {
     h('p', null, '아래 버튼으로 GitHub 창을 열고 "Submit new issue"를 눌러주세요. 내용은 암호문이라 그대로 보내면 됩니다.'),
     h('a', { class: 'btn primary', href: res.url, target: '_blank', rel: 'noopener noreferrer' }, icon('send'), 'GitHub에서 보내기'));
 }
-async function sendOps(type, fields, summary) {
+const UNDO_MS = 10000;
+const outbox = { all() { return store.get('outbox', []) || []; }, set(l) { store.set('outbox', l); } };
+// 10초 뒤 보내기는 토큰 API로만 보낸다(사용자 동작 없이 GitHub 창을 열면 막히므로). 실패하면 대기열에 남겨 1분 뒤 다시,
+// 세 번 실패하면 '보내지 못한 결정' 창을 띄워 직접 눌러 GitHub 창으로 보내게 한다(결정이 조용히 사라지지 않게)
+async function sendApi(obj) {
+  const repo = S.data.meta.repo, token = await tokenGet();
+  if (!repo || !token) throw new Error('토큰 없음');
+  const blob = await sealTopic(obj);
+  const r = await fetch(`https://api.github.com/repos/${repo}/issues`, {
+    method: 'POST', headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: `[ops] ${obj.id}`, body: `REAL 작업실 요청 (암호화됨 · 대시보드 비밀번호로만 열립니다)\n\n아래 줄을 수정하지 마세요.\n\n${blob}\n` }) });
+  if (!r.ok) throw new Error(`GitHub ${r.status}`);
+}
+async function flushOutbox() {
+  if (S._flushing || !S.data) return;
+  S._flushing = true;
+  try {
+    const answered = new Map((S.data.decisions_answered || []).map(a => [a.id, a]));
+    for (const it of outbox.all().filter(x => x.due <= Date.now() && !x.manual)) {
+      const a = it.action, prev = a.type === 'decide' ? answered.get(a.decision_id) : null;
+      if (prev && toMs(prev.ts) > toMs(a.created_at)) {  // 다른 기기에서 더 나중에 답했다 — 늦게 보내 덮어쓰지 않는다
+        outbox.set(outbox.all().filter(x => x.action.id !== a.id)); pending.remove(a.id); continue;
+      }
+      try {
+        await sendApi(a);
+        outbox.set(outbox.all().filter(x => x.action.id !== a.id));
+        pending.all().filter(p => p.id === a.id).forEach(p => { pending.remove(p.id); pending.add({ ...p, via: 'api' }); });
+        toast('보냈습니다 · PC 동기화 때 반영됩니다');
+      } catch (e) {
+        const tries = (it.tries || 0) + 1;
+        outbox.set(outbox.all().map(x => x.action.id === a.id ? { ...x, tries, due: Date.now() + 60000, manual: tries >= 3 } : x));
+        if (tries >= 3) showUnsent(); else toast(`보내기 실패(${e.message}) — 1분 뒤 다시 보냅니다`);
+      }
+    }
+  } finally { S._flushing = false; }
+}
+function showUnsent() {
+  const list = outbox.all().filter(x => x.manual);
+  if (!list.length) return;
+  drawer('보내지 못한 결정', h('p', null, `바로 보내기가 ${list.length}건 실패했습니다. 아래 버튼을 눌러 GitHub 창에서 "Submit new issue"를 눌러 주세요.`),
+    list.map(x => h('div', { class: 'row', style: { 'margin-top': '8px' } }, h('span', { class: 'grow' }, (pending.all().find(p => p.id === x.action.id) || {}).summary || x.action.id),
+      h('button', { class: 'btn primary', onclick: async () => {
+        outbox.set(outbox.all().filter(y => y.action.id !== x.action.id));
+        const res = await sendBlob('ops', x.action); afterSend(res);
+        pending.all().filter(p => p.id === x.action.id).forEach(p => { pending.remove(p.id); pending.add({ ...p, via: res.via }); });
+      } }, icon('send'), 'GitHub에서 보내기'))));
+}
+function cancelQueued(id, quiet) {
+  const it = outbox.all().find(x => x.action.id === id);
+  if (!it) { if (!quiet) toast('이미 보냈습니다'); return; }
+  outbox.set(outbox.all().filter(x => x.action.id !== id));
+  pending.remove(id);
+  // ★4 통과를 취소하면 바로 띄워 둔 ★5(이 기기 임시본)도 지운다
+  const a = it.action;
+  if (a.type === 'decide' && /^G4-/.test(a.decision_id || '')) {
+    const g5 = 'G5-' + a.decision_id.slice(3);
+    store.set('localGates', (store.get('localGates') || []).filter(x => x.id !== g5));
+    S.data.decisions_needed = (S.data.decisions_needed || []).filter(x => !(x.id === g5 && x._local));
+  }
+  S.d = derive(S.data); render();
+  document.querySelector(`.undo-bar[data-id="${id}"]`)?.remove();
+  if (!quiet) toast('취소했습니다 — 보내지 않았습니다');
+}
+// 취소 띠는 결정마다 하나씩(연달아 결정해도 앞 결정을 취소할 수 있게)
+function undoBar(id, summary) {
+  let stack = document.querySelector('.undo-stack');
+  if (!stack) { stack = h('div', { class: 'undo-stack' }); document.body.append(stack); }
+  const bar = h('div', { class: 'undo-bar', role: 'status', 'data-id': id }, h('span', null, `${summary} · 10초 뒤 보냅니다`), h('button', { class: 'btn sm', onclick: () => cancelQueued(id) }, '취소'));
+  stack.append(bar);
+  setTimeout(() => bar.remove(), UNDO_MS);
+}
+async function sendOps(type, fields, summary, opts = {}) {
   const action = { id: newId('A'), type, created_at: new Date().toISOString(), ...fields };
+  if (opts.undo && await tokenGet()) {  // 결정은 10초 뒤에 보낸다 — 그 사이 취소할 수 있게(보고서 4번)
+    pending.add({ ...fields, id: action.id, type, created_at: action.created_at, summary, via: 'queued' });
+    outbox.set([...outbox.all(), { action, due: Date.now() + UNDO_MS }]);
+    S.d = derive(S.data);
+    undoBar(action.id, summary);
+    setTimeout(flushOutbox, UNDO_MS + 300);
+    return { via: 'queued' };
+  }
   const res = await sendBlob('ops', action);
   pending.add({ ...fields, id: action.id, type, created_at: action.created_at, summary, via: res.via });
   S.d = derive(S.data);
@@ -446,6 +525,10 @@ function derive(data) {
     if (t) missed.push({ key: `stall:${s.topic}:${s.since || ''}`, level: 'bad', icon: 'alert', title: `실행기 멈춤: ${t.title}`,
       sub: `${person(a.id).name} · ${s.reason || '원인 미상'}`, go: () => openTopic(t) });
   }
+  // 보내지 못한 결정(바로 보내기 세 번 실패): 직접 보낼 때까지 놓친 항목에 남긴다
+  const unsent = outbox.all().filter(x => x.manual);
+  if (unsent.length) missed.push({ key: `unsent:${unsent.map(x => x.action.id).join(',')}`, level: 'bad', icon: 'send', title: `보내지 못한 결정 ${unsent.length}건`,
+    sub: '바로 보내기가 실패했습니다 — 눌러서 GitHub 창으로 보내기', go: () => showUnsent() });
   // 헛도는 중: 같은 주제가 진척 없이 3번 넘게 돌았다(멈추지 않고 간격을 두고 계속 깨움) — 결정이 아니라 알림. 진척이 생기면 실행기가 목록에서 빼 사라진다.
   // 번호는 헛돎이 시작된 시각으로 고정(같은 헛돎이 이어지는 동안 새 알림으로 다시 뜨지 않게, 2026-10-03 아키텍트 결정)
   for (const a of data.agents || []) for (const s of (a.queue || {}).idle || []) {
@@ -505,10 +588,11 @@ function checkNewGates() {
   store.set('newGates', pending);
   store.set('seenGates', [...new Set([...seen.filter(id => ids.includes(id)), ...ids])]);
   if (fresh.length && 'Notification' in window && Notification.permission === 'granted') {
-    const names = gateQueue().filter(x => fresh.includes(x.q.id)).map(x => `${x.label} · ${x.topic ? x.topic.title : x.q.task_id}`);
+    const key = x => String(x.topic?.gate?.summary || '').split('\n').map(l => l.trim()).find(Boolean) || '';
+    const names = gateQueue().filter(x => fresh.includes(x.q.id)).map(x => `${x.label} · ${x.topic ? x.topic.title : x.q.task_id}${key(x) ? ' — ' + key(x).slice(0, 80) : ''}`);
     try {
       const n = new Notification(`★ 관문 ${fresh.length}건 도착`, { body: names.slice(0, 4).join('\n') + (names.length > 4 ? `\n외 ${names.length - 4}건` : ''), icon: 'icon-192.png', tag: 'real-gates' });
-      n.onclick = () => { window.focus(); S.f.mine = 'gate'; S.mineSel = null; go('mine'); n.close(); };
+      n.onclick = () => { window.focus(); S.f.mine = 'gate'; S.mineSel = `d:${fresh[0]}`; go('mine'); n.close(); };
     } catch { /* 알림을 못 띄우는 환경 */ }
   }
 }
@@ -521,8 +605,9 @@ function enterApp() {
   readHash();
   checkNewGates();
   render();
+  flushOutbox();  // 지난번에 10초 안에 창을 닫아 못 보낸 결정이 있으면 마저 보낸다
   // 보고 있을 때는 1분마다, 창을 내려 두었을 때도 5분마다 확인한다(새 관문 알림이 늦지 않게)
-  if (!S.timer) { let tick = 0; S.timer = setInterval(() => { tick++; if (!document.hidden || tick % 5 === 0) refresh(); }, 60 * 1000); }
+  if (!S.timer) { let tick = 0; S.timer = setInterval(() => { tick++; flushOutbox(); if (!document.hidden || tick % 5 === 0) refresh(); }, 60 * 1000); }
 }
 // 새 화면 판 알아채기: 게시 서버가 시작 파일을 10분까지 캐시해서 열린 창이 예전 화면에 머무르는 문제(2026-10-03).
 // 1분마다 시작 파일의 화면 파일 버전 표시를 캐시 없이 읽어, 바뀌었으면 안전할 때 스스로 새로 고친다
@@ -835,7 +920,7 @@ function todayCard() {
   // ★ 관문(실게임 시험·배포본 결정·운영 반영 승인·완료 확정·결과 확인)은 한 줄로 묶어 맨 위에
   const gates = (data.decisions_needed || []).filter(q => (q.kind === 'gate' || q.kind === 'stall') && !d.answers[q.id] && (q.options || []).length);
   if (gates.length) {
-    const by = {}; for (const q of gates) { const k = q.kind === 'stall' ? '멈춤' : (q.question.match(/^\[\d+\/9 ([^\]]+)\]/) || [])[1] || '관문'; by[k] = (by[k] || 0) + 1; }
+    const by = {}; for (const q of gates) { const k = q.kind === 'stall' ? '멈춤' : q.gate === 40 ? '결과 확인' : (q.question.match(/^\[\d+\/9 ([^\]]+)\]/) || [])[1] || '관문'; by[k] = (by[k] || 0) + 1; }
     items.push({ ico: 'scale', lv: 'warn', t: `★ 관문 결정 ${gates.length}건`, s: Object.entries(by).map(([k, n]) => `${k} ${n}`).join(' · '), who: 'user',
       when: gates.map(q => q.since).sort()[0], go: () => { S.f.mine = 'decision'; S.mineSel = null; go('mine'); } });
   }
@@ -866,7 +951,7 @@ function myQueue() {
   return { decisions, tests, actions, questions, backlog, total: decisions.length + tests.length + actions.length + questions.length };
 }
 // 아키텍트 관문 대기열: 주제가 관문에 도착하면 여기서 끝까지 추적한다(답할 때까지 내 차례·개요·새 도착 알림에 남음)
-const GATE_ORDER = { 9: 0, 7: 1, 5: 2, 4: 3, 40: 4 };  // 완료에 가까운 단계부터(뒤 단계가 목록 끝에 묻히지 않게)
+const GATE_ORDER = { 9: 0, 7: 1, 5: 2, 40: 3, 4: 4 };  // 읽고 고르기만 하면 되는 것부터, 실게임 시험이 필요한 ★4는 맨 뒤 묶음(보고서 6번)
 const GATE_LATE_H = 24;  // 이보다 오래 기다리면 '오래 대기'로 강조하고 놓친 항목에 올린다
 function waitText(ts) {
   const hh = hoursSince(ts);
@@ -879,7 +964,7 @@ function gateQueue() {
       if (q.kind === 'stall') return { q, n: -1, label: `멈춤 · ${STALL_LABEL[q.stall] || '확인 필요'}`, topic: topicById(q.task_id), late: true };
       const m = (q.question || '').match(/^\[(\d+)\/9 ([^\]]+)\]/) || [];
       const n = q.gate || Number(m[1]);
-      return { q, n, label: `★${m[1] || n}/9 ${m[2] || '관문'}`, topic: topicById(q.task_id), late: hoursSince(q.since) >= GATE_LATE_H };
+      return { q, n, label: gateName(n, m[2] || '관문'), topic: topicById(q.task_id), late: hoursSince(q.since) >= GATE_LATE_H };
     })
     .sort((a, b) => (a.n === -1 ? -1 : GATE_ORDER[a.n] ?? 9) - (b.n === -1 ? -1 : GATE_ORDER[b.n] ?? 9) || toMs(a.q.since) - toMs(b.q.since));
 }
@@ -898,16 +983,16 @@ const MINE_TYPES = [
   ['gate', '★ 관문', 'scale', 'warn'],
   ['decision', '결정·승인', 'scale', 'warn'],
   ['question', 'AI 질문', 'messages', 'warn'],
-  ['test', '실게임·확인', 'flask', 'warn'],
   ['action', '할 일', 'user', ''],
   ['backlog', '착수 고르기', 'inbox', ''],
 ];
-const MINE_TYPE = Object.fromEntries(MINE_TYPES.map(([v, l, i, c]) => [v, { label: l, icon: i, cls: c }]));
+// 옛 작업표의 실게임·확인 대기(test)는 탭 없이 ★ 관문 '실게임 시험 필요' 묶음에 같이 보인다(보고서 5번)
+const MINE_TYPE = Object.fromEntries([...MINE_TYPES, ['test', '실게임·확인', 'flask', 'warn']].map(([v, l, i, c]) => [v, { label: l, icon: i, cls: c }]));
 function mineItems() {
   const q = myQueue(), items = [];
   // ★ 관문: 단계 순(실게임 시험 → 결과 확인 → 배포본 → 운영 반영 → 완료 확정), 같은 단계는 오래 기다린 것부터
-  for (const x of gateQueue()) items.push({ key: `d:${x.q.id}`, type: 'gate', title: x.topic ? x.topic.title : x.q.question.split('\n')[0], who: x.q._author || 'claude', when: x.q.since,
-    topic: x.topic, taskId: x.q.task_id, ref: x.q, sub: `${x.label} · ${waitText(x.q.since)}`, late: x.late });
+  for (const x of gateQueue()) items.push({ key: `d:${x.q.id}`, type: 'gate', gn: x.n, title: x.topic ? x.topic.title : x.q.question.split('\n')[0], who: x.q._author || 'claude', when: x.q.since,
+    topic: x.topic, taskId: x.q.task_id, ref: x.q, sub: `${x.label} · ${waitText(x.q.since)}${rollbacks(x.topic) ? ` · 되돌림 ${rollbacks(x.topic)}회` : ''}`, late: x.late });
   for (const x of q.decisions.filter(d => d.kind !== 'gate' && d.kind !== 'stall')) items.push({ key: `d:${x.id}`, type: 'decision', title: x.question, who: x._author || 'claude', when: x.since, topic: topicById(x.task_id), taskId: x.task_id, ref: x,
     sub: x.recommendation ? '권장 ' + x.recommendation : (x.options || []).length ? `선택지 ${x.options.length}개` : '' });
   for (const { topic, note } of q.questions) items.push({ key: `q:${topic.id}:${note.ts}`, type: 'question', title: note.body, who: note.by, when: note.ts, topic, ref: note });
@@ -921,13 +1006,14 @@ function mineItems() {
 }
 // 화면에 보이는 순서 그대로(전체 탭: 관문 → 대응할 것 → 착수 고르기). 키보드 이동도 이 순서를 쓴다
 function mineList(f = S.f.mine || 'all', all = mineItems()) {
-  return f === 'all' ? [...all.filter(i => i.type === 'gate'), ...all.filter(i => !['gate', 'backlog'].includes(i.type)), ...all.filter(i => i.type === 'backlog')]
-    : all.filter(i => i.type === f);
+  const quick = i => i.type === 'gate' && i.gn !== 4, live = i => (i.type === 'gate' && i.gn === 4) || i.type === 'test';
+  return f === 'all' ? [...all.filter(quick), ...all.filter(live), ...all.filter(i => !['gate', 'test', 'backlog'].includes(i.type)), ...all.filter(i => i.type === 'backlog')]
+    : f === 'gate' ? [...all.filter(quick), ...all.filter(live)] : all.filter(i => i.type === f);
 }
 function vMine() {
   const all = mineItems();
   const f = S.f.mine || 'all';
-  const count = v => all.filter(i => i.type === v).length;
+  const count = v => all.filter(i => i.type === v || (v === 'gate' && i.type === 'test')).length;
   const urgent = all.filter(i => i.type !== 'backlog');
   // 검색: 제목·내용·주제 이름·주제 ID·질문한 작업자로 찾는다(띄어 쓴 낱말은 모두 들어 있어야 함)
   const words = String(S.f.mineQ || '').trim().toLowerCase().split(/\s+/).filter(Boolean);
@@ -965,10 +1051,12 @@ function vMine() {
         it.sub && it.type !== 'backlog' ? h('span', { class: 's clamp-1' }, it.sub) : null,
         h('span', { class: 'meta' }, av(it.who, true), h('span', null, person(it.who).name), histCount(it.topic, it.taskId), h('span', { class: 'when' }, fmtRel(it.when)))));
   };
-  const group = (title, items) => items.length ? [h('div', { class: 'mine-group' }, title, h('b', null, items.length)), items.map(row)] : null;
+  const group = (title, items, extra) => items.length ? [h('div', { class: 'mine-group' }, title, h('b', null, items.length), extra || null), items.map(row)] : null;
   const listBody = !list.length ? empty(f === 'all' ? '지금 대응할 것이 없습니다.' : `${MINE_TYPE[f].label} 항목이 없습니다.`)
-    : f === 'all' ? [group('★ 관문 · 오래 기다린 것부터', urgent.filter(i => i.type === 'gate')), group('대응할 것', urgent.filter(i => i.type !== 'gate')),
-      group('착수 고르기 · 미처리 주제', all.filter(i => i.type === 'backlog'))] : list.map(row);
+    : f === 'all' || f === 'gate' ? [group('★ 관문 · 읽고 고르기(빨리 끝남)', list.filter(i => i.type === 'gate' && i.gn !== 4)),
+      group('★ 관문 · 실게임 시험 필요', list.filter(i => (i.type === 'gate' && i.gn === 4) || i.type === 'test'), liveBatchButton(list)),
+      f === 'all' ? group('대응할 것', urgent.filter(i => !['gate', 'test'].includes(i.type))) : null,
+      f === 'all' ? group('착수 고르기 · 미처리 주제', all.filter(i => i.type === 'backlog')) : null] : list.map(row);
   const ids = list.filter(i => checked.has(i.topic?.id)).map(i => i.topic.id);
   const dropped = S.d.topics.filter(t => t.status === 'dropped');
   const listTools = f !== 'backlog' ? null : h('div', { class: 'mine-list-tools' }, selecting
@@ -987,6 +1075,7 @@ function vMine() {
       !('Notification' in window) ? null : Notification.permission === 'default'
         ? h('button', { class: 'btn', title: '대시보드 창이 열려 있으면(내려 두어도) 새 ★ 관문이 도착할 때 바탕화면 알림을 띄웁니다', onclick: () => Notification.requestPermission().then(() => render()) }, icon('bell'), '새 관문 알림 켜기')
         : Notification.permission === 'granted' ? h('span', { class: 'hint' }, '새 관문 바탕화면 알림 켜짐') : h('span', { class: 'hint' }, '알림이 브라우저에서 막혀 있음(사이트 설정에서 허용)')),
+    mineSummary(all),
     tabs,
     h('div', { class: `mine-split fit-page${narrow ? ' narrow' : ''}` },
       h('div', { class: 'card mine-list', role: 'listbox', 'aria-label': '내 차례 목록', 'aria-multiselectable': selecting ? 'true' : null }, listTools, listBody, droppedBox),
@@ -997,6 +1086,57 @@ function vMine() {
           kbHint()]
           : h('div', { class: 'mine-detail-empty' }, empty('왼쪽에서 항목을 고르면 내용과 히스토리가 여기에 보입니다.')))),
   ];
+}
+// 내 차례 한 줄 요약(보고서 5번): 지금 쌓인 것을 한눈에, 누르면 그 목록으로
+function mineSummary(all) {
+  const n = f => all.filter(f).length;
+  const parts = [
+    ['읽고 고르기', n(i => i.type === 'gate' && i.gn !== 4), () => { S.f.mine = 'gate'; }],
+    ['실게임 시험', n(i => (i.type === 'gate' && i.gn === 4) || i.type === 'test'), () => { S.f.mine = 'gate'; }],
+    ['결정·승인', n(i => i.type === 'decision'), () => { S.f.mine = 'decision'; }],
+    ['AI 질문', n(i => i.type === 'question'), () => { S.f.mine = 'question'; }],
+    ['할 일', n(i => i.type === 'action'), () => { S.f.mine = 'action'; }],
+    ['착수 고르기', n(i => i.type === 'backlog'), () => { S.f.mine = 'backlog'; }],
+    ['보류', S.d.topics.filter(t => t.status === 'parked').length, () => go('parked')],
+    ['헛도는 중', S.d.missed.filter(m => m.key.startsWith('idle:')).length, null],
+  ];
+  return h('div', { class: 'mine-summary' }, parts.map(([l, c, act]) => h(act && c ? 'button' : 'span', {
+    class: `ms-chip${c ? ' on' : ''}`, onclick: act && c ? () => { S.mineSel = null; act(); render(); } : null }, l, ' ', h('b', null, c))));
+}
+// ★4 시험 묶음(보고서 6번): 여러 ★4 주제를 대화 한 번에 반영·빌드·시험한다
+// 빌드 성공 기록이 있을 때만 '빌드 있음'(파일 SHA256만 적힌 요약이나 '아직 빌드 안 함'은 반영·빌드 필요)
+function liveReady(t) {
+  const s = [t?.gate?.summary || '', ...(t?.notes || []).filter(n => /^\[실행기 dev_run\]/.test(n.body || '')).map(n => n.body)].join('\n');
+  return /빌드 결과물|빌드 (PASS|통과|성공)/.test(s) && !/빌드(는|를|도)? ?(아직|하지 않|안 ?함|전)/.test(s);
+}
+function liveBatchButton(list) {
+  const lives = list.filter(i => i.type === 'gate' && i.gn === 4 && i.topic);
+  return lives.length > 1 ? h('button', { class: 'btn sm', style: { 'margin-left': 'auto' }, onclick: e => { e.stopPropagation(); openLiveBatch(lives.map(i => i.topic)); } }, icon('flask'), '시험 묶음 만들기') : null;
+}
+function liveBatchText(ts) {
+  return `실게임 시험 묶음 — 주제 ${ts.length}개를 이 대화에서 한 번에 반영·빌드·시험합니다.\n` +
+    `1) 대시보드 도구 폴더(node.py가 있는 곳)에서 주제마다 python node.py brief <주제ID> 로 내용·작업물·체크리스트를 불러오세요.\n` +
+    `2) 격리 서버(server-dev)에 모두 반영하고 한 번에 빌드합니다. 같은 파일을 고치는 주제가 있으면 먼저 알려 주세요.\n` +
+    `3) 아키텍트가 한 번 접속해 주제별 체크리스트를 차례로 확인합니다. 체크리스트를 주제별로 묶어 보여 주세요.\n` +
+    `4) 시험 중 고친 주제는 python node.py state <주제ID> --agent dev-claude --status done --note "무엇을 고쳤나·시험 방법" 으로 남기세요(★4로 다시 옵니다). 통과 여부는 아키텍트가 대시보드 ★4에서 고릅니다.\n` +
+    `운영 서버 반영은 ★7 승인 뒤 서버컴에서만 합니다.\n\n주제:\n` +
+    ts.map(t => `- ${t.id} "${t.title}" (${liveReady(t) ? '빌드 있음' : '반영·빌드 필요'})`).join('\n');
+}
+function openLiveBatch(ts) {
+  const on = new Set(ts.map(t => t.id));
+  const box = h('div');
+  const draw = () => {
+    box.replaceChildren(
+      h('p', { class: 'hint' }, '시험할 주제를 고르고 문구를 복사해 개발컴 Claude 대화에 붙여 넣으세요. 결과는 주제마다 ★4에서 고르시면 됩니다.'),
+      h('div', { class: 'opt-list' }, ts.map(t => h('label', { class: 'opt' }, h('input', { type: 'checkbox', checked: on.has(t.id) ? true : null, onchange: e => { e.target.checked ? on.add(t.id) : on.delete(t.id); draw(); } }),
+        h('span', null, t.title, h('span', { class: 'opt-hint' }, liveReady(t) ? '빌드 있음 — 바로 시험 가능' : '반영·빌드 먼저 필요'))))),
+      h('div', { class: 'row', style: { 'margin-top': '10px' } }, h('button', { class: 'btn primary', disabled: on.size ? null : true, onclick: async () => {
+        const text = liveBatchText(ts.filter(t => on.has(t.id)));
+        try { await navigator.clipboard.writeText(text); toast(`${on.size}개 묶음 문구를 복사했습니다. 개발컴 Claude 대화에 붙여 넣으세요.`); } catch { modal('시험 묶음 문구', h('pre', { class: 'pre' }, text)); }
+      } }, icon('send'), `${on.size}개 묶음 문구 복사`)));
+  };
+  draw();
+  modal('★4 실게임 시험 묶음', box);
 }
 // 좁은 화면·"크게 보기": 같은 내용을 가운데 모달로
 function openMineItem(it) {
@@ -1194,11 +1334,28 @@ function timeline(n) {
 // ------------------------------------------------------------ 작업자 (PC별 AI 현황)
 function agentStats(id) {
   const topics = S.d.topics.filter(t => !['done', 'parked', 'dropped'].includes(t.status));
-  return {
-    assigned: topics.filter(t => t.assignee === id),
-    turn: topics.filter(t => t.turn === id),
-    tasks: S.d.tasks.filter(t => t.stage !== 'done' && (t.owner === id || LEGACY[t.owner] === id || t.waiting_on === id || LEGACY[t.waiting_on] === id)),
-  };
+  const assigned = topics.filter(t => t.assignee === id), turn = topics.filter(t => t.turn === id);
+  const works = [...new Set([...assigned, ...turn].map(t => t.work_id).filter(Boolean))].map(w => (S.data.works || {})[w]).filter(Boolean);
+  const legacy = S.d.tasks.filter(t => t.stage !== 'done' && (t.owner === id || LEGACY[t.owner] === id || t.waiting_on === id || LEGACY[t.waiting_on] === id));
+  return { assigned, turn, works, legacy, tasks: [...works, ...legacy] };
+}
+// 왜 이 작업자 차례인가(작업자 카드 '내 차례' 목록)
+function turnWhy(t, id) {
+  if (t.live_session) return '실게임 대화';
+  if ((t.open_request || {}).to === id) return '요청 받음';
+  if (t.stage === 'pack' && t.stage_owner === id) return '배포본 작성';
+  if (t.stage === 'deploy' && t.stage_owner === id) return '운영 반영';
+  if (t.stage === 'test' && t.stage_owner === id) return '자체 시험';
+  if (t.reviewer === id && t.assignee !== id) return '교차 검토';
+  if ((t.handoff || {}).to === id) return '인계 받음';
+  return t.assignee === id ? '담당 진행' : '차례';
+}
+// 실행기 판정(작업자 기록 queue.items) — 사람이 읽는 말로
+function runnerVerdict(t, id) {
+  const q = ((S.data.agents || []).find(a => a.id === id) || {}).queue || {};
+  if (lockOf(id)) return '잠김';
+  if ((q.idle || []).some(x => x.topic === t.id)) return '헛도는 중';
+  return ({ runnable: '곧 실행', retry: '간격 두고 다시 깨움', waiting_answer: '아키텍트 답 대기', waiting_change: '변화 기다림', held: '대화 세션이 잡음', stalled: '건너뛰는 중' })[(q.items || {})[t.id]] || '—';
 }
 // 구독 한도 사용률(계정 전체: 대화 세션 + 자동 실행). 실행기가 Claude 실행 출력·Codex 기록에서 읽어 온다
 function usageBox(a) {
@@ -1230,13 +1387,30 @@ function agentCard(a) {
       h('div', { class: 'muted', style: { 'font-size': '12px' } }, `${fmtRel(cur.since)}부터`))
       : null,
     runnerBox(a) || (cur ? null : h('div', { class: 'now idle' }, '자동 실행 기록도, 대화 세션 작업 알림도 아직 없습니다.')),
-    h('div', { class: 'stats' }, h('div', null, h('b', null, s.assigned.length), h('span', null, '맡은 주제')), h('div', null, h('b', null, s.turn.length), h('span', null, '내 차례')),
-      h('div', null, h('b', null, s.tasks.length), h('span', null, '관련 작업'))),
-    s.assigned.length ? h('div', { class: 'list agent-topics' }, s.assigned.slice(0, 3).map(t => h('button', { class: 'item', onclick: () => openTopic(t) },
-      h('span', { class: 'body' }, h('div', { class: 't clamp-1' }, t.title), h('div', { class: 'meta' }, topicChip(t.status), priChip(t.priority), t.turn === a.id ? h('span', { class: 'tag' }, '내 차례') : null)))),
-      s.assigned.length > 3 ? moreBtn(s.assigned.length - 3, () => go('topics')) : null) : null,
+    agentLists(a, s),
     a.health && a.health.state && a.health.state !== 'ok' ? h('div', { class: `callout ${a.health.needs_user ? 'warn' : ''}` }, h('b', null, `${HEALTH[a.health.state] || '실행 오류'} · ${fmtRel(a.health.since || a.health.at)}부터`), h('div', null, a.health.fix || a.health.message)) : null,
     h('div', { class: 'muted', style: { 'font-size': '12px' } }, `마지막 신호 ${fmtRel(a.last_seen || a.pc_synced)}`));
+}
+// 작업자 카드 숫자 칸: 눌러서 아래 목록을 그 기준으로(아키텍트 2026-10-03). 목록은 카드 안에서 스크롤
+function agentLists(a, s) {
+  S.agentTab = S.agentTab || {};
+  const tab = S.agentTab[a.id] || 'assigned';
+  const pick = v => () => { S.agentTab[a.id] = v; S._keepScroll = true; render(); };
+  const cell = (v, n, l) => h('button', { class: `stat-btn${tab === v ? ' on' : ''}`, 'aria-pressed': String(tab === v), onclick: pick(v) }, h('b', null, n), h('span', null, l));
+  const topicRow = (t, extra) => h('button', { class: 'item', onclick: () => openTopic(t) },
+    h('span', { class: 'body' }, h('div', { class: 't clamp-1' }, t.title), h('div', { class: 'meta' }, extra || [topicChip(t.status), priChip(t.priority), t.turn === a.id ? h('span', { class: 'tag' }, '내 차례') : null])));
+  const lastRun = t => (runsFor(t.id).find(r => r.agent === a.id) || {}).started;
+  let body;
+  if (tab === 'turn') body = s.turn.length ? s.turn.map(t => topicRow(t, [h('span', { class: 'tag' }, turnWhy(t, a.id)), h('span', { class: 'tag' }, runnerVerdict(t, a.id)),
+    h('span', { class: 'muted' }, lastRun(t) ? `실행 ${fmtRel(lastRun(t))}` : '실행 기록 없음')])) : [empty('지금 이 작업자 차례인 주제가 없습니다.')];
+  else if (tab === 'tasks') body = s.tasks.length ? [
+    ...s.works.map(w => h('a', { class: 'item', href: w.main_url || w.url, target: '_blank', rel: 'noopener noreferrer' },
+      h('span', { class: 'body' }, h('div', { class: 't clamp-1' }, w.title || w.id), h('div', { class: 'meta' }, h('span', { class: 'tag' }, `작업물 ${w.id}`), h('span', { class: 'muted' }, `파일 ${w.file_count} · ${w.state || '-'}`))))),
+    ...s.legacy.map(t => h('button', { class: 'item', onclick: () => openTask(t) }, h('span', { class: 'body' }, h('div', { class: 't clamp-1' }, t.title), h('div', { class: 'meta' }, h('span', { class: 'tag' }, '옛 작업표')))))]
+    : [empty('관련 작업물이 없습니다.')];
+  else body = s.assigned.length ? s.assigned.map(t => topicRow(t)) : [empty('맡은 주제가 없습니다.')];
+  return [h('div', { class: 'stats' }, cell('assigned', s.assigned.length, '맡은 주제'), cell('turn', s.turn.length, '내 차례'), cell('tasks', s.tasks.length, '관련 작업')),
+    h('div', { class: 'list agent-topics' }, body)];
 }
 // 작업자 카드: 자동 실행기가 지금 무엇을 하는지, 차례인 일이 왜 멈춰 있는지
 function runnerBox(a) {
@@ -1415,7 +1589,7 @@ const pcOfAgent = id => ((S.data.agents || []).find(a => a.id === id) || {}).pc 
 function topicFlow(t, asking) {
   if (t.status === 'done') return { col: 'done', why: [] };
   if (t.live_session && t.status !== 'review_user') return { col: 'user_test', why: ['실게임 수정 · 대화 세션'] };
-  if (t.status === 'review_user' || (S.data.decisions_needed || []).some(q => q.task_id === t.id && !S.d.answers[q.id]) || asking.has(t.id)) return { col: 'user_test', why: t.gate ? [`★${t.gate.step || t.gate.n}/9 ${t.gate.label}`] : [] };
+  if (t.status === 'review_user' || (S.data.decisions_needed || []).some(q => q.task_id === t.id && !S.d.answers[q.id]) || asking.has(t.id)) return { col: 'user_test', why: t.gate ? [gateName(t.gate.n, t.gate.label)] : [] };
   const why = [];
   const run = runsFor(t.id)[0];
   if (run && run.result === 'fail') why.push('실행 실패');
@@ -1460,7 +1634,8 @@ function vDone() {
   const how = t => {
     const last = (t.gate_history || []).at(-1);
     if (!last) return '관문 이전 방식으로 완료';
-    return `★${last.n === 40 ? 4 : last.n} ${GATE_SHORT[last.n] || '관문'} · ${String(last.choice || '메모').replace(/\(.*\)/, '')}`;
+    if (/^즉시 완료/.test(last.choice || '')) return `배포 없이 완료(${gateName(last.n, GATE_SHORT[last.n] || '관문')}에서 즉시 완료)`;
+    return `${gateName(last.n, GATE_SHORT[last.n] || '관문')} · ${String(last.choice || '메모').replace(/\(.*\)/, '')}`;
   };
   const row = t => h('details', { class: 'done-row' },
     h('summary', null,
@@ -1489,14 +1664,27 @@ function vDone() {
 }
 // 보류 메뉴(아키텍트 2026-10-03): 보류한 주제를 따로 모아 보고, 필요할 때 '다시 진행'으로 꺼내 쓴다.
 // 관문에서 보류했으면 그 ★ 관문이 내 차례에 다시 열리고, 진행 중에 보류했으면 진행 중으로 돌아가 AI가 이어서 한다
+// 원래 주제 ↔ 후속 주제 연결(보고서 2번): 어디서 왔고 어디로 이어졌는지 오갈 수 있게
+function linkBox(t) {
+  if (!t) return null;
+  const go_ = x => () => { const y = topicById(x.id); if (y) openTopic(y); };
+  const st = x => (TOPIC[x.status] || {}).label || x.status || '';
+  const rows = [];
+  if (t.origin) rows.push(h('div', null, h('b', null, '원래 주제 ← '), h('button', { class: 'tag tag-btn', onclick: go_(t.origin) }, t.origin.title || t.origin.id), h('span', { class: 'muted' }, ` ${st(t.origin)}`)));
+  for (const f of t.followup_topics || []) rows.push(h('div', null, h('b', null, '후속 주제 → '), h('button', { class: 'tag tag-btn', onclick: go_(f) }, f.title || f.id), h('span', { class: 'muted' }, ` ${st(f)}`)));
+  if (!rows.length) return null;
+  return h('div', { class: 'callout' }, rows, (t.followups || []).length && t.gate && t.gate.n === 40
+    ? h('div', { class: 'hint' }, '후속 주제가 이미 있어 이 결과 확인에서는 새로 만들지 않습니다. 이 주제는 완료 확정하시면 됩니다.') : null);
+}
 function parkInfo(t) {
   const last = (t.gate_history || []).at(-1);
   const h_ = last && last.act === 'park' && !last.resumed_at ? last : null;  // 마지막 관문 답이 보류이고 아직 재개 안 됐을 때만 관문 보류
-  if (h_) return { where: `★${h_.n === 40 ? 4 : h_.n} ${GATE_SHORT[h_.n] || '관문'}에서 보류`, note: h_.note || '', at: h_.answered_at, back: `★${h_.n === 40 ? 4 : h_.n} ${GATE_SHORT[h_.n] || '관문'}이 다시 열림` };
+  if (h_) return { where: `${gateName(h_.n, GATE_SHORT[h_.n] || '관문')}에서 보류`, note: h_.note || '', at: h_.answered_at,
+    back: `${gateName(h_.n, GATE_SHORT[h_.n] || '관문')}이 내 차례에 다시 열립니다(메모는 기록에 남고, 관문은 직접 고르시면 됩니다)` };
   // 진행 중 보류의 메모: 보류 시각(status_at)까지의 기록 중 아키텍트 보류 결정 → 보류 언급 순으로
   const upto = (t.notes || []).filter(x => !t.status_at || toMs(x.ts) <= toMs(t.status_at) + 1000);
   const n = upto.filter(x => /^\[아키텍트 보류 결정\]/.test(x.body || '')).at(-1) || upto.filter(x => /보류/.test(x.body || '')).at(-1);
-  return { where: '진행 중 보류', note: n ? String(n.body || '').replace(/^\[아키텍트 보류 결정\]\s*/, '') : '', at: t.status_at, back: '진행 중으로 돌아가 AI가 이어서 함' };
+  return { where: '진행 중 보류', back_note: true, note: n ? String(n.body || '').replace(/^\[아키텍트 보류 결정\]\s*/, '') : '', at: t.status_at, back: '진행 중으로 돌아가 담당 AI가 바로 이어서 합니다(메모는 담당 AI에게 전달)' };
 }
 async function resumeTopic(t, note) {
   try {
@@ -1758,8 +1946,8 @@ function vSources() {
       card('보낸 요청 · 반영 대기', { big: pend.length, unit: '건', cls: 'fill' },
         pend.length ? h('div', { class: 'list' }, [...pend].reverse().map(p => h('div', { class: 'item' },
           h('span', { class: 'lead-ico' }, icon(p.type === 'reply' ? 'messages' : p.type === 'decide' ? 'scale' : p.type === 'task-state' ? 'tasks' : 'check')),
-          h('div', { class: 'body' }, h('div', { class: 't' }, p.summary || p.type), h('div', { class: 's' }, `${fmtRel(p.created_at)} · ${p.via === 'api' ? '바로 전송됨' : 'GitHub 창으로 보냄(Submit 필요)'} · PC 동기화 후 사라짐`)),
-          h('button', { class: 'icon-btn', title: '목록에서 지우기', 'aria-label': '목록에서 지우기', onclick: () => { pending.remove(p.id); S.d = derive(S.data); render(); } }, icon('x')))))
+          h('div', { class: 'body' }, h('div', { class: 't' }, p.summary || p.type), h('div', { class: 's' }, `${fmtRel(p.created_at)} · ${p.via === 'api' ? '바로 전송됨' : p.via === 'queued' ? (outbox.all().some(x => x.action.id === p.id && x.manual) ? '보내지 못함 — 직접 보내기 필요' : '10초 뒤 전송 대기') : 'GitHub 창으로 보냄(Submit 필요)'} · PC 동기화 후 사라짐`)),
+          h('button', { class: 'icon-btn', title: '목록에서 지우기', 'aria-label': '목록에서 지우기', onclick: () => { cancelQueued(p.id, true); pending.remove(p.id); S.d = derive(S.data); render(); } }, icon('x')))))
           : empty('대기 중인 요청이 없습니다.'),
         h('p', { class: 'hint' }, 'PC가 GitHub에서 요청을 가져와 처리하면 자동으로 목록에서 빠집니다. GitHub 창에서 Submit을 안 눌렀다면 여기서 지우고 다시 보내면 됩니다.')),
     card('수집 상태', { big: data.sources.length, unit: '곳', cls: 'fill src-table' }, h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' },
@@ -1838,7 +2026,7 @@ function thread(target, redraw, opts = {}) {
 }
 async function decide(q, choice, note, redraw) {
   try {
-    await sendOps('decide', { decision_id: q.id, choice, note: note || '' }, `결정: ${choice || '메모'}`);
+    await sendOps('decide', { decision_id: q.id, choice, note: note || '' }, `결정: ${choice || '메모'}`, { undo: q.kind !== 'stall' });
     clearDraft(`decide:${q.id}`);
     // 멈춤 결정의 화면 쪽 처리: 담당 바꾸기는 담당 지정도 보내고, 대화로 처리는 대화 시작 문구를 띄운다
     if (q.kind === 'stall') {
@@ -1882,7 +2070,7 @@ function gateBox(t) {
   const q = (S.data.decisions_needed || []).find(x => x.id === t.gate.id && !S.d.answers[x.id]);
   if (!q || !(q.options || []).length) return null;
   const again = () => { const x = S.d.topics.find(y => y.id === t.id); x ? openTopic(x) : closeDrawer(); };
-  return h('div', { class: 'callout warn gate-box' }, h('b', null, `★${t.gate.step || t.gate.n}/9 ${t.gate.label} — 여기서 바로 결정`),
+  return h('div', { class: 'callout warn gate-box' }, h('b', null, `${gateName(t.gate.n, t.gate.label)} — 여기서 바로 결정`),
     optionList(q, o => decide(q, o, '', again)));
 }
 function lockOf(id) {
@@ -1994,14 +2182,18 @@ function decisionParts(q, redraw) {
     main: [
       h('div', { class: 'meta', style: { display: 'flex', gap: '8px', 'flex-wrap': 'wrap', 'align-items': 'center' } },
         h('span', { class: 'wait' }, av(q._author || 'claude', true), `${person(q._author || 'claude').full} 질문`),
-        h('span', { class: 'when' }, `${fmtAbs(q.since)} · ${fmtRel(q.since)}`)),
+        h('span', { class: 'when' }, `${fmtAbs(q.since)} · ${fmtRel(q.since)}`),
+        rollbacks(topic) ? h('span', { class: 'st blocked' }, `되돌림 ${rollbacks(topic)}회`) : null),
       questionText(q.question),
       liveBox(topic),
+      linkBox(topic),
+      resultBox(topic, gateNOf(q)),
       q.recommendation ? h('div', { class: 'callout' }, h('b', null, '권장 '), q.recommendation) : null,
       ans ? h('div', { class: 'callout' }, h('b', null, '내 결정: '), ans.choice || '(메모)', ans.note ? ' — ' + ans.note : '',
         (() => { const r = decisionReflect(q, ans); return h('div', { class: `reflect ${r.cls}` }, icon(r.cls === 'done' ? 'check' : 'clock'), h('span', null, r.text)); })()) : null,
       (q.options || []).length ? [h('h4', null, '선택지 — 누르면 바로 결정 · 키보드는 숫자로 고르고 Enter'), optionList(q, o => decide(q, o, note.value.trim(), redraw))] : null,
       h('h4', null, '직접 적기'),
+      MEMO_HINT[gateNOf(q)] ? h('div', { class: 'hint' }, MEMO_HINT[gateNOf(q)]) : null,
       h('div', { class: 'composer' }, note, h('div', { class: 'row' }, h('button', { class: 'btn primary', onclick: () => { if (!note.value.trim()) { note.focus(); return; } decide(q, '', note.value.trim(), redraw); } }, icon('send'), '메모로 결정 보내기', kbd('Ctrl+Enter')))),
       sendHint(),
     ],
@@ -2050,13 +2242,13 @@ function topicPhase(t) {
   // 9단계 관문: 아키텍트 결정 차례(★4 실게임 시험 · ★5 배포본 결정 · ★7 운영 반영 승인 · ★9 완료 확정 · 조사·분석은 결과 확인)
   if (t.status === 'review_user' && t.gate && S.d.answers[t.gate.id]) {  // 답은 보냈고 허브 반영(1~2분)을 기다리는 중
     const a = S.d.answers[t.gate.id];
-    return { cls: 'progress', icon: 'clock', label: `★${t.gate.step || t.gate.n}/9 답함 · 반영 대기`, detail: `내 결정: ${a.choice || '메모'}${a.note ? ' — ' + a.note : ''}`,
+    return { cls: 'progress', icon: 'clock', label: `${gateName(t.gate.n, '')} 답함 · 반영 대기`, detail: `내 결정: ${a.choice || '메모'}${a.note ? ' — ' + a.note : ''}`,
       next: '허브가 다음 동기화(1~2분) 때 반영합니다' };
   }
   if (t.status === 'review_user' && t.gate) {
     const open =(S.data.decisions_needed || []).filter(q => !S.d.answers[q.id]);
     const ask = open.find(q => q.id === t.gate.id) || open.find(q => q.task_id === t.id);
-    return { cls: 'user_test', icon: 'scale', label: `★${t.gate.step || t.gate.n}/9 ${t.gate.label}${t.live_session ? ' · 개발컴 Claude 대화' : ''}`, detail: (t.gate.summary || '').slice(0, 300) || null,
+    return { cls: 'user_test', icon: 'scale', label: `${gateName(t.gate.n, t.gate.label)}${t.live_session ? ' · 개발컴 Claude 대화' : ''}`, detail: (t.gate.summary || '').slice(0, 300) || null,
       next: `아키텍트 — ${t.live_session ? '개발컴 Claude 대화를 열어 시험·수정, 그다음 ' : ''}내 차례에서 고르기: ${(t.gate.options || []).map(o => o.replace(/\(.*\)/, '')).join(' · ')}`, ask };
   }
   if (t.live_session) return { cls: 'user_test', icon: 'user', label: '실게임 시험 수정 · 개발컴 Claude 대화',
@@ -2118,10 +2310,45 @@ function workBox(t, open) {
     h('div', { class: 'work-b' },
       h('dl', { class: 'fields' }, h('dt', null, '제목'), h('dd', null, w.title), h('dt', null, '아키텍트 승인'), h('dd', null, w.approval || '없음'),
         h('dt', null, '참여'), h('dd', null, agents.map(([a, x]) => `${person(a).name}(파일 ${x.files} · 메모 ${x.notes_count})`).join(', ') || '-')),
-      (w.files || []).length ? h('ul', { class: 'work-files' }, w.files.slice(0, 14).map(f => h('li', { class: 'mono' }, f.path, h('span', { class: 'hint' }, ` ${Math.max(1, Math.round(f.size / 1024))}KB`))),
+      (w.files || []).length ? h('ul', { class: 'work-files' }, w.files.slice(0, 14).map(f => h('li', { class: 'mono' }, docLink(w, f), h('span', { class: 'hint' }, ` ${Math.max(1, Math.round(f.size / 1024))}KB`))),
         w.files.length > 14 ? h('li', { class: 'hint' }, `… 외 ${w.file_count - 14}개`) : null) : null,
       agents.filter(([, x]) => x.notes_tail).map(([a, x]) => h('div', { class: 'work-note' }, h('b', null, `${person(a).name} 최근 메모`, x.last_note_at ? ` · ${fmtAbs(x.last_note_at)}` : ''), longText(x.notes_tail))),
-      h('a', { class: 'btn sm', href: w.url, target: '_blank', rel: 'noopener noreferrer' }, icon('link'), 'GitHub에서 열기 (real-work)')));
+      h('a', { class: 'btn sm', href: w.main_url || w.url, target: '_blank', rel: 'noopener noreferrer' }, icon('link'), w.main_url ? '핵심 문서 GitHub에서 열기' : 'GitHub에서 열기 (real-work)')));
+}
+// 결과물 파일: 문서는 눌러서 바로 보고(내용이 데이터에 있음), 코드·diff·큰 파일은 비공개 real-work 저장소에서 연다
+function docLink(w, f) {
+  const text = (w.docs || {})[f.path];
+  if (text != null) return h('button', { class: 'linkless doc-link', onclick: () => openDoc(w, f.path, text) }, f.path);
+  return f.url ? h('a', { href: f.url, target: '_blank', rel: 'noopener noreferrer' }, f.path) : f.path;
+}
+function openDoc(w, path, text) {
+  const f = (w.files || []).find(x => x.path === path);
+  modal(`${w.id} · ${path}`, f && f.url ? h('a', { class: 'btn sm', href: f.url, target: '_blank', rel: 'noopener noreferrer' }, icon('link'), 'GitHub에서 열기') : null,
+    h('pre', { class: 'pre doc-pre' }, text));
+}
+// 관문·결과 화면의 '결과물 보기': 핵심 문서(SUMMARY·DESIGN·NOTES 순)를 바로 펼친다
+const GATE_DOCS = {
+  40: [/SUMMARY/i, /DESIGN|기획|설계/i, /NOTES/i, /REVIEW/i],
+  4: [/CHECK|체크|시험|TEST/i, /DESIGN/i, /NOTES/i, /SUMMARY/i],
+  5: [/PATCH|패치|CHANGE|변경/i, /DESIGN/i, /SUMMARY/i, /NOTES/i],
+  7: [/DEPLOY|배포|APPLY|적용|ROLLBACK|복구|백업/i, /README/i, /DESIGN/i, /NOTES/i],
+  9: [/APPLY|반영|VERIFY|확인|LOG|EVIDENCE/i, /NOTES/i, /SUMMARY/i],
+};
+const docLabel = p => p.includes('/') ? `${p.split('/')[0]} · ${p.split('/').pop()}` : p;
+function resultBox(t, n) {
+  const w = t && t.work_id ? (S.data.works || {})[t.work_id] : null;
+  if (!w) return null;
+  const pats = GATE_DOCS[n] || GATE_DOCS[40];
+  const rank = p => { const i = pats.findIndex(re => re.test(p)); return i < 0 ? 99 : i; };
+  const docs = Object.keys(w.docs || {}).sort((a, b) => rank(a) - rank(b));
+  const fold = (p, open) => h('details', { class: 'doc-fold', open: open ? true : null }, h('summary', null, open ? h('b', null, `검토할 결과물 · ${docLabel(p)}`) : docLabel(p)),
+    h('pre', { class: 'pre doc-pre doc-inline' }, w.docs[p]));
+  return h('div', { class: 'result-box' },
+    n === 4 ? h('div', { class: `callout ${liveReady(t) ? '' : 'warn'}` }, liveReady(t) ? '빌드 있음 — 바로 실게임 시험할 수 있습니다' : '반영·빌드가 먼저 필요합니다 — 개발컴 Claude 대화(또는 시험 묶음)에서 반영·빌드 뒤 시험') : null,
+    docs.length ? [fold(docs[0], true), docs.slice(1, 6).map(p => fold(p, false))] : h('div', { class: 'hint' }, '펼칠 문서가 없습니다(코드·diff만 있음) — 아래 원본 파일에서 엽니다'),
+    h('details', { class: 'doc-fold' }, h('summary', null, `원본 파일 ${w.file_count}개 · 작업물 ${w.id}`),
+      h('ul', { class: 'work-files' }, (w.files || []).slice(0, 30).map(f => h('li', { class: 'mono' }, docLink(w, f)))),
+      h('a', { class: 'btn sm', href: w.main_url || w.url, target: '_blank', rel: 'noopener noreferrer' }, icon('link'), 'GitHub에서 열기')));
 }
 
 // ------------------------------------------------------------ 히스토리 (모달 오른쪽: 이 주제에서 지금까지 있었던 일)
@@ -2226,11 +2453,35 @@ function questionText(s) {
   return h('div', { class: 'q-text' }, text);
 }
 // 선택지: 마우스로 누르면 바로 결정, 키보드 1~9는 고른 표시만(Enter로 보냄)
+// 선택지마다 '누르면 → 다음 일'(보고서 3번). 짧고 쉬운 말로
+const GATE_HINT = {
+  4: [[/^통과/, '다음: ★5 배포본 결정이 바로 열립니다'], [/^문제 있음/, '다음: 개발컴 Claude 대화에서 고친 뒤 ★4로 다시 옵니다']],
+  5: [[/^배포본/, '다음: AI가 배포본을 만들고 ★7 운영 반영 승인으로'], [/^수정/, '다음: 진행으로 돌아가 다시 만들고 ★4 실게임부터 다시']],
+  7: [[/^서버컴/, '다음: 서버컴 Astra가 운영에 반영하고 ★9 완료 확정으로'], [/^배포본 수정/, '다음: 메모가 배포본 담당에게 가고, 고친 배포본으로 ★7이 다시 옵니다']],
+  9: [[/^완료 확정/, '끝: 완료 메뉴로 갑니다'], [/운영 반영만/, '다음: 배포본만 고쳐 ★7 → 운영 반영 → ★9 (실게임 생략)'], [/실게임부터|진행으로/, '다음: 진행 → 자체 시험 → ★4부터 모두 다시']],
+  40: [[/^후속 구현/, '다음: 이 주제는 끝내고, 만드는 주제를 새로 만들어 배분합니다'], [/^완료 확정/, '끝: 완료 메뉴로 갑니다']],
+};
+const COMMON_HINT = [[/^보류/, '다음: 보류 메뉴로 · 다시 진행하면 이 관문이 다시 열립니다'], [/^즉시 완료/, '끝: 남은 단계 없이 바로 완료(되돌릴 수 없음)']];
+const MEMO_HINT = { 4: '메모만 보내면: 개발컴 Claude 대화에서 고치는 단계로 갑니다(메모 = 문제 내용)', 5: '메모만 보내면: 수정과 같습니다 — 진행으로 돌아갑니다',
+  7: '메모만 보내면: 배포본 수정과 같습니다 — 메모가 배포본 담당에게 갑니다', 9: '메모만 보내면: 진행으로 돌아가 실게임부터 다시 합니다', 40: '메모만 보내면: 진행으로 돌아가 메모대로 다시 합니다' };
+function gateNOf(q) { return q && q.kind === 'gate' ? (q.gate || Number(((q.question || '').match(/^\[(\d+)\/9/) || [])[1]) || null) : null; }
+function optHint(q, o) {
+  const n = gateNOf(q);
+  if (!n) return null;
+  const hit = [...(GATE_HINT[n] || []), ...COMMON_HINT].find(([re]) => re.test(o));
+  return hit ? hit[1] : null;
+}
+// '보류'·'즉시 완료'는 마우스로 눌러도 한 번 더 묻는다(키보드는 숫자 → Enter 두 단계라 그대로)
+function riskyOk(o) { return !/^보류|^즉시 완료/.test(o || '') || confirm(`'${o}'을(를) 보낼까요?`); }
 function optionList(q, pick) {
   const picked = S.kbPick && S.kbPick.id === q.id ? S.kbPick.idx : -1;
-  return h('div', { class: 'opt-list' }, (q.options || []).map((o, i) => h('button', { class: `opt${i === picked ? ' kb-picked' : ''}`, 'data-kb-opt': String(i), onclick: () => pick(o) },
-    i < 9 ? h('span', { class: 'kb-num', 'aria-hidden': 'true' }, i + 1) : null, o)));
+  return h('div', { class: 'opt-list' }, (q.options || []).map((o, i) => h('button', { class: `opt${i === picked ? ' kb-picked' : ''}`, 'data-kb-opt': String(i), onclick: () => { if (riskyOk(o)) pick(o); } },
+    i < 9 ? h('span', { class: 'kb-num', 'aria-hidden': 'true' }, i + 1) : null, h('span', null, o, optHint(q, o) ? h('span', { class: 'opt-hint' }, optHint(q, o)) : null))));
 }
+// 되돌림 횟수(관문에서 진행으로 돌려보낸 횟수)
+function rollbacks(t) { return t ? (t.gate_history || []).filter(x => x.act === 'work' || (x.act === 'pack' && x.n !== 5)).length : 0; }
+// 관문 이름: 결과 확인(조사·기획)은 ★4 실게임 시험과 번호가 겹치지 않게 따로 부른다(보고서 5번)
+function gateName(n, label) { return Number(n) === 40 ? '결과 확인(조사·기획)' : `★${n}/9 ${label || ''}`.trim(); }
 // 버튼 옆 작은 키 표시(휴대폰에서는 숨김)
 function kbd(k) { return h('span', { class: 'kb', 'aria-hidden': 'true' }, k); }
 
@@ -2382,6 +2633,7 @@ function openTopic(t) {
     h('h3', null, t.title),
     conflictBox(t),
     parkedBox(t),
+    linkBox(t),
     phaseLine(t),
     gateBox(t),
     liveBox(t),

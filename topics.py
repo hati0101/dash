@@ -509,7 +509,16 @@ def cmd_import_proposals(args, cfg):
     state_path = topics_dir(cfg) / ".imported-proposals.json"
     done = read_json(state_path, {})
     added = 0
-    for n in collect_nodes(cfg, pw):
+    nodes = collect_nodes(cfg, pw)
+    pending = [p for n in nodes for p in n.get("proposals") or [] if str(p.get("id", "")) and str(p.get("id")) not in done]
+    chose_followup = set()
+    if any(p.get("origin_topic") for p in pending):  # 아키텍트가 ★결과 확인에서 '후속 구현'을 고른 주제(그 주제에서 나온 제안 = 후속 주제)
+        recs = [r for n in nodes for r in n.get("topic_records") or []]
+        known = {a for n in nodes for a in (n.get("agents") or {})} or None
+        # 아키텍트가 '후속 구현'을 골라 실제로 후속 처리된 주제(act followup) 중, 진행 대상 후속이 아직 없는 것만
+        chose_followup = {t["id"] for t in merged_topics(topics_dir(cfg), cfg, recs, known)
+                          if any(h.get("act") == "followup" for h in t.get("gate_history") or []) and not t.get("followups")}
+    for n in nodes:
         for p in n.get("proposals") or []:
             pid = str(p.get("id", ""))
             if not pid or pid in done:
@@ -523,7 +532,15 @@ def cmd_import_proposals(args, cfg):
                 done[pid] = {"error": str(exc), "at": now_iso()}
                 continue
             label = f"{n.get('label', n['pc'])} {p.get('agent')} 메모"
-            if save_topic(cfg, topic, label, {"backlog": True, "proposal_id": pid, "proposed_by": p.get("agent")}):
+            ot = p.get("origin_topic") if ID_RE.match(str(p.get("origin_topic") or "")) and topic_path(cfg, str(p.get("origin_topic"))).is_dir() else None
+            extra = {"backlog": ot not in chose_followup, "proposal_id": pid, "proposed_by": p.get("agent")}
+            if ot in chose_followup:
+                chose_followup.discard(ot)  # 한 주제에 바로 배분되는 후속은 하나만(같은 때 온 두 번째 제안은 미처리)
+            if ot:
+                extra["origin_topic"] = ot  # 이 주제를 진행하다 나온 제안: 화면에서 원래 주제와 연결. 후속 구현을 고른 주제면 미처리 대신 바로 배분
+            if not extra["backlog"]:
+                extra.pop("backlog")
+            if save_topic(cfg, topic, label, extra):
                 added += 1
                 print(f"가져옴 {tid} ← {label}: {topic['title']}")
             done[pid] = {"topic": tid, "at": now_iso()}
@@ -548,6 +565,10 @@ def cmd_spawn_followups(args, cfg):
     for t in merged_topics(topics_dir(cfg), cfg, recs, known):
         last = (t.get("gate_history") or [None])[-1]
         if not last or last.get("act") != "followup" or last["id"] in done:
+            continue
+        if t.get("followups"):  # 후속 주제가 이미 있다(AI 제안으로 만들어졌거나 앞서 만듦) — 또 만들지 않는다
+            done[last["id"]] = {"topic": t["followups"][0], "at": now_iso(), "existing": True}
+            print(f"후속 주제 이미 있음 {t['id']} → {', '.join(t['followups'])}")
             continue
         nid = f"T-{datetime.now(KST):%Y%m%d}-{hashlib.sha1(last['id'].encode()).hexdigest()[:6]}"
         body = (f"원래 주제 {t['id']} '{t.get('title')}'의 조사·기획 결과를 구현한다(★결과 확인에서 아키텍트가 '후속 구현'을 골랐다).\n\n"
@@ -677,6 +698,8 @@ STAGE_GATE = {"test": 4, "pack": 7, "deploy": 9}  # 그 단계에서 AI가 끝�
 # 판정 규칙 2판(2026-10-03 전수 모의 검사 반영): 이 시각 이후 기록부터 적용한다.
 # 그 전 기록까지 새 규칙으로 다시 판정하면 이미 답한 관문 번호가 바뀌어 관문이 다시 열리므로, 지난 흐름은 그때 규칙 그대로 둔다.
 RULES_V2_FROM = datetime(2026, 10, 3, 3, 0, tzinfo=timezone(timedelta(hours=9)))
+# 판정 규칙 3판(2026-10-03 가지 시뮬레이션): ★7 메모만 보내기 = 배포본 수정(전에는 같은 관문 다시 열기 — 아무도 안 깨움). 이 시각 이후 답부터
+RULES_V3_FROM = datetime(2026, 10, 3, 12, 0, tzinfo=timezone(timedelta(hours=9)))
 # 시험·배포할 것이 없는 주제(옛 규칙): 제목에 기획·검토 등이 있으면 조사로 봤다 → 구현 주제를 잘못 분류해 새 규칙에서는 쓰지 않음
 NO_TEST_RE = re.compile(r"기획|구상|조사|연구|분석|검토|여부|\[연결 시험\]|\[메모 수집\]|실사용 시험|자동실행 테스트")
 NO_TEST_META = re.compile(r"\[연결 시험\]|\[메모 수집\]")  # 새 규칙에서도 시험할 것이 없는 운영용 주제
@@ -775,9 +798,10 @@ SKIP_DONE = "즉시 완료 확정(남은 단계 건너뜀)"  # 아키텍트가 �
 def gate_options(n: int, t: dict, tested: bool = False) -> list[str]:
     return {4: ["통과", "문제 있음(메모에 내용 적기 → 진행으로 되돌림)", "보류", SKIP_DONE],
             5: ["배포본 만들기", "보류", "수정", SKIP_DONE],
-            7: ["서버컴에 반영", "보류", SKIP_DONE],
-            9: ["완료 확정", "문제 있음(진행으로 되돌림)"],
-            40: ["후속 구현 주제 만들기", "보류", "완료 확정(배포할 것 없음)"]}[n]
+            7: ["서버컴에 반영", "배포본 수정(메모에 고칠 내용)", "보류", SKIP_DONE],
+            9: ["완료 확정", "문제 있음 — 운영 반영만 다시(배포본 고침)", "문제 있음 — 실게임부터 다시(진행으로 되돌림)"],
+            40: (["완료 확정(후속 주제 있음)", "보류"] if t.get("followups")  # 후속이 이미 있으면 또 만들지 않는다(중복 방지)
+                 else ["후속 구현 주제 만들기", "보류", "완료 확정(배포할 것 없음)"])}[n]
 
 
 def gate_action(n: int, ans: dict) -> str:
@@ -794,13 +818,19 @@ def gate_action(n: int, ans: dict) -> str:
     if n == 5:
         return "pack" if "배포본" in c else "work"
     if n == 7:
-        return "deploy" if "서버컴" in c else "regate"
+        if "서버컴" in c:
+            return "deploy"
+        if "배포본 수정" in c or (not c and to_dt(ans.get("ts")) >= RULES_V3_FROM):
+            return "pack"  # 배포본 작성으로 돌아가 메모를 담당에게(고친 배포본 끝냄 → ★7 다시)
+        return "regate"
     if n == 40:
         if "완료 확정" in c:
             return "done"
         if c.startswith("후속 구현") and to_dt(ans.get("ts")) >= RULES_V2_FROM:
             return "followup"
         return "work"
+    if "운영 반영만" in c:
+        return "pack"  # ★9 문제 → 배포본만 고쳐 ★7 → 운영 반영 → ★9(실게임·배포본 결정 생략, 2026-10-03)
     return "done" if c.startswith("완료") else "work"
 
 
@@ -916,12 +946,28 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
     by_topic: dict[str, list[dict]] = {}
     for r in node_records or []:
         by_topic.setdefault(r.get("topic"), []).append(r)
+    # 원래 주제 ↔ 후속 주제(topic.json origin_topic): ★결과 확인 선택지(후속이 있으면 중복 생성 안 함)와 화면 연결에 쓴다
+    # 선택지·중복 판정의 '후속'은 진행 대상인 것만(미처리 메모·삭제한 주제는 연결 표시만 하고 세지 않는다, 2026-10-03 검토 P1·P3)
+    followups_of: dict[str, list] = {}
+    linked_of: dict[str, list] = {}
+    for d in folder.iterdir():
+        if d.is_dir() and ID_RE.match(d.name):
+            tj = read_json(d / "topic.json") or {}
+            ot = tj.get("origin_topic")
+            if ot:
+                linked_of.setdefault(ot, []).append(d.name)
+                if d.name not in drops and (not tj.get("backlog") or d.name in activations):
+                    followups_of.setdefault(ot, []).append(d.name)
     for d in sorted(p for p in folder.iterdir() if p.is_dir() and ID_RE.match(p.name)):
         base = read_json(d / "topic.json")
         if not base:
             continue
         recs = {FILE_AGENT[a]: r for a in AUTHORS if (r := read_json(d / f"{a}.json", None))}
         t = dict(base)
+        if followups_of.get(t["id"]):
+            t["followups"] = sorted(followups_of[t["id"]])
+        if linked_of.get(t["id"]):
+            t["linked"] = sorted(linked_of[t["id"]])
         events = []  # (ts, agent, record) — 시간순으로 상태를 정한다
         notes = []
         for a, r in recs.items():
@@ -1072,6 +1118,13 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
         t["authors"] = sorted(set(list(recs) + [r.get("agent") for r in by_topic.get(t["id"], [])]))
         t["turn"] = whose_turn(t)
         out.append(t)
+    # 연결 표시용 제목·상태(화면에서 원래 주제 ← / 후속 주제 → 로 오간다)
+    brief = {x["id"]: {"id": x["id"], "title": x.get("title"), "status": x.get("status")} for x in out}
+    for x in out:
+        if x.get("origin_topic") in brief:
+            x["origin"] = brief[x["origin_topic"]]
+        if x.get("linked"):
+            x["followup_topics"] = [brief[f] for f in x["linked"] if f in brief]  # 화면 연결: 미처리·삭제 포함 모두
     return out
 
 

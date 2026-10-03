@@ -582,8 +582,23 @@ def health_actions(agents: list[dict]) -> list[dict]:
     return out
 
 
+DOC_EXT = {".md", ".txt"}  # 화면에서 바로 볼 문서. 코드·diff·json(게임 데이터·설정 발췌일 수 있음)은 넣지 않고 real-work 링크로 연다
+DOC_FIRST = ("SUMMARY", "DESIGN", "NOTES", "README", "EVIDENCE", "CHECKLIST")
+DOC_MAX = 20 * 1024        # 파일당
+DOC_BUDGET = 1536 * 1024  # 전체(게시 파일이 커지지 않게)
+# 문서 안 비밀값: 설정·JSON·명령 형식까지 넓게 가린다(password": "x", login_server_pw:, DB_PASSWORD=, mysql -pX 등, 2026-10-03 검토 P1)
+# 키 앞은 영문자가 아니어야 한다(빌드 PASS·bypass·passive 같은 말은 가리지 않게). 값은 따옴표로 묶였으면 따옴표 안 전부(빈칸 포함)
+DOC_SECRET = re.compile(r"""(?i)((?<![A-Za-z])(?:password|passwd|pwd|pw|token|secret|api[_-]?key|credential)["']?\s*[:=]\s*|(?:비밀번호|암호)\s*[:=]\s*)("[^"\n]*"|'[^'\n]*'|[^\s"',;{}]{3,})""")
+DOC_MYSQL_P = re.compile(r"(mysql[^\n]*?\s-p)(\S+)", re.I)
+
+
+def redact_doc(text: str) -> str:
+    return DOC_MYSQL_P.sub(lambda m: m.group(1) + "[가림]", DOC_SECRET.sub(lambda m: m.group(1) + "[가림]", text))
+
+
 def load_works(cfg: dict, topics: list[dict], log: SourceLog) -> dict:
-    """작업물 저장소(real-work)의 작업 목록. 파일 내용은 넣지 않고 목록·상태·작업자 메모 끝부분만 넣는다(게임 소스 비공개 원칙)."""
+    """작업물 저장소(real-work)의 작업 목록. 게임 소스는 넣지 않는다(비공개 원칙): 코드·diff는 목록과 링크만.
+    진행 중 주제의 작업물 문서(md·txt·json, 20KB 이하)는 내용을 넣어 화면에서 바로 본다(아키텍트 2026-10-03 '어디서 찾아보냐')."""
     repo = Path(cfg.get("work_repo") or r"D:\real-work")
     base = repo / "work"
     if not base.is_dir():
@@ -591,6 +606,11 @@ def load_works(cfg: dict, topics: list[dict], log: SourceLog) -> dict:
         return {}
     url = (cfg.get("work_repo_url") or "https://github.com/hati0101/real-work").rstrip("/")
     works, last = {}, None
+    live = {t.get("work_id") for t in topics if t.get("work_id") and t.get("status") not in ("done", "dropped")}
+    live_topics = {t["id"] for t in topics if t.get("status") not in ("done", "dropped")}  # README '대시보드 주제' 칸으로만 이어진 작업물도
+    live_topics |= {t.get("origin_topic") for t in topics if t.get("origin_topic") and t["id"] in live_topics}  # 진행 중 후속의 원래 주제 결과물도
+    live |= {t.get("work_id") for t in topics if t["id"] in live_topics and t.get("work_id")}
+    budget = [DOC_BUDGET]
     for readme in sorted(base.glob("*/README.md")):
         d = readme.parent
         text = read_text(readme)
@@ -602,17 +622,28 @@ def load_works(cfg: dict, topics: list[dict], log: SourceLog) -> dict:
             ntext = read_text(notes) if notes.exists() else ""
             heads = re.findall(r"^## (\S+) · (.+)$", ntext, re.M)
             fl = [p for p in sub.rglob("*") if p.is_file()]
-            agents[sub.name] = {"files": len(fl), "notes_tail": ntext[-1500:].strip(), "notes_count": len(heads),
+            agents[sub.name] = {"files": len(fl), "notes_tail": redact_doc(ntext[-1500:].strip()), "notes_count": len(heads),
                                 "last_note_at": heads[-1][0] if heads else None}
             files += [{"path": p.relative_to(d).as_posix(), "size": p.stat().st_size} for p in fl]
             for p in fl + ([notes] if notes.exists() else []):
                 m = datetime.fromtimestamp(p.stat().st_mtime, KST)
                 last = max(last, m) if last else m
         hist = re.findall(r"^- (\S+) `([^`]+)` (.+)$", text, re.M)
+        rank = lambda f: (next((i for i, k in enumerate(DOC_FIRST) if Path(f["path"]).stem.upper().startswith(k)), 99), f["path"])  # noqa: E731
+        docs = {}
+        if d.name in live or g("대시보드 주제") in live_topics:
+            for f in sorted(files, key=rank):
+                p = d / f["path"]
+                if p.suffix.lower() in DOC_EXT and f["size"] <= DOC_MAX and budget[0] >= f["size"] and len(docs) < 8:
+                    docs[f["path"]] = redact_doc(read_text(p))
+                    budget[0] -= f["size"]
+        for f in files:
+            f["url"] = f"{url}/blob/main/work/{d.name}/{f['path']}"
         works[d.name] = {"id": d.name, "title": text.splitlines()[0].lstrip("# ").split(" — ", 1)[-1] if text else d.name,
                          "owner": g("담당"), "kind": g("종류"), "state": g("상태"), "topic": g("대시보드 주제"),
                          "approval": g("아키텍트 승인"), "created": g("만든 시각"), "agents": agents,
-                         "files": sorted(files, key=lambda f: f["path"])[:80], "file_count": len(files),
+                         "files": sorted(files, key=rank)[:80], "file_count": len(files), "docs": docs,
+                         "main_url": next((f["url"] for f in sorted(files, key=rank) if rank(f)[0] < 99), None),
                          "history": [{"ts": a, "by": b, "what": c[:200]} for a, b, c in hist[-12:]],
                          "url": f"{url}/tree/main/work/{d.name}"}
     by_topic: dict[str, str] = {}
@@ -638,7 +669,7 @@ def gate_decisions(topics: list[dict], curated: dict, known: set) -> list[dict]:
         g = t.get("gate") if t.get("status") == "review_user" else None  # 삭제·보류된 주제에 남은 관문은 묻지 않는다
         if g and t["id"] not in asking:
             out.append({"id": g["id"], "kind": "gate", "gate": g["n"], "owner": "user", "task_id": t["id"], "since": g["opened_at"], "_author": g.get("by") or t.get("assignee"),
-                        "question": f"[{g.get('step', g['n'])}/9 {g['label']}] {title}\n\n{(g.get('summary') or '(AI 결과 요약 없음 — 주제 히스토리를 확인하세요)').strip()}",
+                        "question": f"[{'결과 확인(조사·기획)' if g['n'] == 40 else str(g.get('step', g['n'])) + '/9 ' + g['label']}] {title}\n\n{(g.get('summary') or '(AI 결과 요약 없음 — 주제 히스토리를 확인하세요)').strip()}",
                         "options": g.get("options") or []})
         for hh in t.get("gate_history") or []:  # 답한 관문: 다음에 움직일 작업자 앞으로
             # AI가 할 일이 있는 답(진행·시험·배포본·운영 반영)만 작업자를 깨운다. ★4 통과→★5, 완료, 보류, 후속 주제, ★7 메모는 깨우지 않는다
@@ -647,7 +678,7 @@ def gate_decisions(topics: list[dict], curated: dict, known: set) -> list[dict]:
             else:
                 nxt = {"test": stage_owner("test", t, known), "pack": stage_owner("pack", t, known), "deploy": stage_owner("deploy", t, known)}.get(hh.get("act")) or t.get("assignee")
             out.append({"id": hh["id"], "kind": "gate", "gate": hh["n"], "owner": "user", "task_id": t["id"], "since": hh.get("opened_at"), "_author": nxt,
-                        "question": f"[{4 if hh['n'] == 40 else hh['n']}/9 {GATE_NAME.get(hh['n'], '관문')}] {title}\n\n{(hh.get('summary') or '').strip()}", "options": []})
+                        "question": f"[{'결과 확인(조사·기획)' if hh['n'] == 40 else str(hh['n']) + '/9 ' + GATE_NAME.get(hh['n'], '관문')}] {title}\n\n{(hh.get('summary') or '').strip()}", "options": []})
     return out
 
 

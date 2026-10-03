@@ -991,7 +991,7 @@ STAGE_GUIDE = {
             "통과하면 끝냄(state done)의 body에 '실게임 시험 준비' 요약을 쓴다: 격리 서버에 반영할 빌드·파일, 실행 방법, "
             "아키텍트가 확인할 항목(체크리스트), 자체 검증 근거. 그러면 ★4 실게임 시험 관문이 열린다. 운영 서버에서는 이 단계를 하지 않는다. "
             "★4부터는 담당이 개발컴 Claude로 옮겨지고 아키텍트와 대화 세션에서 바로 시험·수정한다(자동 실행기는 손대지 않음).",
-    "pack": "6 배포본 작성: 아키텍트가 ★5에서 배포본 만들기를 골랐다. real-work 작업물에 배포본을 만든다: 적용 파일, 정확한 대상 경로, 적용 절차, "
+    "pack": "6 배포본 작성: 아키텍트가 배포본 작성을 골랐다(★5 배포본 만들기, 또는 ★7·★9에서 배포본 수정 — 직전 관문 메모가 고칠 내용). real-work 작업물에 배포본을 만든다: 적용 파일, 정확한 대상 경로, 적용 절차, "
             "백업 방법, 복구 수단, 각 파일 SHA256, 적용 후 확인 방법. 끝냄(state done)으로 ★7 운영 반영 승인 관문을 연다.",
     "deploy": "8 운영 반영: 아키텍트가 ★7에서 서버컴 반영을 승인했다. 자동 실행기에는 운영 파일을 바꾸는 도구가 없다. "
               "실행기는 반영 준비 점검만 한다(배포본 파일 해시 확인, 대상 파일의 현재 해시·백업 경로 확인)을 note로 남긴다. "
@@ -1005,7 +1005,12 @@ def stage_text(t: dict, job: dict) -> str:
     hist = t.get("gate_history") or []
     last = f"\n- 직전 관문: ★{hist[-1]['n']} → 아키텍트 선택 '{hist[-1].get('choice') or '메모'}' {hist[-1].get('note') or ''}" if hist else ""
     return (f"- 지금: {step.get('n', 2)}/9 {step.get('label', '진행')}\n- 할 일: {STAGE_GUIDE.get(st, STAGE_GUIDE['work'])}{last}\n"
-            "- AI는 완료(done)를 확정하지 못한다. 끝냄(state done)은 다음 ★관문(아키텍트 확인)을 여는 신호이고, body에 결과 요약이 반드시 있어야 한다.")
+            "- AI는 완료(done)를 확정하지 못한다. 끝냄(state done)은 다음 ★관문(아키텍트 확인)을 여는 신호이고, body에 결과 요약이 반드시 있어야 한다.\n"
+            "- 관문을 여는 끝냄의 body는 반드시 이 3줄로 시작한다(아키텍트가 화면에서 바로 판단하게, 2026-10-03):\n"
+            "  핵심: 결과의 핵심을 원문 그대로 인용(예: 원래 메모는 'LOUNGE_PENDING.md 312행 \"트레저 고블린.\" 한 줄', 출현 조건·보상은 정해진 것 없음)\n"
+            "  정할 것: 아키텍트가 지금 고를 것(예: 구체화해서 후속 구현으로 갈지 / 메모로 두고 완료할지)\n"
+            "  권장: 너의 권장과 이유 한 줄\n"
+            "  그 아래에 무엇을 했나·작업물 위치(파일 경로)·시험 방법을 쓴다. '정리를 완료합니다'처럼 내용 없는 요약은 거부된다.")
 
 
 def agent_directory(data: dict) -> str:
@@ -1087,7 +1092,7 @@ def build_prompt(job: dict, data: dict, workspace: Path | None, st: dict) -> str
 {stage_text(t, job)}
 
 ## 지난번 내 실행 요약 (이미 한 일은 반복하지 않는다)
-{(last.get('summary') or '(없음)')[:500]}{(' · 적용: ' + ', '.join(last.get('actions') or [])[:300]) if last.get('actions') else ''}
+{(last.get('summary') or '(없음)')[:500]}{(' · 적용: ' + ', '.join(last.get('actions') or [])[:300]) if last.get('actions') else ''}{(chr(10) + '- 지난 실행에서 거부된 것(이것만 고쳐 다시 내면 된다): ' + '; '.join(last.get('failed') or [])[:500]) if last.get('failed') else ''}
 
 ## 지금까지의 기록
 {notes}
@@ -1110,6 +1115,9 @@ def build_prompt(job: dict, data: dict, workspace: Path | None, st: dict) -> str
 - 할 수 있는 일은 끝까지 한다. 조사·정리·문서·패치 후보·작업물 작성·검토·인계는 승인 없이 한다(이미 맡겨진 일이다).
 - `ask`는 실제 운영 변경 지점에서만 쓴다: 운영 서버 적용·재시작·DB 변경·배포·설치·공개, 또는 아키텍트만 정할 수 있는 기획 선택.
   완료 기준이 조금 모호하면 묻지 말고 합리적인 기준을 정해 note에 적고 진행한다.
+- 아키텍트는 결재만 한다(직원처럼 알아서 진행, 2026-10-03). 파일 확인·조사·실험으로 알 수 있는 것은 묻지 말고 직접 알아내 결과로 올린다.
+  `ask`는 권한·취향·위험 판단이 필요한 결정만. 관문에 올리기 전에 스스로 검증을 끝내고, 못 한 검증은 왜 못 했는지와 대신 한 것을 적는다('확인 필요'로 넘기지 않는다).
+  아키텍트 메모가 한 줄이어도 뜻을 해석해 세부를 채우고, 모호하면 합리적인 쪽을 골라 결과로 다시 올린다(되묻지 않는다).
 - 답을 기다리는 질문이 이미 있으면 새로 묻지 말고 그 질문과 무관한 할 일을 진행하거나 actions를 비운다.
 - 담당은 내가 계속 하되 다른 작업자가 가진 자료·기획·확인이 필요하면 `request`(to=작업자 ID, body=무엇이 필요한지·어디쯤 있을지)로 요청한다.
   답이 오면 차례가 나에게 돌아오고 그 답으로 이어서 한다. 답을 기다리는 동안 이 주제는 건드리지 않는다.
@@ -1418,6 +1426,12 @@ def apply(job: dict, result: dict, data: dict | None = None) -> tuple[list[str],
                 failed.append("끝냄 거부: 결과 요약(무엇을 했나·작업물 위치·시험 방법·권장 다음 단계)이 없음 — 다시 깨워 요약을 받음")
                 job["redo"] = True
                 continue
+            elif typ == "state" and tid and a.get("status") == "done" and opens_gate(job.get("topic") or {}, body) \
+                    and not (re.search(r"정할 것", body[:1500]) and re.search(r"권장", body[:1500])):
+                # 관문을 여는 끝냄은 맨 앞에 핵심·정할 것·권장이 있어야 한다(아키텍트 2026-10-03 '어디서 찾아보냐'). 없으면 다시 요약을 받는다
+                failed.append("끝냄 거부: 맨 앞 3줄(핵심·정할 것·권장)이 없음 — 다시 깨워 요약을 받음")
+                job["redo"] = True
+                continue
             elif typ == "state" and tid and a.get("status") in STATUSES:
                 node.add_topic_record(CFG, tid, agent, "status", status=a["status"], body=body or f"상태 {a['status']}",
                                       linked_task_id=a.get("task") if a.get("task") and node.REF_RE.match(a["task"]) else None)
@@ -1494,7 +1508,8 @@ def apply(job: dict, result: dict, data: dict | None = None) -> tuple[list[str],
                     failed.append(f"{typ} 거부: {exc}")
                     continue
             elif typ == "propose" and (a.get("title") or "").strip():
-                if not node.add_proposal(CFG, agent, a["title"], body, a.get("kind") or "기타", "P2", a.get("origin") or ""):
+                # 주제 진행 중 올린 제안에는 그 주제를 원래 주제로 단다(후속 주제 연결, 2026-10-03)
+                if not node.add_proposal(CFG, agent, a["title"], body, a.get("kind") or "기타", "P2", a.get("origin") or "", tid or ""):
                     done.append("propose→이미 올림")
                     continue
             elif typ == "work_note" and body and tid:
@@ -1660,6 +1675,15 @@ PARK_ASK = "[보류 제안] 이 주제를 보류할까요?"  # AI의 보류 → 
 ARCH_PARK = "[아키텍트 보류 결정]"  # 아키텍트가 '보류'를 고른 뒤 실행기가 남기는 보류 기록(엔진은 이 표시가 있는 AI 보류만 받는다)
 
 
+def opens_gate(t: dict, body: str) -> bool:
+    """이 끝냄이 아키텍트 관문을 여나: 자체 시험(→★4)·배포본(→★7)·운영 반영(→★9)·실게임 수정 대화(→★4), 조사 주제 진행(→결과 확인).
+    구현 주제의 진행 끝냄(→ 자체 시험, 관문 없음)은 아니다."""
+    from topics import is_research
+    if t.get("live_session") or t.get("stage") in ("test", "pack", "deploy"):
+        return True
+    return is_research(t, body)
+
+
 def stage_doer(t: dict) -> str | None:
     """지금 단계를 끝낼 수 있는 작업자: 실게임 대화 단계는 개발컴 Claude, 시험·배포본·운영 반영은 단계 담당, 진행은 담당."""
     from topics import LIVE_AGENT
@@ -1793,6 +1817,8 @@ def run_job(j: dict, data: dict, state: dict) -> bool:
     backoff = None
     dev_did = any(x in ("dev_edit", "dev_revert") for x in done)  # 고치지 않고 빌드만 반복하는 것은 진척이 아니다
     dev_bad = "dev_run(실패)" in done or any(x.startswith(("dev_edit 거부", "dev_run 거부", "dev_revert 거부")) for x in failed)
+    if j.get("redo"):  # 끝냄이 거부됐다(요약 형식·내용): 이번 실행은 진척 없음 — 같은 일을 매번 바로 다시 돌지 않게(검토 P2)
+        dev_did = dev_bad = progressed = False
     if dev_did or dev_bad:
         # 실제로 고치거나 빌드했다: 결과를 보고 이어서 하도록 다음 동기화 때 바로 깨운다.
         # 빌드 실패·거부가 연달아 세 번 넘으면 30분 → 2시간 간격으로(같은 실패로 매분 돌지 않게, 2026-10-03 검토 P2)

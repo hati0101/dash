@@ -417,7 +417,7 @@ def cmd_propose(args, cfg):
     title = args.title.strip()[:200]
     if not title:
         sys.exit("--title이 비어 있습니다.")
-    pid = add_proposal(cfg, args.agent, title, body_arg(args), args.kind, args.priority, args.origin or "")
+    pid = add_proposal(cfg, args.agent, title, body_arg(args), args.kind, args.priority, args.origin or "", getattr(args, "origin_topic", "") or "")
     print(f"메모 올림 {pid}: {title} — 다음 동기화 때 허브가 미처리 주제로 가져갑니다" if pid else f"이미 올린 메모입니다: {title}")
 
 
@@ -440,7 +440,7 @@ def add_ask(cfg, agent: str, topic: str | None, question: str, options: list[str
     return aid
 
 
-def add_proposal(cfg, agent: str, title: str, body: str, kind: str = "기타", priority: str = "P2", origin: str = "") -> str | None:
+def add_proposal(cfg, agent: str, title: str, body: str, kind: str = "기타", priority: str = "P2", origin: str = "", origin_topic: str = "") -> str | None:
     import secrets
     check_agent(cfg, agent)
     title = (title or "").strip()[:200]
@@ -454,7 +454,8 @@ def add_proposal(cfg, agent: str, title: str, body: str, kind: str = "기타", p
         rec["proposals"].append({"id": pid, "agent": agent, "title": title, "body": (body or "").strip()[:8000],
                                  "kind": kind if kind in ("기능·개선", "버그", "조사·분석", "디자인", "운영·도구", "기타") else "기타",
                                  "priority": priority if priority in ("P0", "P1", "P2", "P3") else "P2",
-                                 "origin": (origin or "")[:300], "ts": now_iso()})
+                                 "origin": (origin or "")[:300], "ts": now_iso(),
+                                 **({"origin_topic": origin_topic} if re.match(r"^T-\d{8}-[a-z0-9]{6}$", origin_topic or "") else {})})
         rec["proposals"] = rec["proposals"][-2000:]
         return pid
     return update_records(cfg, fn)
@@ -767,6 +768,7 @@ def main():
     p.add_argument("--agent", required=True); p.add_argument("--title", required=True); p.add_argument("--body")
     p.add_argument("--kind", default="기타", choices=["기능·개선", "버그", "조사·분석", "디자인", "운영·도구", "기타"])
     p.add_argument("--priority", default="P2", choices=["P0", "P1", "P2", "P3"]); p.add_argument("--origin", help="원래 메모 위치(예: 스티커 메모, 파일 경로)")
+    p.add_argument("--origin-topic", help="이 제안이 나온 주제 ID(후속 주제 연결)")
     p.add_argument("--body-file")
     p = sub.add_parser("ask", help="아키텍트 결정·승인이 필요한 질문 남기기(대시보드 '결정이 필요한 문제')")
     p.add_argument("--agent", required=True); p.add_argument("--topic"); p.add_argument("--option", action="append")

@@ -55,6 +55,16 @@ def main():
     def check(name, ok, detail=""):
         results.append((name, ok, detail))
 
+    # 코드 검사(교차 검수 P1, 2026-10-03): 코드도 게시되면 다른 PC(서버컴)가 받아 실행하므로 문법 오류·반쯤 고친 코드는 올리지 않는다
+    for f in ("runner.py", "topics.py", "build.py", "node.py"):
+        r = subprocess.run([sys.executable, "-m", "py_compile", str(ROOT / f)], capture_output=True)
+        check(f"코드 문법 {f}", r.returncode == 0, r.stderr.decode("utf-8", errors="replace").strip()[-200:])
+    r = subprocess.run(["node", "--check", str(DOCS / "app.js")], capture_output=True)
+    check("코드 문법 docs/app.js", r.returncode == 0, r.stderr.decode("utf-8", errors="replace").strip()[-200:])
+    r = subprocess.run([sys.executable, "-c", "import topics, node; assert topics.gate_options(4, {}) and topics.gate_action(4, {'choice': '통과'}) == 'open5'"],
+                       cwd=ROOT, capture_output=True, env=dict(os.environ, PYTHONUTF8="1"))
+    check("엔진 불러오기·관문 판정", r.returncode == 0, r.stderr.decode("utf-8", errors="replace").strip()[-200:])
+
     env = json.loads(ENC.read_text(encoding="utf-8"))
     salt, iv = base64.b64decode(env["salt"]), base64.b64decode(env["iv"])
     check("봉투 형식", env.get("v") == 1 and env.get("iter", 0) >= 600000 and len(salt) == 16 and len(iv) == 12,
