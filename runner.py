@@ -291,7 +291,7 @@ def find_jobs(data: dict, state: dict, only: str | None = None) -> list[dict]:
             # 개입한 답이 2시간 늦게 가지 않게(2026-10-03 포크 모의 검사 s16·s36). 실행기 자신의 '이어서'(cont)와 다른 AI 작업자의
             # 메모(others)는 새 입력으로 치지 않는다(헛도는 두 AI가 서로의 메모로 감속을 풀며 빠르게 도는 것 방지)
             last = st.get("last_parts") or {}
-            if not (slowed(st) and last and any(parts.get(k) != last.get(k) for k in ("stage", "mode", "talk", "replies"))):
+            if not ((slowed(st) or st.get("retry_kind") == "env") and last and any(parts.get(k) != last.get(k) for k in ("stage", "mode", "talk", "replies"))):
                 continue
             reason = f"감속 중이지만 새 입력이 와서 바로 깨움({reason})"
         if st.get("last_sig") == sig:
@@ -307,7 +307,11 @@ def find_jobs(data: dict, state: dict, only: str | None = None) -> list[dict]:
             if (now() - last).total_seconds() < wait * 60:
                 continue
             reason = f"이 단계를 처리한 뒤 변화 없이 차례가 그대로라 다시 깨움({wait}분 간격)"
-        jobs.append({"kind": "topic", "agent": who, "topic": t, "sig": sig, "mode": mode, "parts": parts, "reason": reason})
+        seen_at = (st.get("last_result") or {}).get("at")
+        answered_at = max((h_.get("answered_at") for h_ in t.get("gate_history") or [] if h_.get("answered_at")), key=to_dt, default=None)
+        decision = (bool(answered_at and (not seen_at or to_dt(answered_at) > to_dt(seen_at))) or "-return-" in str(parts["stage"])
+                    or parts["talk"] > (st.get("last_parts") or {}).get("talk", 0))
+        jobs.append({"kind": "topic", "agent": who, "topic": t, "sig": sig, "mode": mode, "parts": parts, "reason": reason, "decision": decision})
     jobs = batch_plan_jobs(jobs)
     # 배포 묶음은 AI·운영 반영 없이 로컬 ZIP을 준비한다. 최신 데이터로 매번 구성원을 검증한다.
     if "server-astra" in agents and (only is None or only == "server-astra"):
@@ -353,6 +357,7 @@ def find_jobs(data: dict, state: dict, only: str | None = None) -> list[dict]:
     jobs = [j for j in jobs if j["kind"] != "answer" or newest.get(((j.get("topic") or {}).get("id") or j["sig"], j["agent"])) is j]
     ans_keys = {((j.get("topic") or {}).get("id"), j["agent"]) for j in jobs if j["kind"] == "answer"}
     jobs = [j for j in jobs if j["kind"] == "answer" or ((j.get("topic") or {}).get("id"), j["agent"]) not in ans_keys]
+    jobs.sort(key=job_rank)
     if only:
         return jobs[:MAX_PER_RUN]
     return jobs
@@ -1875,8 +1880,7 @@ def run_agent(agent_id: str, pw: str, dry: bool) -> bool:
                     if j.get("applied"):  # 이미 기록을 적용했으면 같은 행동을 반복하지 않게 신호를 소비한다
                         mark_done(st, j)
                     else:
-                        st["retry_after"] = (now() + timedelta(minutes=10)).isoformat(timespec="seconds")
-                        st["retry_kind"] = "error"
+                        fail_backoff(st, False, "error", f"실행기 예외 {type(exc).__name__}: {exc}")
                     produced = True
         finally:
             node.write_json(state_path(agent_id), state)
@@ -1887,6 +1891,38 @@ def run_agent(agent_id: str, pw: str, dry: bool) -> bool:
 
 PLAN_BATCH = 5  # 한 번의 모델 호출로 최초 분해하는 최대 주제 수
 PRIORITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+
+
+def job_rank(j: dict) -> tuple:
+    """한 번에 MAX_PER_RUN건만 돌므로 순서가 곧 우선권이다(아키텍트 지시 45e1a32).
+    P0 긴급 → 아키텍트 결정·답이 들어온 안건 → 우선순위 → 오래 기다린 순. 실행 중인 일은 끊지 않고 다음 실행부터 적용된다."""
+    t = j.get("topic") or {}
+    subs = [x.get("topic") or {} for x in j.get("subjobs") or []]
+    pr = min((PRIORITY_ORDER.get(x.get("priority"), 2) for x in subs), default=PRIORITY_ORDER.get(t.get("priority"), 2))
+    answer = j.get("kind") in ("answer", "park")
+    lane = 0 if pr == 0 else 1 if answer or j.get("decision") else 2
+    since = min((str(x.get("status_at") or x.get("created_at") or "") for x in subs), default=str(t.get("status_at") or t.get("created_at") or ""))
+    return (lane, pr, 0 if answer else 1 if j.get("kind") == "plan_batch" else 2, since or "~")  # 같은 우선순위면 최초 분해 묶음 먼저(다른 작업자 일을 연다)
+
+
+FAIL_STEPS = (10, 30, 60)  # 같은 주제의 연속 실행 실패 재시도 간격(분). 세 번째부터 '환경 차단'
+
+
+def fail_backoff(st: dict, needs_user: bool, cls: str, err: str):
+    """실행 실패가 이어지면 그 안건만 간격을 늘리고 '환경 차단'으로 표시한다(다른 주제는 계속 처리).
+    같은 실패를 10분마다 되풀이하지 않는다. 새 입력이 오면 바로 다시 깨우고(find_jobs), 성공하면 풀린다."""
+    n = st["fail_n"] = int(st.get("fail_n") or 0) + 1
+    mins = max(30 if needs_user else 0, FAIL_STEPS[min(n, len(FAIL_STEPS)) - 1])
+    st["retry_after"] = (now() + timedelta(minutes=mins)).isoformat(timespec="seconds")
+    st["retry_kind"] = "env" if n >= len(FAIL_STEPS) else "error"
+    if n >= len(FAIL_STEPS):
+        st["env_block"] = {"since": (st.get("env_block") or {}).get("since") or now().isoformat(timespec="seconds"),
+                           "cls": cls, "error": str(err)[:200], "fails": n}
+
+
+def clear_fail(st: dict):
+    for k in ("fail_n", "env_block"):
+        st.pop(k, None)
 
 
 def unplanned(t: dict) -> bool:
@@ -1962,6 +1998,8 @@ def plan_batch_prompt(subs: list[dict], data: dict) -> str:
 - 아래 작업자 현황에서 '배정 불가'·'신호 없음'인 작업자에게 배정하지 않는다. 맡은 작업이 많은 작업자보다 여유 있는 작업자를 고른다.
   사용량이 '미확인'이면 추정하지 말고 업무량만 본다. 같은 계정의 여유를 PC별로 따로 더하지 않는다.
 - 실게임 확인이 필요한 구현은 human_test=true(기본). 조사·기획만이면 tests 없이 작업만.
+- 범위는 요청 크기에 맞춘다(아키텍트 지시): 완료 기준은 사용자가 보게 될 결과 한두 문장. 단순 메뉴·문구·설정 추가는 구현 작업 1개(+필요하면 짧은 확인 1개), 시험은 그 동작과 직접 영향만.
+  무관한 전체 회귀·여러 번의 독립 검토·중복 보고서·단계 쪼개기를 넣지 않는다. 보상·재화·권한·데이터 변경만 위험에 맞게 검증을 더한다.
 - 운영 서버 변경은 계획에 넣지 않는다(배포는 ★7 승인 뒤 배포 대기열 → 묶음 배포 대화에서만).
 
 ## 작업자 현황(배분 문맥)
@@ -2013,7 +2051,7 @@ def _plan_batch_body(j, data, state, agent, agent_id, subs, tag, rids) -> bool:
         node.set_health(CFG, agent_id, cls, f"{err} {detail[-300:]}".strip(), needs_user, fix)
         for x in subs:
             st = job_state(state, x)
-            st["retry_after"], st["retry_kind"] = retry, "error"
+            fail_backoff(st, needs_user, cls, err)
             node.end_run(CFG, rids[x["topic"]["id"]], result="fail", error=f"{err} {detail[-300:]}".strip()[:500], error_class=cls, needs_user=needs_user, fix=fix)
         return True
     node.set_health(CFG, agent_id, "ok", "정상 실행")
@@ -2040,6 +2078,7 @@ def _plan_batch_body(j, data, state, agent, agent_id, subs, tag, rids) -> bool:
             mark_done(st, x)
             for k in ("retry_after", "retry_kind", "idle_runs", "idle_since"):
                 st.pop(k, None)
+            clear_fail(st)
         else:
             st["retry_after"], st["retry_kind"] = retry, "slow"
         node.end_run(CFG, rids[t["id"]], result="ok" if "command" in done and not failed else "partial",
@@ -2188,9 +2227,8 @@ def run_job(j: dict, data: dict, state: dict) -> bool:
         node.set_health(CFG, agent_id, cls, f"{err} {detail[-300:]}".strip(), needs_user, fix)
         node.end_run(CFG, j["rid"], result="fail", error=f"{err} {detail[-300:]}".strip()[:500], error_class=cls,
                      needs_user=needs_user, fix=fix, work_id=j.get("work_id"))
-        # 신호는 소비하지 않고 잠시 뒤 다시 시도한다(하루 한도 안에서). 사람이 고칠 문제는 30분 간격.
-        st["retry_after"] = (now() + timedelta(minutes=30 if needs_user else 10)).isoformat(timespec="seconds")
-        st["retry_kind"] = "error"  # 실행 실패 재시도: 새 입력이 와도 이 시간까지는 기다린다
+        # 신호는 소비하지 않고 잠시 뒤 다시 시도한다. 사람이 고칠 문제는 30분, 연속 실패는 10→30→60분 + '환경 차단'(r6)
+        fail_backoff(st, needs_user, cls, err)
         st["last_error"] = err
         # 실행기 인증·한도 오류는 health와 retry로 처리한다. 업무 실패로 바꿔 다른 AI를 깨우지 않는다.
         return True
@@ -2272,6 +2310,7 @@ def run_job(j: dict, data: dict, state: dict) -> bool:
         done.append(f"수신함 정리 {moved}건")
     st.pop("retry_after", None)
     st.pop("retry_kind", None)
+    clear_fail(st)
     if backoff:
         st["retry_after"] = (now() + timedelta(minutes=backoff)).isoformat(timespec="seconds")
         st["retry_kind"] = "slow"  # 헛돎·개발 실패 감속: 새 입력이 오면 바로 깨운다(find_jobs)
@@ -2285,15 +2324,17 @@ def run_job(j: dict, data: dict, state: dict) -> bool:
 
 def queue_summary(aid: str, data: dict, state: dict) -> dict:
     """이 작업자 차례인 주제가 지금 왜 돌거나 안 도는지 센다(대시보드 작업자 카드에 '쉬는 중' 대신 보여 준다)."""
-    runnable = set()
+    runnable, order = set(), []
     for j in find_jobs(data, copy.deepcopy(state), only=aid):  # 일괄 분해 일감은 묶인 주제들을 각각 '곧 실행'으로
-        runnable |= {x["topic"]["id"] for x in j.get("subjobs") or []} or {(j.get("topic") or {}).get("id") or j["sig"]}
+        ids = [x["topic"]["id"] for x in j.get("subjobs") or []] or [(j.get("topic") or {}).get("id") or j["sig"]]
+        runnable |= set(ids)
+        order += [i for i in ids if i not in order]
     answered = {a["id"] for a in data.get("decisions_answered", [])}
     asking = {q.get("task_id") for q in data.get("decisions_needed", []) if q.get("_author") == aid and q["id"] not in answered
               and q.get("kind") not in ("gate", "stall")}  # AI가 직접 올린 질문만 '답 대기'로 센다
     holds, stamp, today = node.active_holds(CFG), now().isoformat(timespec="seconds"), f"{now():%Y%m%d}"
-    out = {"total": 0, "runnable": 0, "waiting_answer": 0, "waiting_change": 0, "retry": 0, "held": 0, "stalled": 0}
-    items, stalled, idle = {}, [], []  # 주제별 판정(대시보드 '다음' 문구가 실행기 판정과 같게) · 멈춘 주제 · 헛도는 주제
+    out = {"total": 0, "runnable": 0, "waiting_answer": 0, "waiting_change": 0, "retry": 0, "env": 0, "held": 0, "stalled": 0}
+    items, stalled, idle, env = {}, [], [], []  # 주제별 판정(대시보드 '다음' 문구가 실행기 판정과 같게) · 멈춘 주제 · 헛도는 주제
     for t in data.get("topics", []):
         if t.get("turn") != aid or t.get("status") not in ACTIVE:
             continue
@@ -2306,6 +2347,10 @@ def queue_summary(aid: str, data: dict, state: dict) -> dict:
             stalled.append({"topic": t["id"], "reason": st.get("skip_reason"), "since": st.get("skip_since")})
         elif t["id"] in runnable:
             code = "runnable"
+        elif st.get("env_block") and (st.get("retry_after") or "") > stamp:
+            code = "env"  # 같은 실행 실패가 이어져 이 안건만 간격을 둠(다른 주제는 계속 처리)
+            env.append({"topic": t["id"], "since": st["env_block"].get("since") or "", "fails": st["env_block"].get("fails"),
+                        "error": st["env_block"].get("error") or "", "next": st.get("retry_after")})
         elif (st.get("retry_after") or "") > stamp:
             code = "retry"
         elif t["id"] in asking:
@@ -2320,7 +2365,7 @@ def queue_summary(aid: str, data: dict, state: dict) -> dict:
                          "last": ((st.get("last_result") or {}).get("summary") or "")[:200], "next": st.get("retry_after"),
                          "every": 30 if st["idle_runs"] <= 4 else 120})
     out["answers"] = sum(1 for j in find_jobs(data, copy.deepcopy(state), only=aid) if j["kind"] == "answer")
-    out["items"], out["stalled"], out["idle"] = items, stalled, idle
+    out["items"], out["stalled"], out["idle"], out["env_blocked"], out["order"] = items, stalled, idle, env, order[:MAX_PER_RUN]
     return out
 
 

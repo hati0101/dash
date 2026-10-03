@@ -537,7 +537,7 @@ function derive(data) {
   // 번호는 헛돎이 시작된 시각으로 고정(같은 헛돎이 이어지는 동안 새 알림으로 다시 뜨지 않게, 2026-10-03 아키텍트 결정)
   for (const a of data.agents || []) for (const s of (a.queue || {}).idle || []) {
     const t = topics.find(x => x.id === s.topic);
-    if (t) missed.push({ key: `idle:${s.topic}:${s.since || ''}`, level: 'warn', icon: 'clock', title: `헛도는 중: ${t.title}`,
+    if (t) missed.push({ key: `idle:${s.topic}:${s.since || ''}`, level: 'warn', icon: 'clock', title: `진척 없음: ${t.title}`,
       sub: `${person(a.id).name} ${s.runs}회 연속 진척 없음${s.last ? ` · 마지막: ${s.last}` : ''} · ${s.every >= 120 ? '2시간' : '30분'}마다 계속 다시 깨우는 중`, go: () => openTopic(t) });
   }
   const staleMin = data.meta.routing?.stale_minutes || 120;
@@ -1231,10 +1231,35 @@ function mineSummary(all) {
     ['보류', S.d.topics.filter(t => t.status === 'parked' && !t.archived).length, () => go('parked')],
     ['배포 대기열', S.d.topics.filter(t => t.status === 'active' && t.stage === 'queue').length, () => go('deploy')],
     ['배포 대화 대기(묶음)', new Set(S.d.topics.filter(t => t.status === 'active' && t.deploy_session && t.deploy_batch).map(t => t.deploy_batch.id)).size, () => go('deploy')],
-    ['헛도는 중', S.d.missed.filter(m => m.key.startsWith('idle:')).length, null],
+    ['진척 없음', stuckRows('idle').length, () => showStuck('idle')],
+    ['환경 차단', stuckRows('env').length, () => showStuck('env')],
   ];
   return h('div', { class: 'mine-summary' }, parts.map(([l, c, act]) => h(act && c ? 'button' : 'span', {
     class: `ms-chip${c ? ' on' : ''}`, onclick: act && c ? () => { S.mineSel = null; act(); render(); } : null }, l, ' ', h('b', null, c))));
+}
+// 진척 없음(같은 주제를 여러 번 돌렸지만 바뀐 것 없음)·환경 차단(같은 실행 실패 반복) — 실행기 판정(queue)을 그대로 보여 준다.
+// 결정 대기·선행 작업 대기는 여기에 넣지 않는다(실행기가 이미 건너뜀)
+function stuckRows(kind) {
+  const rows = [];
+  for (const a of S.data?.agents || []) for (const s of (a.queue || {})[kind === 'env' ? 'env_blocked' : 'idle'] || []) {
+    const t = topicById(s.topic);
+    if (t) rows.push({ a, s, t });
+  }
+  return rows;
+}
+function showStuck(kind) {
+  const rows = stuckRows(kind);
+  if (!rows.length) return;
+  const env = kind === 'env';
+  drawer(env ? `환경 차단 ${rows.length}건` : `진척 없음 ${rows.length}건`,
+    h('p', { class: 'muted' }, env ? '같은 실행 실패가 이어져 이 안건만 간격을 두고 다시 시도합니다. 다른 주제는 계속 처리합니다.'
+      : '같은 주제를 여러 번 실행했지만 바뀐 것이 없습니다. 멈추지 않고 간격을 두고 다시 깨웁니다.'),
+    rows.map(({ a, s, t }) => h('div', { class: 'card', style: { 'margin-top': '8px' } },
+      h('div', { class: 'row' }, h('b', { class: 'grow clamp-1' }, t.title), h('button', { class: 'btn sm', onclick: () => openTopic(t) }, '주제 열기')),
+      h('p', { class: 'muted' }, `담당 ${person(a.id).full} · ` + (env ? `실행 실패 ${s.fails || 3}회 연속${s.since ? ` · ${fmtRel(s.since)}부터` : ''}` : `${s.runs}회 연속 진척 없음${s.since ? ` · ${fmtRel(s.since)}부터` : ''}`)),
+      env ? h('p', null, `막힌 이유: ${s.error || '원인 미상'}`) : (s.last ? h('p', null, `마지막 결과: ${s.last}`) : null),
+      h('p', { class: 'muted' }, '재개 조건: ' + (env ? `다음 시도 ${s.next ? fmtAbs(s.next) : '곧'} · 새 입력(아키텍트 답·메모, 다른 작업자 기록)이 오면 바로 · 성공하면 풀림`
+        : `${s.every >= 120 ? '2시간' : '30분'}마다 다시 깨움 · 새 입력(아키텍트 답·메모, 다른 작업자 기록)이 오면 바로`)))));
 }
 // ★4 시험 묶음(보고서 6번): 여러 ★4 주제를 대화 한 번에 반영·빌드·시험한다
 // 빌드 성공 기록이 있을 때만 '빌드 있음'(파일 SHA256만 적힌 요약이나 '아직 빌드 안 함'은 반영·빌드 필요)
@@ -1491,8 +1516,8 @@ function turnWhy(t, id) {
 function runnerVerdict(t, id) {
   const q = ((S.data.agents || []).find(a => a.id === id) || {}).queue || {};
   if (lockOf(id)) return '잠김';
-  if ((q.idle || []).some(x => x.topic === t.id)) return '헛도는 중';
-  return ({ runnable: '곧 실행', retry: '간격 두고 다시 깨움', waiting_answer: '아키텍트 답 대기', waiting_change: '변화 기다림', held: '대화 세션이 잡음', stalled: '건너뛰는 중' })[(q.items || {})[t.id]] || '—';
+  if ((q.idle || []).some(x => x.topic === t.id)) return '진척 없음';
+  return ({ runnable: '곧 실행', retry: '간격 두고 다시 깨움', env: '환경 차단', waiting_answer: '아키텍트 결정 대기', waiting_change: '변화 기다림', held: '대화 세션이 잡음', stalled: '건너뛰는 중' })[(q.items || {})[t.id]] || '—';
 }
 // 구독 한도 사용률(계정 전체: 대화 세션 + 자동 실행). 실행기가 Claude 실행 출력·Codex 기록에서 읽어 온다
 function usageBox(a) {
@@ -1546,14 +1571,17 @@ function workOf(t, agentId) {
   if (!items.length && !myTurn) return null;
   const run = runOf(agentId, t.id);
   let state;
+  const qc = myTurn ? queueCode(t) : null;
   if (isRunning(run)) state = { key: 'running', label: '실행 중', cls: 'progress' };
   else if (items.some(i => i.x.state === 'blocked')) state = { key: 'blocked', label: '막힘 · Astra 조정', cls: 'blocked' };
+  else if (qc === 'env') state = { key: 'blocked', label: '환경 차단', cls: 'blocked' };
+  else if (qc === 'waiting_answer') state = { key: 'review', label: '아키텍트 결정 대기', cls: 'user_test' };
   else if (items.length && !myTurn && items.every(i => i.kind === '작업' && i.x.state === 'review')) {
     const rv = items.find(i => i.x.reviewer && !i.x.review)?.x.reviewer;
     state = { key: 'review', label: rv ? `검수 대기 · ${person(rv).full}` : 'Astra 검수 대기', cls: 'user_test' };
   }
   else if (myTurn) state = run ? { key: 'started', label: `진행함 · 마지막 실행 ${fmtRel(run.ended || run.started)}`, cls: 'progress' } : { key: 'waiting', label: '착수 대기', cls: 'neutral' };
-  else state = { key: 'queued', label: '순서 대기(앞 작업 뒤)', cls: 'neutral' };
+  else state = { key: 'queued', label: '선행 작업 대기', cls: 'neutral' };
   const n = k => items.filter(i => i.kind === k).length;
   const what = [n('작업') ? `작업 ${n('작업')}` : null, n('검수') ? `검수 ${n('검수')}` : null, n('시험') ? `시험 ${n('시험')}` : null].filter(Boolean).join(' · ') || turnWhy(t, agentId);
   return { t, items, state, what };
@@ -1612,7 +1640,7 @@ function runnerBox(a) {
   if (!run && !(q && q.total)) return null;
   const title = r => ((topicById(r.topic) || {}).title || r.topic || '질문 답 반영');
   const parts = q ? [['곧 실행', (q.runnable || 0) + (q.answers || 0)], ['아키텍트 답 대기', q.waiting_answer], ['다른 쪽 변화 기다림', q.waiting_change],
-    ['재시도 대기', q.retry], ['대화 세션이 잡음', q.held]].filter(([, n]) => n) : [];
+    ['재시도 대기', q.retry], ['환경 차단', q.env], ['대화 세션이 잡음', q.held]].filter(([, n]) => n) : [];
   return h('div', { class: `now runner-now${isRunning(run) ? '' : ' idle'}` },
     run ? (isRunning(run)
       ? [h('b', null, `자동 실행 중 · ${title(run)}`), h('div', { class: 'muted', style: { 'font-size': '12px' } }, `${fmtRel(run.started)} 시작 · 이유: ${run.reason || '-'}`)]
@@ -2633,6 +2661,7 @@ function topicPhase(t) {
 }
 // 실행기가 올린 주제별 판정(작업자 기록 queue.items). '다음' 문구를 실행기 실제 판정과 같게 한다
 const QUEUE_NEXT = { runnable: '다음 동기화 때 이어서', retry: '간격을 두고 다시 깨움(실패 뒤 10~30분 · 진척 없으면 30분~2시간)',
+  env: '환경 차단 — 같은 실행 실패가 이어져 이 안건만 1시간 간격(새 입력이 오면 바로), 다른 주제는 계속',
   waiting_answer: '아키텍트 답을 기다림', waiting_change: '이 단계는 처리함 — 변화가 없으면 30분(반복 시 2시간) 뒤 자동으로 다시 깨움', held: '대화 세션이 처리 중' };
 function queueOf(t) { return ((S.data.agents || []).find(a => a.id === t.turn) || {}).queue || null; }
 function queueCode(t) { const q = queueOf(t); return q && q.items ? q.items[t.id] || null : null; }
