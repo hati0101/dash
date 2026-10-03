@@ -304,6 +304,7 @@ def find_jobs(data: dict, state: dict, only: str | None = None) -> list[dict]:
                 continue
             reason = f"이 단계를 처리한 뒤 변화 없이 차례가 그대로라 다시 깨움({wait}분 간격)"
         jobs.append({"kind": "topic", "agent": who, "topic": t, "sig": sig, "mode": mode, "parts": parts, "reason": reason})
+    jobs = batch_plan_jobs(jobs)
     # 배포 묶음은 AI·운영 반영 없이 로컬 ZIP을 준비한다. 최신 데이터로 매번 구성원을 검증한다.
     if "server-astra" in agents and (only is None or only == "server-astra"):
         batches = sorted({(t.get("deploy_batch") or {}).get("id") for t in data.get("topics", [])
@@ -1870,6 +1871,168 @@ def run_agent(agent_id: str, pw: str, dry: bool) -> bool:
     return produced
 
 
+PLAN_BATCH = 5  # 한 번의 모델 호출로 최초 분해하는 최대 주제 수
+PRIORITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+
+
+def unplanned(t: dict) -> bool:
+    """사령탑이 아직 최초 분해(plan)를 하지 않은 주제: 새 흐름, 진행 단계, 작업 0개, revision 0, 관문·보관·보류·완료 아님."""
+    c = t.get("command") or {}
+    return bool(t.get("command_mode") and not t.get("archived") and not t.get("gate") and (t.get("stage") or "work") == "work"
+                and t.get("status") in ("new", "triage", "ready", "active") and not c.get("tasks") and not c.get("revision"))
+
+
+def batch_plan_jobs(jobs: list[dict]) -> list[dict]:
+    """사령탑 차례인 미분해 주제 일감을 P0·P1 → 오래 기다린 순으로 최대 PLAN_BATCH건씩 '한 번의 호출' 일감으로 묶는다.
+    나머지 일감(검수·시험·다른 작업자)은 그대로 둔다."""
+    import command
+    planq = [j for j in jobs if j["kind"] == "topic" and j["agent"] == command.LEAD and unplanned(j["topic"])]
+    if not planq:
+        return jobs
+    rest = [j for j in jobs if j not in planq]
+    planq.sort(key=lambda j: (PRIORITY_ORDER.get(j["topic"].get("priority") or "P2", 2),
+                              str(j["topic"].get("status_at") or j["topic"].get("created_at") or ""), j["topic"]["id"]))
+    groups = [planq[i:i + PLAN_BATCH] for i in range(0, len(planq), PLAN_BATCH)]
+    return [{"kind": "plan_batch", "agent": command.LEAD, "topic": None, "subjobs": g, "mode": "plan",
+             "sig": "plan-batch:" + ",".join(x["topic"]["id"] for x in g),
+             "reason": f"최초 분해 {len(g)}건 일괄(우선순위·대기순)"} for g in groups] + rest
+
+
+def roster_text(data: dict) -> str:
+    """배분 문맥: 작업자별 가용성·지금 업무량·사용량. 사용량은 확인 시각이 6시간 넘었거나 없으면 '미확인'(추정하지 않는다)."""
+    from topics import to_dt
+    locks = data.get("agent_locks") or {}
+    load: dict[str, int] = {}
+    for t in data.get("topics", []):
+        if t.get("archived") or t.get("status") in ("done", "dropped", "parked", "backlog"):
+            continue
+        for x in (t.get("command") or {}).get("tasks") or []:
+            if x.get("state") in ("ready", "review", "blocked"):
+                load[x.get("assignee")] = load.get(x.get("assignee"), 0) + 1
+    rows = []
+    for a in data.get("agents", []):
+        aid = a.get("id")
+        lk = (locks.get(aid) or {}).get("mode")
+        seen = a.get("last_seen") or a.get("pc_synced")
+        alive = bool(seen) and (now() - to_dt(seen)).total_seconds() < 150 * 60
+        u = a.get("usage") or {}
+        seen_u = u.get("seen_at") or u.get("at")
+        fresh = bool(seen_u) and (now() - to_dt(seen_u)).total_seconds() < 6 * 3600
+        parts = [f"{k} 남음 {100 - int(v.get('pct') or 0)}%" + (f"(초기화 {v.get('resets_at')})" if v.get("resets_at") else "")
+                 for k, v in u.items() if isinstance(v, dict) and "pct" in v] if fresh else []
+        state = "배정 불가(잠금)" if lk else ("신호 없음 — 배정하지 말 것" if not alive else "가능")
+        rows.append(f"- {aid} · {a.get('pc_label') or ''} {a.get('label') or ''} · {state} · 맡은 하위 작업 {load.get(aid, 0)}건 · 사용량 "
+                    + (", ".join(parts) if parts else "미확인(추정하지 말 것)"))
+    return "\n".join(rows) or "(작업자 정보 없음)"
+
+
+def plan_batch_prompt(subs: list[dict], data: dict) -> str:
+    """여러 주제의 최초 분해를 한 번에 쓰는 사령탑 지시문. 답은 주제마다 command plan 하나(task 칸에 주제 ID)."""
+    blocks = []
+    for j in subs:
+        t = j["topic"]
+        ctx = t.get("prior_context")
+        ctx = json.dumps(ctx, ensure_ascii=False)[:1500] if ctx else "(없음)"
+        blocks.append(f"### {t['id']} · {t.get('title')}\n- 우선순위 {t.get('priority') or 'P2'} · 종류 {t.get('kind') or '-'} · 대기 시작 {t.get('status_at') or t.get('created_at')}\n"
+                      f"- 이전 작업물: {t.get('reference_work') or t.get('work_id') or '(없음)'} · 재시작 전 주제: {t.get('restart_of') or '(없음)'}\n"
+                      f"- 원래 목표·메모:\n{(t.get('body') or '').strip()[:1500]}\n- 이전 문맥: {ctx}")
+    ids = ", ".join(j["topic"]["id"] for j in subs)
+    return f"""너는 REAL 작업실의 최종 사령탑 server-astra다. 아래 {len(subs)}개 주제는 아직 작업 분해 전(배정 대기)이다.
+이번 한 번의 답으로 각 주제의 최초 작업 분해(plan)를 모두 작성한다. 주제마다 따로 판단하고, 한 주제가 애매해도 다른 주제는 정상으로 작성한다.
+
+## 배정 규칙
+- 하위 작업은 1~24개. 각 항목: id(영문·숫자·하이픈, 주제 안에서 고유), title, scope, done_when, assignee, depends_on(앞에서 정의한 id만).
+- 작업자 역할: dev-claude = 구현·빌드·격리 시험(개발 트리 권한), dev-astra = 조사·기획·교차 검토, server-claude = 읽기 조사·근거 정리·독립 검토만(운영 쓰기 금지),
+  server-astra(너) = 분배·검수만 — 너에게 구현 작업을 배정하지 않는다.
+- 아래 작업자 현황에서 '배정 불가'·'신호 없음'인 작업자에게 배정하지 않는다. 맡은 작업이 많은 작업자보다 여유 있는 작업자를 고른다.
+  사용량이 '미확인'이면 추정하지 말고 업무량만 본다. 같은 계정의 여유를 PC별로 따로 더하지 않는다.
+- 실게임 확인이 필요한 구현은 human_test=true(기본). 조사·기획만이면 tests 없이 작업만.
+- 운영 서버 변경은 계획에 넣지 않는다(배포는 ★7 승인 뒤 배포 대기열 → 묶음 배포 대화에서만).
+
+## 작업자 현황(배분 문맥)
+{roster_text(data)}
+
+## 주제({ids})
+{chr(10).join(blocks)}
+
+## 답 형식(JSON 하나만)
+{{"summary": "한 줄 요약", "actions": [{{"type": "command", "cmd": "plan", "task": "<주제 ID>", "body": "<JSON 문자열: {{\"tasks\":[...],\"human_test\":true,\"test_reason\":\"...\"}}>",
+  "kind": null, "status": null, "plan": null, "work_id": null, "question": null, "options": null, "title": null, "origin": null, "to": null, "file": null, "edits": null}}]}}
+주제마다 plan 행동은 정확히 하나. task 칸에 그 주제 ID를 넣는다. 다른 행동(note·ask·state 등)은 쓰지 않는다.
+"""
+
+
+def run_plan_batch(j: dict, data: dict, state: dict) -> bool:
+    """일괄 최초 분해: 모델 호출 1번 → 주제별로 나눠 기존 검증으로 적용. 빠지거나 틀린 주제만 다음 회차에 다시(채택된 계획은 덮지 않는다)."""
+    agent_id = j["agent"]
+    agent = node.my_agents(CFG)[agent_id]
+    subs = j["subjobs"]
+    tag = f"{now():%Y%m%d-%H%M%S}-{agent_id}-plan{len(subs)}"
+    rids = {x["topic"]["id"]: node.start_run(CFG, agent_id, x["topic"]["id"], "topic", "plan", j["reason"]) for x in subs}
+    log(f"깨움 {agent_id} ← 최초 분해 일괄 {len(subs)}건: {', '.join(rids)}")
+    j["runner"] = agent.get("runner") or ("codex" if agent.get("ai") == "gpt" else "claude")
+    try:
+        return _plan_batch_body(j, data, state, agent, agent_id, subs, tag, rids)
+    except Exception as exc:  # noqa: BLE001
+        for rid in rids.values():
+            node.end_run(CFG, rid, result="fail", error=f"실행기 예외 {type(exc).__name__}: {exc}"[:500], error_class="error",
+                         needs_user=False, fix="10분 뒤 자동으로 다시 시도합니다")
+        for x in subs:
+            st = job_state(state, x)
+            st["retry_after"], st["retry_kind"] = (now() + timedelta(minutes=10)).isoformat(timespec="seconds"), "error"
+        raise
+
+
+def _plan_batch_body(j, data, state, agent, agent_id, subs, tag, rids) -> bool:
+    text, err, detail = run_ai(agent, plan_batch_prompt(subs, data), tag, None)
+    result = None
+    if not err:
+        try:
+            result = parse_actions(text)
+        except ValueError as exc:
+            err, detail = f"답 해석 실패: {exc}", text[-500:]
+    retry = (now() + timedelta(minutes=10)).isoformat(timespec="seconds")
+    if err:
+        cls, needs_user, fix = classify(err, detail, j["runner"])
+        log(f"  실패({cls}): {err} {detail[-200:]!r}")
+        node.set_health(CFG, agent_id, cls, f"{err} {detail[-300:]}".strip(), needs_user, fix)
+        for x in subs:
+            st = job_state(state, x)
+            st["retry_after"], st["retry_kind"] = retry, "error"
+            node.end_run(CFG, rids[x["topic"]["id"]], result="fail", error=f"{err} {detail[-300:]}".strip()[:500], error_class=cls, needs_user=needs_user, fix=fix)
+        return True
+    node.set_health(CFG, agent_id, "ok", "정상 실행")
+    by: dict[str, list] = {}
+    for a in result.get("actions") or []:
+        if isinstance(a, dict):
+            by.setdefault(str(a.get("task") or ""), []).append(a)
+    ok = 0
+    for x in subs:
+        t, st = x["topic"], job_state(state, x)
+        mine = by.get(t["id"], [])
+        plans = [a for a in mine if a.get("type") == "command" and a.get("cmd") == "plan"]
+        failed = [f"일괄 계획에서 무시한 행동 {len(mine) - len(plans[:1])}건(plan 하나만 받음)"] if len(mine) > len(plans[:1]) else []
+        if not plans:
+            failed.append("일괄 계획 답에 이 주제의 plan이 없음 — 다음 회차에 다시")
+            done = []
+        else:
+            act = dict(plans[0])
+            act.pop("task", None)
+            done, more = apply(dict(x, mode="plan"), {"actions": [act], "summary": result.get("summary") or ""}, data)
+            failed += more
+        if "command" in done:
+            ok += 1
+            mark_done(st, x)
+            for k in ("retry_after", "retry_kind", "idle_runs", "idle_since"):
+                st.pop(k, None)
+        else:
+            st["retry_after"], st["retry_kind"] = retry, "slow"
+        node.end_run(CFG, rids[t["id"]], result="ok" if "command" in done and not failed else "partial",
+                     summary=(result.get("summary") or "")[:500], actions=done[:20], failed=failed[:10])
+    log(f"  일괄 분해 결과: {ok}/{len(subs)}건 채택")
+    return True
+
+
 def job_state(state: dict, j: dict) -> dict:
     """주제 단위 상태(하루 한도·재시도). 주제 없는 질문의 답은 그 신호 단위로."""
     t = j.get("topic") or {}
@@ -1928,6 +2091,8 @@ def note_skip(st: dict, agent_id: str, tid: str, reason: str):
 
 
 def run_job(j: dict, data: dict, state: dict) -> bool:
+    if j.get("kind") == "plan_batch":
+        return run_plan_batch(j, data, state)
     if j.get("kind") == "batch":
         import release_queue
         rows = []
@@ -2104,7 +2269,9 @@ def run_job(j: dict, data: dict, state: dict) -> bool:
 
 def queue_summary(aid: str, data: dict, state: dict) -> dict:
     """이 작업자 차례인 주제가 지금 왜 돌거나 안 도는지 센다(대시보드 작업자 카드에 '쉬는 중' 대신 보여 준다)."""
-    runnable = {(j.get("topic") or {}).get("id") or j["sig"] for j in find_jobs(data, copy.deepcopy(state), only=aid)}
+    runnable = set()
+    for j in find_jobs(data, copy.deepcopy(state), only=aid):  # 일괄 분해 일감은 묶인 주제들을 각각 '곧 실행'으로
+        runnable |= {x["topic"]["id"] for x in j.get("subjobs") or []} or {(j.get("topic") or {}).get("id") or j["sig"]}
     answered = {a["id"] for a in data.get("decisions_answered", [])}
     asking = {q.get("task_id") for q in data.get("decisions_needed", []) if q.get("_author") == aid and q["id"] not in answered
               and q.get("kind") not in ("gate", "stall")}  # AI가 직접 올린 질문만 '답 대기'로 센다
