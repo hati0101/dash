@@ -1100,6 +1100,7 @@ function mineSummary(all) {
     ['착수 고르기', n(i => i.type === 'backlog'), () => { S.f.mine = 'backlog'; }],
     ['보류', S.d.topics.filter(t => t.status === 'parked').length, () => go('parked')],
     ['배포 대기열', S.d.topics.filter(t => t.status === 'active' && t.stage === 'queue').length, () => go('deploy')],
+    ['배포 대화 대기(묶음)', new Set(S.d.topics.filter(t => t.status === 'active' && t.deploy_session && t.deploy_batch).map(t => t.deploy_batch.id)).size, () => go('deploy')],
     ['헛도는 중', S.d.missed.filter(m => m.key.startsWith('idle:')).length, null],
   ];
   return h('div', { class: 'mine-summary' }, parts.map(([l, c, act]) => h(act && c ? 'button' : 'span', {
