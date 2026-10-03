@@ -237,7 +237,7 @@ class Workflow(unittest.TestCase):
         stale=topics.run_gates(t,finishes[:2]+[(ts(4),'dev-claude','예전 통과 재사용')],rejected,KNOWN)
         self.assertEqual(stale['stage'],'test');self.assertIsNone(stale['gate']);self.assertFalse(stale['live'])
         self.assertEqual(topics.whose_turn(dict(status='active',stage='test',command_mode=True,live_session=stale['live'],test_reset_needed=True)), command.LEAD)
-        retry=command.transition(t['command'],dict(event_id='reset',revision=t['command']['revision'],agent=command.LEAD,op='test-reset',body='반려 원인 수정',ts=ts(4)),KNOWN)
+        retry=command.transition(t['command'],dict(event_id='reset',review_gate_id=first['gate']['id'],revision=t['command']['revision'],agent=command.LEAD,op='test-reset',body='반려 원인 수정',ts=ts(4)),KNOWN)
         for check in retry['tests']:
             for op in ('test-start','test-pass','test-accept'):
                 retry=command.transition(retry,dict(event_id=f"retry-{check['id']}-{op}",revision=retry['revision'],agent=command.LEAD if op=='test-accept' else 'dev-claude',op=op,task_id=check['id'],body='재시험 완료',ts=ts(5),evidence=[{'path':'fixture/newlog','sha256':'b'*64}]),KNOWN)

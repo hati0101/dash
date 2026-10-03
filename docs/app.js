@@ -1537,7 +1537,10 @@ function workOf(t, agentId) {
   if (t.archived || ['done', 'dropped', 'parked', 'backlog'].includes(t.status)) return null;
   if (t.command_mode && t.assignee === agentId && !(t.command?.tasks || []).length) return null;  // 사령탑 연결만(작업 나누기 전) = 배정 대기 — 맡은 일로 세지 않음(commandOf)
   const items = [];
-  for (const x of (t.command?.tasks || [])) if (x.assignee === agentId && ['ready', 'review', 'blocked'].includes(x.state)) items.push({ kind: '작업', x });
+  for (const x of (t.command?.tasks || [])) {
+    if (x.assignee === agentId && ['ready', 'review', 'blocked'].includes(x.state)) items.push({ kind: '작업', x });
+    if (x.reviewer === agentId && x.state === 'review' && !x.review) items.push({ kind: '검수', x });  // 검수 실무 위임(r5)
+  }
   if (t.stage === 'test') for (const x of (t.command?.tests || [])) if (x.assignee === agentId && ['running', 'pending', 'failed', 'blocked'].includes(x.state)) items.push({ kind: '시험', x });
   const myTurn = t.turn === agentId;
   if (!items.length && !myTurn) return null;
@@ -1545,11 +1548,14 @@ function workOf(t, agentId) {
   let state;
   if (isRunning(run)) state = { key: 'running', label: '실행 중', cls: 'progress' };
   else if (items.some(i => i.x.state === 'blocked')) state = { key: 'blocked', label: '막힘 · Astra 조정', cls: 'blocked' };
-  else if (items.length && items.every(i => i.x.state === 'review')) state = { key: 'review', label: 'Astra 검수 대기', cls: 'user_test' };
+  else if (items.length && !myTurn && items.every(i => i.kind === '작업' && i.x.state === 'review')) {
+    const rv = items.find(i => i.x.reviewer && !i.x.review)?.x.reviewer;
+    state = { key: 'review', label: rv ? `검수 대기 · ${person(rv).full}` : 'Astra 검수 대기', cls: 'user_test' };
+  }
   else if (myTurn) state = run ? { key: 'started', label: `진행함 · 마지막 실행 ${fmtRel(run.ended || run.started)}`, cls: 'progress' } : { key: 'waiting', label: '착수 대기', cls: 'neutral' };
   else state = { key: 'queued', label: '순서 대기(앞 작업 뒤)', cls: 'neutral' };
   const n = k => items.filter(i => i.kind === k).length;
-  const what = [n('작업') ? `작업 ${n('작업')}` : null, n('시험') ? `시험 ${n('시험')}` : null].filter(Boolean).join(' · ') || turnWhy(t, agentId);
+  const what = [n('작업') ? `작업 ${n('작업')}` : null, n('검수') ? `검수 ${n('검수')}` : null, n('시험') ? `시험 ${n('시험')}` : null].filter(Boolean).join(' · ') || turnWhy(t, agentId);
   return { t, items, state, what };
 }
 function agentWork(agentId) {
@@ -3327,7 +3333,11 @@ function commandBox(t) {
     rows.map(x => h('details', { class: 'command-task', open: x.state === 'review' || x.state === 'blocked' },
       h('summary', null, h('b', null, x.title), h('span', { class: 'tag' }, labels[x.state] || x.state), h('span', { class: 'muted' }, person(x.assignee).full)),
       h('dl', { class: 'fields' }, h('dt', null, '맡은 범위'), h('dd', null, x.scope), h('dt', null, '완료 기준'), h('dd', null, x.done_when),
-        h('dt', null, '선행 작업'), h('dd', null, (x.depends_on || []).join(', ') || '없음')),
+        h('dt', null, '선행 작업'), h('dd', null, (x.depends_on || []).join(', ') || '없음'),
+        x.reviewer ? [h('dt', null, '검수 담당'), h('dd', null, person(x.reviewer).full + (x.state === 'review' && !x.review ? ' · 검수 중' : ''))] : null),
+      x.review ? h('div', { class: 'callout' }, h('b', null, `검수 보고 · ${person(x.review.by).full} · ${x.review.verdict === 'pass' ? '문제 없음' : '문제 있음'}`),
+        h('p', null, x.review.summary), h('details', null, h('summary', null, `검수 근거 ${(x.review.evidence || []).length}개`),
+          (x.review.evidence || []).map(e => h('p', { class: 'mono' }, e.path + ' · SHA256 ' + e.sha256)))) : null,
       x.feedback ? h('p', null, (x.accepted_acting_for ? '개발컴 대행 검수: ' : 'Astra 검토: ') + x.feedback) : null,
       x.result ? [h('p', null, x.result.summary), h('details', null, h('summary', null, `검증 근거 ${(x.result.evidence || []).length}개`),
         (x.result.evidence || []).map(e => h('p', { class: 'mono' }, e.path + ' · SHA256 ' + e.sha256)))] : null)),

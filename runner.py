@@ -204,6 +204,10 @@ def sig_parts(t: dict, who: str, mode: str, data: dict, st: dict) -> dict:
         meaningful = [e for e in state.get('events', []) if e.get('op') != 'test-progress']
         revision = meaningful[-1].get('revision', 0) if meaningful else (0 if state.get('events') else state.get('revision', 0))
         stage = f"command-{revision}"
+        import command
+        back = command.pending_return(t)
+        if back and who == command.LEAD:
+            stage += f"-return-{back.get('id')}"  # r5 I-1: ★40 보완·★4 반려 답이 오면 사령탑을 30분 재확인 없이 바로 깨운다(답 신호)
     return {"stage": stage, "mode": mode, "others": others, "talk": talk, "cont": st.get("cont", 0), "replies": replies}
 
 
@@ -1574,6 +1578,14 @@ def apply(job: dict, result: dict, data: dict | None = None) -> tuple[list[str],
             if managed and typ == "state" and a.get("status") == "done":
                 if agent != command.LEAD or not command.finished(t.get("command") or command.initial()):
                     raise ValueError("작업자는 command submit, 사령탑은 모든 작업 수락 후 끝냄을 사용하세요")
+                back = command.unfinished_return(t)
+                if back:  # r5 I-1: 단계 판정이 조용히 버리던 끝냄을 실행기가 이유와 함께 돌려준다
+                    if command.pending_return(t, ("work",)):
+                        raise ValueError(f"관문 {back.get('id')}에서 아키텍트가 보완을 요청해 되돌아온 조사 주제입니다. 끝냄 전에 "
+                                         "command cmd=amend, body=JSON {tasks:[기존 작업 그대로 + 추가 조사 작업]}로 추가 조사를 배정하고, "
+                                         "그 작업을 수락한 뒤 끝내세요")
+                    raise ValueError(f"관문 {back.get('id')} 보완으로 더하거나 바꾼 조사 작업이 아직 하나도 수락되지 않았습니다. "
+                                     "그 작업의 제출을 검수해 accept한 뒤 끝내세요(취소만 하고 끝낼 수 없음)")
             if t.get("command_mode") and typ == "state" and a.get("status") == "done" and t.get("stage") == "test":
                 import testflow
                 checks = (t.get("command") or {}).get("tests", [])
@@ -1636,6 +1648,8 @@ def apply(job: dict, result: dict, data: dict | None = None) -> tuple[list[str],
                 continue
             elif typ == "state" and tid and a.get("status") in STATUSES:
                 receipt = {}
+                if t.get('command_mode') and a.get('status') == 'done':
+                    receipt['command_revision'] = (t.get('command') or {}).get('revision', 0)
                 if t.get('command_mode') and a.get('status') == 'done' and t.get('stage') in ('pack','prep'):
                     import release_queue
                     wid = job.get('work_id') or t.get('work_id')
@@ -1644,7 +1658,7 @@ def apply(job: dict, result: dict, data: dict | None = None) -> tuple[list[str],
                         release_queue.require_pin(package, (t.get('package_receipts') or {}).get('pack'))
                         dst = ROOT / '.local' / 'release-candidates' / tid / 'candidate.zip'
                         release_queue.export_packages([package], WORK_PY.parent, dst, batch=tid)
-                    receipt = {'package_stage': t['stage'], 'package_sha256': package['manifest_sha256']}
+                    receipt.update(package_stage=t['stage'], package_sha256=package['manifest_sha256'])
                 node.add_topic_record(CFG, tid, agent, "status", status=a["status"], body=body or f"상태 {a['status']}",
                                       linked_task_id=a.get("task") if a.get("task") and node.REF_RE.match(a["task"]) else None, **receipt)
             elif typ == "handoff" and tid:
@@ -1941,9 +1955,10 @@ def plan_batch_prompt(subs: list[dict], data: dict) -> str:
 이번 한 번의 답으로 각 주제의 최초 작업 분해(plan)를 모두 작성한다. 주제마다 따로 판단하고, 한 주제가 애매해도 다른 주제는 정상으로 작성한다.
 
 ## 배정 규칙
-- 하위 작업은 1~24개. 각 항목: id(영문·숫자·하이픈, 주제 안에서 고유), title, scope, done_when, assignee, depends_on(앞에서 정의한 id만).
+- 하위 작업은 1~24개. 각 항목: id(영문·숫자·하이픈, 주제 안에서 고유), title, scope, done_when, assignee, depends_on(앞에서 정의한 id만), reviewer(선택).
 - 작업자 역할: dev-claude = 구현·빌드·격리 시험(개발 트리 권한), dev-astra = 조사·기획·교차 검토, server-claude = 읽기 조사·근거 정리·독립 검토만(운영 쓰기 금지),
-  server-astra(너) = 분배·검수만 — 너에게 구현 작업을 배정하지 않는다.
+  server-astra(너) = 분배·최종 수락/반려만 — 너에게 구현 작업을 배정하지 않는다.
+- 검수 실무 위임(선택): 작업에 reviewer(그 작업 담당이 아닌 작업자, 보통 server-claude)를 적으면 제출 뒤 검수 담당이 근거를 대조해 보고하고, 너는 그 보고로 수락/반려만 한다.
 - 아래 작업자 현황에서 '배정 불가'·'신호 없음'인 작업자에게 배정하지 않는다. 맡은 작업이 많은 작업자보다 여유 있는 작업자를 고른다.
   사용량이 '미확인'이면 추정하지 말고 업무량만 본다. 같은 계정의 여유를 PC별로 따로 더하지 않는다.
 - 실게임 확인이 필요한 구현은 human_test=true(기본). 조사·기획만이면 tests 없이 작업만.
@@ -2066,6 +2081,7 @@ def stage_doer(t: dict) -> str | None:
     if t.get("live_session"):
         return LIVE_AGENT
     if t.get('command_mode') and t.get('stage') == 'test':
+        if t.get('test_reset_needed'): return 'server-astra'
         import testflow
         check=testflow.current((t.get('command') or {}).get('tests',[]))
         if check:

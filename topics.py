@@ -455,7 +455,7 @@ def apply_action(cfg, a: dict, source: str) -> str:
         result = f"작업자 {a['agent']} " + (("배정 잠금" if a["mode"] == "assign" else "배정 잠금 + 자동 실행 멈춤") if a["lock"] else "잠금 풀림")
     elif a["type"] == "topic-resume":
         # 보류한 주제 다시 진행(아키텍트 2026-10-03): 관문에서 보류했으면 그 관문이 다시 열리고, 진행 중 보류면 진행 중으로 돌아간다(엔진)
-        rec["topic_resume"].append({"topic": a["topic"], "note": a["note"], "ts": a["created_at"] or ts})
+        rec["topic_resume"].append({"topic": a["topic"], "note": a["note"], "ts": a["created_at"] or ts, "rx": ts})
         write_inbox(bridge / "inbox-claude", f"USR-RESUME-{a['id']}", f"[사용자 → Claude] 보류 주제 다시 진행: {a['topic']}",
                     {"sender": "user (대시보드)", "recipient": "claude", "kind": "user resume parked topic", "task_id": a["topic"]},
                     a["note"] or "대시보드 '보류' 메뉴에서 다시 진행을 골랐습니다.")
@@ -490,7 +490,7 @@ def apply_action(cfg, a: dict, source: str) -> str:
         result = f"주제 {len(drop)}건 {'되살림' if a['restore'] else '삭제(목록에서 뺌)'}"
     else:  # decide
         rec["decisions_answered"] = [r for r in rec["decisions_answered"] if r.get("id") != a["target"]]
-        rec["decisions_answered"].append({"id": a["target"], "choice": a["choice"], "note": a["note"], "ts": a["created_at"] or ts})
+        rec["decisions_answered"].append({"id": a["target"], "choice": a["choice"], "note": a["note"], "ts": a["created_at"] or ts, "rx": ts})
         write_inbox(bridge / "inbox-claude", f"USR-DECIDE-{a['id']}", f"[사용자 → Claude] 결정: {a['target']} → {a['choice'] or '(메모)'}",
                     {"sender": "user (대시보드)", "recipient": "claude", "kind": "user decision via dashboard", "in_reply_to": a["target"]},
                     (a["choice"] or "") + (f"\n\n{a['note']}" if a["note"] else ""))
@@ -822,19 +822,21 @@ def owners_at(t: dict, ts) -> set:
 def finish_counts(by: str, stage: str, live: bool, t: dict, known, ts, after=None) -> bool:
     """그 단계 담당의 끝냄만 다음 단계로 넘긴다(새 규칙). 교차 검토자·요청받은 작업자·남은 답 처리 작업의 done은 세지 않는다."""
     if t.get("command_mode"):
-        if stage == "work":
-            import command
-            events = [e for e in (t.get("command") or {}).get("events", []) if to_dt(e.get("ts")) <= to_dt(ts)]
-            return by == LEAD and command.finished(command.project(events, known or {LEAD, LIVE_AGENT}))
-        if stage in ("prep", "deploy"):
-            return by == LEAD
-        if stage == "test":
-            import command, testflow
-            events = [e for e in (t.get("command") or {}).get("events", []) if to_dt(e.get("ts")) <= to_dt(ts)]
-            state = command.project(events, known or {LEAD, LIVE_AGENT})
-            return by == stage_owner(stage, t, known) and testflow.finished(state.get("tests", [])) and all(to_dt(x.get("updated_at")) > to_dt(after) for x in state.get("tests", []))
-        if stage == "pack":
-            return by == stage_owner(stage, t, known)
+        import command, testflow
+        revision = t.get('_finish_revisions', {}).get(str(ts)+'|'+str(by))
+        events = [e for e in (t.get('command') or {}).get('events', []) if
+                  (e['revision'] < revision if revision is not None else to_dt(e.get('ts')) <= to_dt(ts))]
+        state = command.project(events, known or {LEAD, LIVE_AGENT})
+        returned = t.get('_return_gate')
+        if stage == 'work':
+            reopened = not returned or returned.get('act') != 'work' or command.return_cleared(events, returned, state.get('tasks', []))
+            return by == LEAD and reopened and command.finished(state)
+        if stage in ('prep','deploy'): return by == LEAD
+        if stage == 'test':
+            reset = not returned or any(e.get('op') == 'test-reset' and command.linked(e, returned) for e in events)
+            fresh = reset if returned else all(to_dt(x.get('updated_at')) > to_dt(after) for x in state.get('tests', []))
+            return by == stage_owner(stage,t,known) and fresh and testflow.finished(state.get('tests', []))
+        if stage == 'pack': return by == stage_owner(stage,t,known)
     if to_dt(ts) < RULES_V2_FROM:
         return True  # 옛 기록은 그때 판정 그대로
     # 끝낸 시각의 담당으로 판정한다: 담당이 나중에 바뀌어도(자동 이관·인계·아키텍트 지정) 그때 담당의 끝냄은 그대로 인정되고,
@@ -901,11 +903,41 @@ def gate_id(n: int, tid: str, ts) -> str:
     return f"G{n}-{tid[2:]}-{to_dt(ts).astimezone(KST):%Y%m%d%H%M%S}"
 
 
+def answer_at(rec: dict):
+    """아키텍트 기록(관문 답·다시 진행)의 판정 시각. 허브 수신 시각(rx)보다 늦은 브라우저 시각은 쓰지 않는다(시계가 빠른 기기, r5)."""
+    ts, rx = rec.get("ts"), rec.get("rx")
+    return rx if rx and (not ts or to_dt(rx) < to_dt(ts)) else ts
+
+
+def _later(a, b):
+    """기준 시각은 뒤로 가지 않는다(r5 I-2): 두 시각 중 늦은 것."""
+    return b if a is None or (b is not None and to_dt(b) > to_dt(a)) else a
+
+
+def _after(r: dict, ans: dict) -> bool:
+    """다시 진행(r)이 보류 답(ans) 뒤인가. 둘 다 허브 수신 시각이 있으면 그것으로(같은 시계), 없으면 브라우저 시각으로."""
+    if r.get("rx") and ans.get("rx") and to_dt(r["rx"]) != to_dt(ans["rx"]):
+        return to_dt(r["rx"]) > to_dt(ans["rx"])
+    return to_dt(r.get("ts")) > to_dt(ans.get("ts"))  # 같은 동기화(같은 초)에 함께 받았으면 브라우저 순서로
+
+
 def run_gates(t: dict, finishes: list, answered: dict, known=None) -> dict:
-    """AI의 끝냄 기록과 아키텍트 관문 답을 시간순으로 따라가 지금 단계·관문을 정한다."""
+    """AI의 끝냄 기록과 아키텍트 관문 답을 시간순으로 따라가 지금 단계·관문을 정한다.
+    r5(I-2): 기준 시각 since는 뒤로 가지 않고, 한 번 단계를 넘긴 끝냄은 다시 쓰지 않으며, 다시 진행·배포 묶음 기록도 한 번씩만 쓴다.
+    시계가 다른 PC·브라우저의 기록이 섞여도 이미 처리한 끝냄을 다시 읽어 순환하지 않는다."""
     # live: ★4 실게임(격리 서버) 시험이 열린 뒤 통과할 때까지는 개발컴 Claude 대화 세션 단계(아키텍트 결정 2026-10-02).
     # 이 동안 자동 실행기는 깨우지 않고, '문제 있음'으로 되돌아온 수정도 대화에서 고쳐 끝내면 자체 시험 없이 바로 ★4로 돌아온다.
+    t.pop('_return_gate', None)
     stage, since, gate, history, final, live = "work", None, None, [], None, False
+    used_resume, mcur, ret_at = set(), None, None  # 쓴 다시 진행 기록, 마지막으로 처리한 배포 묶음 기록 시각, 마지막 반려 답 시각
+
+    def fresh(n, ts):
+        """새로 여는 관문 ID. 시계가 다른 기록이 같은 초에 찍혀 이미 쓴 관문 ID와 겹치면 1초씩 민다(이미 답한 관문으로 오인 방지, r5)."""
+        gid, d = gate_id(n, t["id"], ts), to_dt(ts)
+        while gid in {h_.get("id") for h_ in history}:
+            d += timedelta(seconds=1)
+            gid = gate_id(n, t["id"], d)
+        return gid
     batch, prep = None, None  # 8b 배포 묶음 번호, 마지막 배포 준비 끝냄
     moves = sorted((m for m in t.get("_batch_moves") or () if m.get("ts")), key=lambda m: to_dt(m["ts"]))
     fin = sorted(finishes, key=lambda f: to_dt(f[0]))
@@ -921,18 +953,18 @@ def run_gates(t: dict, finishes: list, answered: dict, known=None) -> dict:
     t["_anchor_by"] = {f[1] for f in fin if stamp(f[0]) in early}
     for _ in range(300):
         if gate is None and stage in ("queue", "deploy"):
-            later = [m for m in moves if since is None or to_dt(m["ts"]) >= to_dt(since)]
+            later = [m for m in moves if (to_dt(m["ts"]) > to_dt(mcur) if mcur else (since is None or to_dt(m["ts"]) >= to_dt(since)))]
             if stage == "queue":  # 배포 대기열: 아키텍트가 묶음에 넣으면 8b 배포(서버컴 대화)
                 add = next((m for m in later if m.get("batch")), None)
                 if not add:
                     break
-                stage, since, batch = "deploy", add["ts"], add["batch"]
+                stage, since, batch, mcur = "deploy", _later(since, add["ts"]), add["batch"], add["ts"]
                 continue
             # 8b 배포 중 묶음에서 빼면(또는 다른 묶음으로 옮기면) 배포 완료 끝냄보다 먼저인 것부터 따른다
             nf = next((f for f in fin if to_dt(f[0]) > to_dt(since) and str(f[1]).startswith("server-")), None)
             mv = next((m for m in later if m.get("batch") != batch), None)
             if mv and (not nf or to_dt(mv["ts"]) < to_dt(nf[0])):
-                since = mv["ts"]
+                since, mcur = _later(since, mv["ts"]), mv["ts"]
                 if mv.get("batch"):
                     batch = mv["batch"]
                 else:
@@ -943,18 +975,18 @@ def run_gates(t: dict, finishes: list, answered: dict, known=None) -> dict:
             if not nxt:
                 break
             ts, by, body = nxt
+            fin = [f for f in fin if f is not nxt]  # 끝냄 하나는 한 번만 쓴다(넘겼든 버렸든 — 다시 읽어 순환하지 않게, r5 I-2)
             if stamp(ts) not in anchored and not finish_counts(by, stage, live, t, known, ts, since):
-                fin = [f for f in fin if f is not nxt]  # 그 단계 담당이 아닌 작업자의 끝냄: 단계를 넘기지 않는다
-                continue
-            since = ts
+                continue  # 그 단계 담당이 아닌 작업자의 끝냄: 단계를 넘기지 않는다
+            since = _later(since, ts)
             if stage == "prep":  # 배포 준비 끝 → 배포 대기열(관문 없음, 아키텍트가 묶음을 만들 때까지 기다림)
-                stage, prep = "queue", {"at": ts, "by": by, "summary": body}
+                stage, prep, mcur = "queue", {"at": ts, "by": by, "summary": body}, None
                 continue
             if stage == "work" and not live and not is_research(t, body, ts):
                 stage = "test"  # 진행 끝 → AI 자체 시험(관문 없음)
                 continue
             n = (4 if live else 40) if stage == "work" else STAGE_GATE[stage]
-            gate = {"n": n, "id": gate_id(n, t["id"], ts), "opened_at": ts, "by": by, "summary": body, "from_stage": stage,
+            gate = {"n": n, "id": fresh(n, ts), "opened_at": ts, "by": by, "summary": body, "from_stage": stage,
                     **({"batch": batch} if stage == "deploy" and batch else {})}
             live = live or n == 4
         ans = answered.get(gate["id"])
@@ -966,20 +998,28 @@ def run_gates(t: dict, finishes: list, answered: dict, known=None) -> dict:
         act = gate_action(gate["n"], ans)
         if t.get("command_mode"):
             if act == "work":
-                act = "test"
-                live = False  # 실게임 반려: 사령탑 test-reset 후 자동 시험부터 다시 진행.
+                act = "work" if gate["n"] == 40 and is_research(t) else "test"
+                live = False
         history.append({**gate, "choice": ans.get("choice"), "note": ans.get("note"), "answered_at": ans.get("ts"), "act": act})
-        since = ans.get("ts") or since
+        if t.get("command_mode") and act in ("work", "test"):
+            t['_return_gate'] = history[-1]  # 답의 브라우저 시각 대신 관문 ID로 재작업(amend·test-reset)을 연결.
+            ret_at = _later(ret_at, answer_at(ans))  # 상태 시각(status_at)용. 끝냄 판정 하한(since)에는 쓰지 않는다
+            # since는 그대로(관문을 연 시점): 답의 브라우저 시각을 다음 끝냄의 하한으로 쓰지 않는다
+        else:
+            since = _later(since, answer_at(ans))
         prev, gate = gate, None
         if act == "park":
             # 보류 뒤 아키텍트가 '다시 진행'을 골랐으면 보류했던 관문을 그 시각으로 다시 연다(보류 메뉴, 2026-10-03)
-            later = sorted((r for r in t.get("_resume") or () if to_dt(r) > to_dt(since)), key=to_dt)
+            # 보류 답과 다시 진행은 같은 아키텍트 기록끼리(허브 수신 순서) 비교한다. AI 끝냄 시각(since)과 비교하지 않는다(r5 I-2)
+            later = sorted((r for r in t.get("_resume") or () if r.get("ts") and r["ts"] not in used_resume and _after(r, ans)), key=lambda r: to_dt(r["ts"]))
             if later:
-                history[-1]["resumed_at"] = later[0]
-                gate = {**prev, "id": gate_id(prev["n"], t["id"], later[0]), "opened_at": later[0],
+                r0 = later[0]
+                used_resume.add(r0["ts"])
+                history[-1]["resumed_at"] = r0["ts"]
+                gate = {**prev, "id": fresh(prev["n"], r0["ts"]), "opened_at": r0["ts"],
                         "summary": f"{prev.get('summary') or ''}\n\n[아키텍트 다시 진행 — 보류 해제]".strip()}
                 gate.pop("legacy_id", None)
-                since = later[0]
+                since = _later(since, answer_at(r0))
                 continue
         if act == "followup":
             # 후속 주제가 모두 삭제되면 ★결과 확인을 다시 연다(삭제 시각 번호). 이미 그 번호로 답했으면(후속을 다시 만든 뒤) 같은 길로 재판정
@@ -989,29 +1029,31 @@ def run_gates(t: dict, finishes: list, answered: dict, known=None) -> dict:
                      else t.get("_followups_dropped_at") if t.get("_followups_dropped_at") and to_dt(t["_followups_dropped_at"]) > to_dt(since) else None)
             if re_at:
                 history[-1]["followup_dropped_at"] = re_at
-                gate = {**prev, "id": gate_id(40, t["id"], re_at), "opened_at": re_at,
+                gate = {**prev, "id": fresh(40, re_at), "opened_at": re_at,
                         "summary": f"{prev.get('summary') or ''}\n\n[후속 주제가 삭제됨 — 후속 구현을 다시 만들지, 완료로 둘지 정해 주세요]".strip()}
                 gate.pop("legacy_id", None)
-                since = re_at
+                since = _later(since, re_at)
                 continue
         if act in ("park", "done", "followup"):
             final, live = ("done" if act == "followup" else act), False
             break
         if act == "regate":  # 메모만 온 ★7: 같은 관문을 메모와 함께 다시 연다(조용한 보류 방지)
-            gate = {**prev, "id": gate_id(prev["n"], t["id"], since), "opened_at": since, "summary": f"{prev.get('summary') or ''}\n\n[아키텍트 메모] {ans.get('note') or ''}".strip()}
+            gate = {**prev, "id": fresh(prev["n"], ans.get("ts") or since), "opened_at": ans.get("ts") or since, "summary": f"{prev.get('summary') or ''}\n\n[아키텍트 메모] {ans.get('note') or ''}".strip()}
             gate.pop("legacy_id", None)
             continue
         if act == "open5":
             live = False  # 실게임 통과 → 대화 세션 단계 끝, 다시 자동 흐름
             # ★5 번호는 ★4 번호에서 정한다(G4-… → G5-…). 대시보드가 ★4 통과 직후 ★5를 바로 띄워 이어서 답할 수 있게.
             # 예전 방식(답한 시각) 번호로 이미 받은 답도 인정한다
-            gate = {"n": 5, "id": "G5-" + prev["id"][3:], "legacy_id": gate_id(5, t["id"], since), "opened_at": since, "by": prev["by"],
+            gate = {"n": 5, "id": "G5-" + prev["id"][3:], "legacy_id": gate_id(5, t["id"], ans.get("ts") or since), "opened_at": ans.get("ts") or since, "by": prev["by"],
                     "summary": prev["summary"], "from_stage": prev["from_stage"]}
             continue
         stage = act
+        if act == "queue":
+            mcur = None
         if act in ("queue", "prep", "pack", "work"):
             batch = None
-    return {"stage": stage, "since": since, "gate": gate, "history": history[-10:], "final": final, "live": live,
+    return {"stage": stage, "since": since, "status_at": _later(since, ret_at), "gate": gate, "history": history[-10:], "final": final, "live": live,
             "batch": batch if stage == "deploy" else None, "prep": prep}
 
 
@@ -1120,6 +1162,7 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
         handoff = None
         plan_ts: dict[str, str] = {}
         requests: dict[str, dict] = {}  # 요청 ID → 요청(담당은 그대로 두고 다른 작업자에게 자료·확인을 부탁)
+        t['_finish_revisions'] = {}
         finishes: list[tuple] = []  # AI의 '끝냄'(state done) — 다음 관문을 여는 신호
         park_ts = None  # 기록으로 남은 보류(아키텍트 보류 결정·옛 보류)의 시각
         resume_ts = sorted((r.get("ts") for r in resumes.get(t["id"], []) if r.get("ts")), key=to_dt)
@@ -1133,6 +1176,7 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
                 park_ts = _ts if r["status"] == "parked" else None  # 보류 뒤 다른 상태 기록이 오면 그 보류는 지난 것
                 if r["status"] == "done":
                     finishes.append((_ts, a, (r.get("body") or "")[:2000]))
+                    if isinstance(r.get('command_revision'), int): t['_finish_revisions'][str(_ts)+'|'+str(a)] = r['command_revision']
             if r.get("work_id") and r.get("kind") in ("work", "handoff"):
                 t["work_id"] = r["work_id"]  # 주제 하나에 작업물 하나: 가장 최근 연결
             if r.get("kind") == "request" and r.get("to") and r.get("req_id"):
@@ -1183,13 +1227,13 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
                             | set((recs.get(LEGACY_LEAD) or {}).get("prev_assignees") or []))  # 이 주제를 맡았던 작업자(착수·인계·자동 이관 전 담당)
             # 끝냄 시점 담당 판정용: 허브가 남긴 담당 변경 이력 + 지금 담당이 정해진 시각
             t["_owner_log"], t["_assigned_at"], t["_base_assignee"] = lead.get("owner_log"), assigned_at, t.get("assignee")
-            t["_resume"] = resume_ts
+            t["_resume"] = [r for r in resumes.get(t["id"], []) if r.get("ts")]
             t["_batch_moves"] = batch_moves.get(t["id"])
             lk = linked_of.get(t["id"]) or []
             if lk and all(x in drops for x in lk):  # 후속이 모두 삭제됨 → ★결과 확인 다시(run_gates)
                 t["_followups_dropped_at"] = max(drops[x].get("ts") or "" for x in lk)
             g = run_gates(t, finishes, gate_answers, known or peers)
-            for k in ("_owners", "_owner_log", "_assigned_at", "_base_assignee", "_anchor_by", "_resume", "_batch_moves", "_followups_dropped_at"):
+            for k in ("_owners", "_owner_log", "_assigned_at", "_base_assignee", "_anchor_by", "_resume", "_batch_moves", "_followups_dropped_at", "_return_gate"):
                 t.pop(k, None)
             t["gate_history"] = g["history"]
             if g["live"] and not g["final"]:  # 실게임 시험 단계: 담당을 개발컴 Claude로 옮기고 대화 세션에서 진행
@@ -1206,13 +1250,13 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
                 if g["final"] == "done" and (g["history"] or [{}])[-1].get("act") == "followup":
                     t["followed"] = True  # 후속으로 이어짐: 완료 메뉴·완료율에서는 줄기 끝이 완료될 때 한 번만 센다
                 t["status_at"] = g["since"]
-            elif park_ts and not resumed and to_dt(park_ts) > to_dt(g["since"]):
+            elif park_ts and not resumed and to_dt(park_ts) > to_dt(g["status_at"]):
                 # 끝냄 뒤에 남은 보류 기록(아키텍트 보류 결정): 엔진이 진행 중으로 덮지 않는다(2026-10-03 — 보류가 무시되던 결함)
                 t["status"], t["status_at"], t["stage"] = "parked", park_ts, g["stage"]
             else:
                 t["status"], t["stage"] = "active", g["stage"]
                 # 진행 중 보류를 다시 진행했으면 상태 시각 = 재개 시각(노드가 자기 PC의 옛 보류 기록으로 다시 덮지 않게, overlay_local)
-                t["status_at"] = last_resume if resumed and to_dt(last_resume) > to_dt(g["since"]) else g["since"]
+                t["status_at"] = last_resume if resumed and to_dt(last_resume) > to_dt(g["status_at"]) else g["status_at"]
                 t["stage_owner"] = stage_owner(g["stage"], t, known)
                 if g["stage"] == "deploy":  # 8b 배포: 서버컴 Astra 대화 세션 몫(자동 실행기는 깨우지 않음 — ★4 실게임 대화와 같은 원리)
                     t["deploy_session"] = True
@@ -1273,10 +1317,10 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
             t.pop("gate", None)
             t.pop("live_session", None)
             t.pop("deploy_session", None)
+        t.pop("_finish_revisions", None)
         if t.get("command_mode") and t.get("stage") == "test":
-            rejected_at = max((to_dt(x.get("answered_at")) for x in t.get("gate_history", []) if x.get("act") == "test"), default=to_dt(None))
-            reset_at = max((to_dt(x.get("ts")) for x in t["command"]["events"] if x.get("op") == "test-reset"), default=to_dt(None))
-            t["test_reset_needed"] = rejected_at > reset_at
+            import command
+            t["test_reset_needed"] = bool(command.pending_return(t, ("test",)))
         t["turn"] = whose_turn(t)
         out.append(t)
     # 배포 대기열 겹침: 배포 준비가 적은 '대상 파일'이 같은 주제끼리(준비 중·대기열·배포 중). 준비 요약의 '겹침: T-…'도 잇는다
