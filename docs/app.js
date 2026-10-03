@@ -597,20 +597,34 @@ function checkNewGates() {
   if (fresh.length && 'Notification' in window && Notification.permission === 'granted') {
     const key = x => String(x.topic?.gate?.summary || '').split('\n').map(l => l.trim()).find(Boolean) || '';
     const names = gateQueue().filter(x => fresh.includes(x.q.id)).map(x => `${x.label} · ${x.topic ? x.topic.title : x.q.task_id}${key(x) ? ' — ' + key(x).slice(0, 80) : ''}`);
-    try {
-      const n = new Notification(`★ 관문 ${fresh.length}건 도착`, { body: names.slice(0, 4).join('\n') + (names.length > 4 ? `\n외 ${names.length - 4}건` : ''), icon: 'icon-192.png', tag: 'real-gates' });
-      n.onclick = () => { window.focus(); S.f.mine = 'gate'; S.mineSel = `d:${fresh[0]}`; go('mine'); n.close(); };
-    } catch { /* 알림을 못 띄우는 환경 */ }
+    notify(`★ 관문 ${fresh.length}건 도착`, names.slice(0, 4).join('\n') + (names.length > 4 ? `\n외 ${names.length - 4}건` : ''), 'real-gates', `d:${fresh[0]}`);
   }
 }
 const newGates = () => (store.get('newGates') || []).filter(id => gateQueue().some(x => x.q.id === id));
+// 결재할 일 전체(관문 제외 — 관문은 checkNewGates): 결정·AI 질문·할 일이 새로 오면 알림(아키텍트 10-03 '앱에서 알림')
+function checkNewApprovals() {
+  const items = mineItems().filter(i => i.type !== 'gate' && i.type !== 'backlog');
+  const keys = items.map(i => i.key), seen = store.get('seenMine');
+  if (!Array.isArray(seen)) { store.set('seenMine', keys); return; }
+  const fresh = items.filter(i => !seen.includes(i.key));
+  store.set('seenMine', [...new Set([...seen.filter(k => keys.includes(k)), ...keys])]);
+  if (fresh.length) notify(`결재할 일 ${fresh.length}건 도착`, fresh.slice(0, 4).map(i => `${({ decision: '결정', question: 'AI 질문', action: '할 일', test: '실게임 확인' })[i.type] || '확인'} · ${String(i.title || '').split('\n')[0].slice(0, 80)}`).join('\n') + (fresh.length > 4 ? `\n외 ${fresh.length - 4}건` : ''), 'real-mine', fresh[0].key);
+}
+// 알림 띄우기: 설치 앱(서비스 워커)이면 앱 알림으로(창이 내려가 있어도 뜨고, 누르면 결재함), 아니면 브라우저 알림
+function notify(title, body, tag, key) {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  const url = `./#/mine${key ? '?sel=' + encodeURIComponent(key) : ''}`;
+  const fallback = () => { try { const n = new Notification(title, { body, icon: 'icon-192.png', tag }); n.onclick = () => { window.focus(); if (key) S.mineSel = key; go('mine'); n.close(); }; } catch { /* 알림을 못 띄우는 환경 */ } };
+  if (navigator.serviceWorker && navigator.serviceWorker.controller) navigator.serviceWorker.ready.then(r => r.showNotification(title, { body, icon: 'icon-192.png', badge: 'icon-192.png', tag, data: { url } })).catch(fallback);
+  else fallback();
+}
 function enterApp() {
   mergeLocalGates();
   S.d = derive(S.data);
   $('#lock').hidden = true;
   $('#app').hidden = false;
   readHash();
-  checkNewGates();
+  checkNewGates(); checkNewApprovals();
   const deepTopic = new URLSearchParams(location.hash.split("?")[1] || "").get("topic");
   const compose = S._composeOnOpen; S._composeOnOpen = false;
   if (deepTopic || compose) history.replaceState(null, "", routeUrl(S.view));
@@ -620,7 +634,7 @@ function enterApp() {
   else if (compose) openComposer();
   flushOutbox();  // 지난번에 10초 안에 창을 닫아 못 보낸 결정이 있으면 마저 보낸다
   // 보고 있을 때는 1분마다, 창을 내려 두었을 때도 5분마다 확인한다(새 관문 알림이 늦지 않게)
-  if (!S.timer) { let tick = 0; S.timer = setInterval(() => { tick++; flushOutbox(); if (!document.hidden || tick % 5 === 0) refresh(); }, 60 * 1000); }
+  if (!S.timer) { let tick = 0; S.timer = setInterval(() => { tick++; flushOutbox(); if (!document.hidden || tick % 2 === 0) refresh(); }, 60 * 1000); }
 }
 // 새 화면 판 알아채기: 게시 서버가 시작 파일을 10분까지 캐시해서 열린 창이 예전 화면에 머무르는 문제(2026-10-03).
 // 1분마다 시작 파일의 화면 파일 버전 표시를 캐시 없이 읽어, 바뀌었으면 안전할 때 스스로 새로 고친다
@@ -644,7 +658,7 @@ async function refresh(manual) {
     if (env.published_at === S.env?.published_at) { if (manual) toast('이미 최신입니다 · 게시 ' + fmtRel(env.published_at)); return; }
     if (env.salt !== S.env.salt) { S.env = env; toast('비밀번호가 바뀌었습니다. 다시 열어주세요.'); return lockNow(); }
     S.env = env; S.data = await openEnvelope(env, S.key); mergeLocalGates(); S.d = derive(S.data);
-    checkNewGates();
+    checkNewGates(); checkNewApprovals();
     S._keepScroll = true; render(); toast('새 데이터를 반영했습니다');
   } catch (e) { if (manual) toast('갱신 실패: ' + e.message); }
 }
@@ -687,6 +701,7 @@ function readHash() {
   else if ([...NAV,...ADMIN_NAV,...DETAIL_NAV].some(n => n.id === v)) S.view = v;
   if (S.view === 'history' && RECORD_KINDS.some(([k]) => k === p.get('k'))) S.f.recordKind = p.get('k');
   if (p.get('q') != null) S.q = p.get('q');
+  if (S.view === 'mine' && p.get('sel')) S.mineSel = p.get('sel');  // 알림을 눌러 열면 그 항목을 고른 채로
   // 바로가기 '주제 던지기'(#/progress?new=1): 진행 현황에서 새 주제 작성창을 연다
   S._composeOnOpen = S.view === 'progress' && p.get('new') === '1';
 }
@@ -1189,8 +1204,8 @@ function vMine() {
   return [
     head('MY TURN', '결재함', urgent.length ? `대응할 것 ${urgent.length}건 · 미처리 주제 ${count('backlog')}건` : `지금 대응할 것 없음 · 미처리 주제 ${count('backlog')}건`,
       !('Notification' in window) ? null : Notification.permission === 'default'
-        ? h('button', { class: 'btn', title: '대시보드 창이 열려 있으면(내려 두어도) 새 ★ 관문이 도착할 때 바탕화면 알림을 띄웁니다', onclick: () => Notification.requestPermission().then(() => render()) }, icon('bell'), '새 관문 알림 켜기')
-        : Notification.permission === 'granted' ? h('span', { class: 'hint' }, '새 관문 바탕화면 알림 켜짐') : h('span', { class: 'hint' }, '알림이 브라우저에서 막혀 있음(사이트 설정에서 허용)')),
+        ? h('button', { class: 'btn', title: '앱(대시보드)이 켜져 있으면(내려 두어도) 결재할 일이 새로 올 때 알림을 띄웁니다', onclick: () => Notification.requestPermission().then(() => render()) }, icon('bell'), '결재 알림 켜기')
+        : Notification.permission === 'granted' ? h('span', { class: 'hint' }, '결재 알림 켜짐') : h('span', { class: 'hint' }, '알림이 브라우저에서 막혀 있음(사이트 설정에서 허용)')),
     mineSummary(all),
     tabs,
     h('div', { class: `mine-split fit-page${narrow ? ' narrow' : ''}` },
@@ -3320,17 +3335,17 @@ function commandBox(t) {
 }
 // 진행 9단계 + 보관·완료. 세 번째 값은 짧은 툴팁(화면 본문에는 쓰지 않는다)
 const FLOW_STAGES = [
-  ['saved','주제 보관','시작 전 · 자동 착수 안 함'],
-  ['goal','목표 정리','Astra · 목표·완료 기준·작업 나누기'],
-  ['execute','실행','작업자 · 조사·구현'],
-  ['review','Astra 검수','Astra · 수락 또는 재작업'],
-  ['test','자동 시험','개발컴 · 빌드·격리 시험'],
-  ['decision','아키텍트 검토','결재함 · ★4 실게임 시험 등'],
-  ['pack','배포본 작성','개발컴 · 변경 파일·적용·복구 절차'],
-  ['prep','서버 준비','서버컴 · 수신·해시 확인'],
-  ['queue','배포 대기','배포 메뉴 · 묶음 고르기'],
-  ['deploy','묶음 배포','서버컴 Astra 대화 · ★7 승인 범위만'],
-  ['done','완료','★9 완료 확정'],
+  ['saved','주제 보관','시작 전 · 자동 착수 안 함','시작 전'],
+  ['goal','목표 정리','Astra · 목표·완료 기준·작업 나누기','서버컴 Astra'],
+  ['execute','실행','작업자 · 조사·구현','배정된 작업자'],
+  ['review','Astra 검수','Astra · 수락 또는 재작업(서버컴이 꺼지면 개발컴 Claude 대행)','서버컴 Astra'],
+  ['test','자동 시험','개발컴 · 빌드·격리 시험(수락·재시험 초기화는 Astra)','개발컴 Claude'],
+  ['decision','아키텍트 검토','결재함 · ★4 실게임 시험·★5 배포본·★7 운영 반영 승인 등','아키텍트'],
+  ['pack','배포본 작성','개발컴 · 변경 파일·적용·복구 절차','개발컴 Claude'],
+  ['prep','서버 준비','서버컴 · 수신·해시 확인(운영 서버에는 쓰지 않음)','서버컴 Astra'],
+  ['queue','배포 대기','배포 메뉴 · 묶음 고르기','아키텍트'],
+  ['deploy','묶음 배포','서버컴 Astra 대화 · ★7 승인 범위만','서버컴 Astra 대화'],
+  ['done','완료','★9 완료 확정','아키텍트'],
 ];
 function flowStage(t) {
   if (t.status === 'backlog') return 'saved';
@@ -3371,7 +3386,7 @@ function vProgress() {
       const number = id === 'saved' ? '·' : id === 'done' ? '✓' : FLOW_STAGES.findIndex(x=>x[0]===id);
       const open = one || S.f['expand:' + id];
       return h('section', { class: 'card flow-lane', 'data-stage': id, 'aria-label': label },
-        h('h2', { title: desc }, h('span', { class: 'flow-number' }, number), label, h('span', { class: 'badge' }, rows.length)),
+        h('h2', { title: desc }, h('span', { class: 'flow-number' }, number), label, h('small', { class: 'stage-owner' }, ` · ${(FLOW_STAGES.find(x => x[0] === id) || [])[3] || ''}`), h('span', { class: 'badge' }, rows.length)),
         rows.length ? h('div', { class: 'lane-cards' }, rows.slice(0, open ? rows.length : 3).map(t => laneCard(t, id, label))) : h('div', { class: 'lane-empty' }, '없음'),
         !one && rows.length > 3 ? h('button', { class: 'more-btn lane-more', onclick: () => { S.f['expand:' + id] = !S.f['expand:' + id]; S._keepScroll = true; render(); } },
           S.f['expand:' + id] ? '접기' : `${rows.length - 3}건 더 보기`) : null);
@@ -3404,6 +3419,7 @@ function stageStrip(list, selected) {
     FLOW_STAGES.map(([id, label, desc], i) => h('button', { class: selected === id ? 'selected' : '', 'aria-pressed': String(selected === id), title: desc,
       'aria-label': `${label} ${counts[id]}건 보기`, onclick: () => pick(selected === id ? 'all' : id) },
       h('small', null, id === 'saved' ? '보관' : id === 'done' ? '완료' : String(i)), h('b', null, label),
+      h('small', { class: 'stage-owner' }, FLOW_STAGES[i][3]),
       h('span', { class: 'stage-meter', 'aria-hidden': 'true' }, h('i', { style: { width: `${counts[id] / max * 100}%` } })),
       h('span', { class: 'n' }, counts[id]))));
 }
