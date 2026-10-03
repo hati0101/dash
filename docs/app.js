@@ -570,11 +570,11 @@ function filterTasks(list, owner) {
 const NAV = [
   { id: 'mine', label: '결재함', icon: 'user' },
   { id: 'progress', label: '진행 현황', icon: 'topics' },
+  { id: 'agents', label: '작업자', icon: 'agents' },  // 누가 무엇을 하는지(아키텍트 10-03: 관리 메뉴에 숨기지 말 것)
   { id: 'deploy', label: '배포', icon: 'calendar' },
   { id: 'history', label: '기록', icon: 'done' },
 ];
 const ADMIN_NAV = [
-  { id: 'agents', label: '작업자', icon: 'agents' },
   { id: 'sources', label: '연결 상태', icon: 'sources' },
 ];
 const DETAIL_NAV = [
@@ -1502,6 +1502,7 @@ function agentCard(a) {
       h('span', { class: `st ${st.cls}`, style: { 'margin-left': 'auto' } }, icon(st.icon), st.label)),
     lockControls(a),
     usageBox(a),
+    agentWorkBox(a),
     cur ? h('div', { class: 'now' }, h('b', null, cur.project), (cur.task || cur.topic) ? h('div', { class: 'muted', style: { 'font-size': '12px' } }, [cur.task, cur.topic].filter(Boolean).join(' · ')) : null,
       cur.note ? h('div', { class: 'muted', style: { 'font-size': '12px' } }, cur.note) : null,
       h('div', { class: 'muted', style: { 'font-size': '12px' } }, `${fmtRel(cur.since)}부터`))
@@ -1510,6 +1511,21 @@ function agentCard(a) {
     agentLists(a, s),
     a.health && a.health.state && a.health.state !== 'ok' ? h('div', { class: `callout ${a.health.needs_user ? 'warn' : ''}` }, h('b', null, `${HEALTH[a.health.state] || '실행 오류'} · ${fmtRel(a.health.since || a.health.at)}부터`), h('div', null, a.health.fix || a.health.message)) : null,
     h('div', { class: 'muted', style: { 'font-size': '12px' } }, `마지막 신호 ${fmtRel(a.last_seen || a.pc_synced)}`));
+}
+// 작업자 카드 '맡은 일': 사령탑이 배정한 하위 작업·시험과 지금 이 작업자 차례인 주제(누가 무엇을 하는지 한눈에)
+function agentWorkBox(a) {
+  const rows = [];
+  const TASK_ST = { ready: '작업 중', review: 'Astra 검수 대기', blocked: '막힘 · Astra 조정' };
+  for (const t of S.d.topics) {
+    if (t.archived || ['done', 'dropped', 'parked'].includes(t.status)) continue;
+    for (const x of (t.command?.tasks || [])) if (x.assignee === a.id && TASK_ST[x.state]) rows.push({ t, what: x.title, st: TASK_ST[x.state] });
+    for (const x of (t.command?.tests || [])) if (x.assignee === a.id && ['running', 'pending', 'failed', 'blocked'].includes(x.state)) rows.push({ t, what: `시험 · ${x.title}`, st: TEST_STATES[x.state] || x.state });
+    if (t.turn === a.id && !rows.some(r => r.t === t)) rows.push({ t, what: turnWhy(t, a.id), st: '차례' });
+  }
+  if (!rows.length) return null;
+  return h('div', { class: 'now' }, h('b', null, `맡은 일 ${rows.length}건`),
+    rows.slice(0, 3).map(r => h('button', { class: 'linkish', style: { display: 'block', 'text-align': 'left' }, onclick: () => openTopic(r.t) }, `${r.t.title} · ${r.what} · ${r.st}`)),
+    rows.length > 3 ? h('div', { class: 'muted', style: { 'font-size': '12px' } }, `외 ${rows.length - 3}건 — 아래 '차례' 칸에서 모두 보기`) : null);
 }
 // 작업자 카드 숫자 칸: 눌러서 아래 목록을 그 기준으로(아키텍트 2026-10-03). 목록은 카드 안에서 스크롤
 function agentLists(a, s) {
