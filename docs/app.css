@@ -1006,3 +1006,141 @@ button.ms-chip.on:hover { border-color: var(--accent); }
 .hist-sep .when { margin-left: auto; color: var(--ink-3); font-weight: 400; }
 .chain-steps { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-top: 6px; }
 .chain-steps .tag-btn.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--card)); font-weight: 600; }
+
+/* Astra 사령탑 작업실: 주요 메뉴 4개, 관리·원문 기록은 보조 탐색 */
+.side-admin { margin: 20px 12px 0; }
+.side-admin summary { cursor: pointer; padding: 12px; min-height: 44px; }
+.side-command { margin: 20px 24px; display: grid; gap: 6px; font-size: 13px; }
+.side-command span { color: var(--ink-3); }
+.command-board { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 16px; align-items: start; }
+.command-board h2 { font-size: 16px; display: flex; gap: 10px; align-items: center; }
+.command-card { display: grid; gap: 8px; text-align: left; width: 100%; min-height: 100px; padding: 16px; margin-top: 12px; border: 1px solid var(--line-2); border-radius: 12px; background: transparent; color: inherit; cursor: pointer; }
+.command-card:hover { background: var(--card-2); }
+.command-card small, .command-card span { color: var(--ink-3); }
+.command-task { padding: 12px 0; border-top: 1px solid var(--line-2); }
+.command-task summary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; cursor: pointer; min-height: 44px; }
+.command-task p, .command-box .mono { overflow-wrap: anywhere; }
+.progress-search { border: 1px solid var(--line-2); border-radius: 10px; background: var(--card); color: var(--ink); padding: 10px 14px; width: min(100%,560px); min-height: 44px; margin: 0 0 16px; }
+@media(max-width:1000px) { .command-board { grid-template-columns: 1fr; } }
+
+.topic-flow { display: flex; flex-wrap: wrap; gap: 6px; padding: 0; list-style: none; }
+.topic-flow li { font-size: 12px; border: 1px solid var(--line); border-radius: 6px; padding: 7px; color: var(--ink-3); }
+.topic-flow li.current { color: var(--accent-ink); border-color: var(--accent); background: var(--accent-soft); }
+.progress-summary{display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:16px; margin:16px 0}
+.progress-summary h2{font-size:17px}
+.summary-topic{display:flex; flex-direction:column; gap:5px; text-align:left; width:100%; padding:12px 0; background:none; color:inherit; border:0; border-bottom:1px solid var(--line-2); cursor:pointer}
+.summary-topic span,.summary-topic small{color:var(--ink-3)}
+.test-box{margin:16px 0}
+.test-item{padding:12px 0; border-bottom:1px solid var(--line-2)}
+.test-item summary{display:flex; gap:10px; cursor:pointer; flex-wrap:wrap}
+.test-item.failed,.test-item.blocked{border-left:3px solid #e8ad48; padding-left:10px}
+.test-item.running{border-left:3px solid #65baff; padding-left:10px}
+.test-item.passed{border-left:3px solid #64c5a8; padding-left:10px}
+.test-item.review{border-left:3px dashed #64c5a8; padding-left:10px}
+.test-headline{color:#e8ad48}
+.test-box .mono{overflow-wrap:anywhere}
+.test-box dd{white-space:pre-wrap}
+@media(max-width:900px){.progress-summary{grid-template-columns:1fr}
+}
+
+.test-legend{display:flex; gap:8px; flex-wrap:wrap; font-size:11px; color:var(--ink-3); margin:12px 0}
+.test-legend span{display:flex; align-items:center; gap:5px}
+.test-legend i{width:9px; height:9px; border-radius:2px}
+.test-segments{display:flex; gap:3px; width:100%; height:13px}
+.test-segment{flex:1; border-radius:3px; background:#636c77}
+.test-segment.running{background:#69b8fa}
+.test-segment.passed{background:#67c8af}
+.test-segment.review{background:repeating-linear-gradient(45deg,#67c8af 0 3px,#2f6f60 3px 6px)}
+.test-segment.failed{background:#f27878}
+.test-segment.blocked{background:#e8ad48}
+.test-segment.skipped{background:repeating-linear-gradient(45deg,#999 0 2px,#41434b 2px 5px)}
+.test-chart-row{display:flex; flex-direction:column; gap:10px; width:100%; background:none; color:inherit; border:0; border-bottom:1px solid var(--line-2); padding:12px 0; text-align:left; cursor:pointer}
+.test-chart-row small{color:var(--ink-3)}
+.lineage-graph{display:flex; gap:22px; flex-wrap:wrap; padding:0; list-style:none}
+.lineage-graph li{position:relative; max-width:230px; display:flex; flex-direction:column; gap:4px}
+.lineage-graph li:not(:last-child)::after{content:'→'; position:absolute; right:-18px; top:10px; color:var(--ink-3)}
+.lineage-graph button{background:var(--card); border:1px solid var(--line-2); border-radius:10px; padding:10px; color:inherit; cursor:pointer; text-align:left}
+.lineage-graph .current{border-color:var(--accent)}
+.lineage-graph small{color:var(--ink-3)}
+.prior-context{margin:16px 0}
+.prior-context>details{padding:10px 0}
+.sr-only{position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0,0,0,0)}
+
+/* 진행 현황 한 화면(2026-10-03 아키텍트 원칙): 머리줄 → 요약 4칸 → 단계 막대(필터 하나) → 단계 보드(칸마다 3건 + 더보기) */
+.page-head .tools .progress-search { margin: 0; width: min(280px, 100%); min-height: 38px; height: 38px; padding: 0 12px; }
+.progress-summary { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 0 0 12px; }
+.progress-summary .ps-card { padding: 12px 14px; }
+.progress-summary .card-h { margin-bottom: 4px; }
+.progress-summary .card-h .more-btn { margin-left: auto; }
+.progress-summary h2 { font-size: 13.5px; letter-spacing: 0; text-transform: none; color: var(--ink); }
+.summary-topic { padding: 6px 0; gap: 2px; font-size: 13px; }
+.summary-topic:last-of-type { border-bottom: 0; }
+.blocked-row { flex-direction: row; align-items: center; gap: 8px; cursor: default; }
+.blocked-row .grow { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.blocked-row .btn { flex: none; }
+.ps-wait { display: flex; align-items: center; gap: 6px; margin-top: auto; padding-top: 6px; font-size: 12px; color: var(--st-user_test); }
+.ps-wait svg { width: 13px; height: 13px; }
+.ps-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.ps-stat { display: grid; gap: 1px; padding: 6px 8px; border-radius: 9px; border: 1px solid var(--line); background: var(--card-2); color: inherit; text-align: left; font: inherit; }
+button.ps-stat { cursor: pointer; }
+button.ps-stat:hover { border-color: var(--ink-3); }
+.ps-stat b { font-size: 17px; font-variant-numeric: tabular-nums; }
+.ps-stat span { font-size: 11.5px; color: var(--ink-3); }
+.ps-card .hint { margin: 6px 0 0; }
+.ps-card .test-chart-row { padding: 6px 0; gap: 4px; }
+.ps-card .test-legend { margin: 4px 0 0; font-size: 10.5px; gap: 6px; }
+.flow-overview { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 5px; margin: 0 0 12px; }
+.flow-overview button { display: grid; grid-template-columns: 1fr auto; grid-template-areas: "s n" "b b" "m m"; align-content: start; gap: 2px 4px; padding: 6px 8px; min-height: 44px;
+  border: 1px solid var(--line-2); border-radius: 10px; background: var(--card); color: var(--ink); cursor: pointer; text-align: left; min-width: 0; }
+.flow-overview button:hover { border-color: var(--ink-3); }
+.flow-overview button.selected { border-color: var(--accent); background: var(--accent-soft); }
+.flow-overview small { grid-area: s; color: var(--ink-3); font-size: 11px; }
+.flow-overview b { grid-area: b; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.flow-overview .n { grid-area: n; font-weight: 800; font-size: 13px; font-variant-numeric: tabular-nums; }
+.flow-overview .stage-meter { grid-area: m; height: 4px; border-radius: 3px; background: var(--line-2); overflow: hidden; }
+.flow-overview .stage-meter i { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+.flow-overview .stage-all { grid-template-areas: "b n"; align-content: center; }
+.full-flow { grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; }
+.full-flow.one { grid-template-columns: minmax(0, 1fr); }
+.flow-lane { padding: 10px; min-width: 0; }
+.flow-lane h2 { display: flex; align-items: center; gap: 6px; margin: 0 0 4px; font-size: 13px; cursor: default; }
+.flow-lane h2 .badge { margin-left: auto; }
+.flow-number { color: var(--accent-ink); }
+.lane-cards { display: grid; gap: 6px; }
+.full-flow.one .lane-cards { grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+.lane-empty { color: var(--ink-3); font-size: 12px; padding: 4px 2px; }
+.full-flow .command-card { gap: 2px; min-height: 0; margin: 0; padding: 7px 9px; border-radius: 9px; font-size: 12.5px; }
+.full-flow .command-card b { font-size: 13px; }
+.full-flow .command-card small { font-size: 11.5px; }
+.full-flow .command-card.need { border-color: color-mix(in srgb, var(--st-user_test) 60%, transparent); }
+.lane-more { margin-top: 6px; }
+@media (max-width: 1400px) { .flow-overview { grid-template-columns: repeat(6, minmax(0, 1fr)); } .full-flow { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+@media (max-width: 1100px) { .progress-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); } .full-flow { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 760px) {
+  .page-head .tools .progress-search { width: 100%; }
+  .progress-summary, .full-flow { grid-template-columns: minmax(0, 1fr); }
+  .flow-overview { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; }
+  .flow-overview .stage-all { grid-column: span 4; }
+  .flow-overview button { padding: 5px 6px; }
+  .flow-overview b { font-size: 11px; }
+}
+/* 기록: 칩(완료·보류·전체 요약·재시작 전) + 상세 기록 */
+.rec-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: -6px 0 12px; }
+.rec-more { position: relative; }
+.rec-more > summary { cursor: pointer; font-size: 13px; color: var(--ink-2); padding: 6px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); list-style: none; }
+.rec-more-b { position: absolute; z-index: 15; top: calc(100% + 4px); left: 0; display: grid; gap: 4px; padding: 6px; border: 1px solid var(--line-2); border-radius: 10px; background: var(--card); box-shadow: var(--shadow); min-width: 150px; }
+/* 사이드바: 접힌 '관리' 합계 배지 · 출처 상태 줄 */
+.side-admin > summary { display: flex; align-items: center; gap: 8px; }
+.side-admin > summary .badge { margin-left: auto; }
+.side-src { margin: 8px 0 0; display: grid; gap: 2px; }
+.side-admin > summary { list-style: none; }
+.side-admin > summary::-webkit-details-marker, .rec-more > summary::-webkit-details-marker { display: none; }
+.side-admin > summary::before { content: '▸'; color: var(--ink-3); font-size: 11px; }
+.side-admin[open] > summary::before { content: '▾'; }
+.rec-more > summary::after { content: ' ▾'; color: var(--ink-3); font-size: 11px; }
+.page-head:has(.progress-search) .tools { flex-wrap: nowrap; }
+.page-head .tools .progress-search { flex: 0 1 280px; min-width: 120px; }
+.full-flow .command-card > span small { color: var(--ink-3); font-size: 11.5px; }
+.ps-card .test-legend { flex-wrap: nowrap; overflow: hidden; }
+@media (max-width: 760px) { .page-head:has(.progress-search) .tools { flex-wrap: wrap; } .page-head .tools .progress-search { flex: 1 1 100%; } }
+@media (min-width: 1401px) { .flow-overview { grid-template-columns: minmax(0, .8fr) repeat(11, minmax(0, 1fr)); } .flow-overview button { padding: 6px 7px; } .flow-overview b { font-size: 11.5px; letter-spacing: -.01em; } }

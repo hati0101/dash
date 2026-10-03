@@ -806,14 +806,40 @@ def build_payload(cfg: dict, pw: str | None = None) -> dict:
     curated["decisions_needed"] += asks
     curated["user_actions"] += health_actions(agents)
     topics = load_topics(cfg, log, node_records, {a["id"] for a in agents} or None)
+    import command
+    from topics import agent_locks
+    authority_data = {'agents':agents,'agent_locks':agent_locks(cfg), 'meta':{'generated_at':iso(now())}}
+    deputy = command.delegation(authority_data)
+    for topic in topics:
+        command.route_deputy(topic, deputy)
+    curated['user_actions'] += command.availability_actions(authority_data, topics)
     curated["decisions_needed"] += gate_decisions(topics, curated, {a["id"] for a in agents})
     from topics import to_dt as _to_dt
     _now = datetime.now(timezone(timedelta(hours=9)))
     held = {h.get("topic") for h in (holds or []) if isinstance(h, dict) and h.get("until") and _to_dt(h["until"]) > _now}
-    curated["user_actions"] += live_actions(topics, held) + offline_actions(topics, agents, (cfg.get("pc") or {}).get("id"))
+    legacy = [t for t in topics if not t.get("archived")]
+    curated["user_actions"] += live_actions(legacy, held) + offline_actions(legacy, agents, (cfg.get("pc") or {}).get("id"))
+    for topic in legacy:
+        for rejected in (topic.get('command') or {}).get('rejected', []):
+            curated['user_actions'].append({'id': 'command-conflict-' + str(rejected.get('id')),
+                'title': '작업 기록 충돌 확인: ' + topic.get('title', topic['id']),
+                'detail': str(rejected.get('agent')) + ' · ' + rejected.get('reason', ''),
+                'kind': 'conflict', 'task_id': topic['id'], 'since': rejected.get('ts')})
+    archived_ids = {t["id"] for t in topics if t.get("archived")}
+    curated["decisions_needed"] = [q for q in curated.get("decisions_needed", []) if q.get("task_id") not in archived_ids]
+    curated["user_actions"] = [q for q in curated.get("user_actions", []) if q.get("task_id") not in archived_ids]
     works = load_works(cfg, topics, log)
-    from topics import load_routing
+    from topics import load_routing, read_json, data_dir
     routing = load_routing(cfg)
+    import command_reset as reset_engine
+    command_reset = read_json(data_dir(cfg) / "command-reset.json", {})
+    command_pending = [] if command_reset.get("complete") else reset_engine.pending([
+        {**n,"agents":{a["id"]:a for a in agents if a.get("pc")==n["pc"]},
+         "runs":[r for r in runs if r.get("pc")==n["pc"]]} for n in nodes])
+    if command_reset.get("complete"):
+        # 예전 별도 업무표의 판단 요청은 기록에 남기고 새 결재함에서는 제외한다.
+        current_ids = {t["id"] for t in topics if not t.get("archived")}
+        curated["decisions_needed"] = [q for q in curated["decisions_needed"] if not q.get("task_id") or q.get("task_id") in current_ids]
 
     # tasks.json의 메시지 상태(ACK 대기)를 메시지 목록에 반영
     ack_pending = {m.get("id") for m in task_msgs if str(m.get("ack", "")).lower() in ("pending", "")
@@ -828,13 +854,16 @@ def build_payload(cfg: dict, pw: str | None = None) -> dict:
             "generated_at": iso(now()),
             "generator_version": GENERATOR_VERSION,
             "limits": limits,
-            "coordination": coord_meta,
+            "coordination": {**coord_meta, "lead": "server-astra", "transport": "허브는 중계·게시만 담당"},
+            "command_version": 1,
+            "command_pending": command_pending,
+            "command_epoch": command_reset.get("epoch") if command_reset.get("complete") else None,
             "conflicts": conflicts,
             "hidden_tasks": hidden_tasks,
             "ack_pending": sorted(ack_pending),
             "repo": cfg.get("github_repo") or None,
             "hub": (cfg.get("pc") or {}).get("id"),
-            "routing": {"auto": routing.get("auto", True), "default_agent": routing.get("default_agent", "dev-claude"),
+            "routing": {"auto": routing.get("auto", True), "default_agent": routing.get("default_agent", "server-astra"),
                         "rules": routing.get("rules", []), "stale_minutes": routing.get("stale_minutes", 120),
                         "pcs": routing.get("pcs", {})},
         },

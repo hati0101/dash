@@ -56,7 +56,13 @@ def main():
         results.append((name, ok, detail))
 
     # 코드 검사(교차 검수 P1, 2026-10-03): 코드도 게시되면 다른 PC(서버컴)가 받아 실행하므로 문법 오류·반쯤 고친 코드는 올리지 않는다
-    for f in ("runner.py", "topics.py", "build.py", "node.py"):
+    try:
+        unit = subprocess.run([sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_*.py'],
+                              cwd=ROOT, capture_output=True, timeout=120, env=dict(os.environ, PYTHONUTF8='1'))
+        check('엔진 단위·통합 회귀', unit.returncode == 0, unit.stderr.decode('utf8', errors='replace')[-500:])
+    except subprocess.TimeoutExpired:
+        check('엔진 단위·통합 회귀', False, '120초 시간 제한 초과')
+    for f in ("runner.py", "topics.py", "build.py", "node.py", "command.py", "command_reset.py", "release_queue.py", "testflow.py"):
         r = subprocess.run([sys.executable, "-m", "py_compile", str(ROOT / f)], capture_output=True)
         check(f"코드 문법 {f}", r.returncode == 0, r.stderr.decode("utf-8", errors="replace").strip()[-200:])
     r = subprocess.run(["node", "--check", str(DOCS / "app.js")], capture_output=True)

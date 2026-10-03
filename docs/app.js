@@ -36,11 +36,13 @@ function attachDraft(el, key) {
 function snapshotDrafts(root) {
   root.querySelectorAll('[data-draft]').forEach(el => saveDraft(el.dataset.draft, el.value));
   const a = document.activeElement;
-  return a && root.contains(a) && a.dataset && a.dataset.draft ? { key: a.dataset.draft, s: a.selectionStart, e: a.selectionEnd } : null;
+  // data-focus: 초안으로 저장하지는 않지만 다시 그려도 입력 중인 자리를 지킬 칸(검색칸 등)
+  const k = a && root.contains(a) && a.dataset ? a.dataset.draft || a.dataset.focus : null;
+  return k ? { key: k, s: a.selectionStart, e: a.selectionEnd } : null;
 }
 function restoreFocus(root, f) {
   if (!f) return;
-  const el = [...root.querySelectorAll('[data-draft]')].find(x => x.dataset.draft === f.key);
+  const el = [...root.querySelectorAll('[data-draft],[data-focus]')].find(x => (x.dataset.draft || x.dataset.focus) === f.key);
   if (!el) return;
   el.focus({ preventScroll: true });
   try { el.setSelectionRange(f.s, f.e); } catch { /* 선택 범위를 못 쓰는 칸 */ }
@@ -125,8 +127,8 @@ const hoursSince = ts => (Date.now() - toMs(ts)) / 36e5;
 
 const PEOPLE = {
   user: { name: '나', full: '사용자', role: '목표·우선순위·실게임 판단', ini: '나' },
-  claude: { name: 'Claude', full: 'Claude', role: '사령탑 · 분배·통합', ini: 'C' },
-  astra: { name: 'Astra', full: 'Astra (Codex)', role: '보조 검증 · 백그라운드 시험', ini: 'A' },
+  claude: { name: 'Claude', full: 'Claude', role: '개발 · 구현·검증', ini: 'C' },
+  astra: { name: 'Astra', full: 'Astra (Codex)', role: '검토 · 검증', ini: 'A' },
   cli: { name: 'CLI', full: 'Claude CLI 작업자', role: '지정 사본 구현·조사', ini: 'W' },
   dashboard: { name: '대시보드', full: '대시보드', role: '자동 기록', ini: 'D' },
 };
@@ -141,7 +143,7 @@ function person(id) {
   const a = agentOf(id);
   if (a) {
     const short = (a.label || a.id).replace(/\s*\(.*\)$/, '');
-    return { name: `${a.pc_label} ${short}`, full: `${a.pc_label} · ${a.label || a.id}`, role: a.ai === 'gpt' ? 'GPT 계열' : 'Claude 계열',
+    return { name: `${a.pc_label} ${short}`, full: `${a.pc_label} · ${a.label || a.id}`, role: a.id === 'server-astra' ? '최종 사령탑 · 분배·검수·배포' : '실행 작업자',
       ini: a.ai === 'gpt' ? 'G' : 'C', ai: a.ai, pc: a.pc };
   }
   if (PEOPLE[id]) return PEOPLE[id];
@@ -214,7 +216,7 @@ const priChip = p => (p ? h('span', { class: `pri ${p}` }, p) : null);
 // ------------------------------------------------------------ 상태
 const S = {
   env: null, key: null, data: null, d: null,
-  view: 'overview', q: '',
+  view: 'progress', q: '',
   f: { owner: 'all', window: '24h', msg: 'all', ledger: 'all', taskOwner: 'all', taskWait: 'all' },
   msgSel: null,
   acks: new Set(store.get('acks', [])),
@@ -431,6 +433,7 @@ async function unlock(ev) {
   }
 }
 function lockNow() {
+  removePanels(); screenHistory.clear(); screenId = null;
   store.del('key'); S.key = null; S.data = null; S.d = null;
   $('#app').replaceChildren(); $('#app').hidden = true; $('#lock').hidden = false;
   $('#lock-msg').textContent = ''; $('#unlock').disabled = false;
@@ -565,18 +568,20 @@ function filterTasks(list, owner) {
 
 // ------------------------------------------------------------ 앱 골격
 const NAV = [
-  { id: 'mine', label: '내 차례', icon: 'user' },
-  { id: 'overview', label: '개요', icon: 'overview' },
+  { id: 'mine', label: '결재함', icon: 'user' },
+  { id: 'progress', label: '진행 현황', icon: 'topics' },
+  { id: 'deploy', label: '배포', icon: 'calendar' },
+  { id: 'history', label: '기록', icon: 'done' },
+];
+const ADMIN_NAV = [
   { id: 'agents', label: '작업자', icon: 'agents' },
-  { id: 'topics', label: '주제', icon: 'topics' },
-  { id: 'tasks', label: '업무', icon: 'tasks' },
-  { id: 'done', label: '완료', icon: 'done' },
-  { id: 'parked', label: '보류', icon: 'pause' },
-  { id: 'deploy', label: '배포 대기열', icon: 'calendar' },
-  { id: 'messages', label: '메시지', icon: 'messages' },
-  { id: 'verify', label: '검증', icon: 'verify' },
-  { id: 'brain', label: '세컨드 브레인', icon: 'brain' },
-  { id: 'sources', label: '연결', icon: 'sources' },
+  { id: 'sources', label: '연결 상태', icon: 'sources' },
+];
+const DETAIL_NAV = [
+  { id: 'overview', label: '전체 요약' }, { id: 'topics', label: '이전 주제 보드' },
+  { id: 'tasks', label: '이전 업무표' }, { id: 'done', label: '완료 기록' },
+  { id: 'parked', label: '보류 기록' }, { id: 'messages', label: '작업자 메시지' },
+  { id: 'verify', label: '검증 기록' }, { id: 'brain', label: '통합 검색' },
 ];
 
 // 새로 도착한 ★ 관문: 이 기기에서 아직 내 차례를 열어 보지 않은 관문을 위쪽 띠·알림으로 알린다
@@ -605,7 +610,13 @@ function enterApp() {
   $('#app').hidden = false;
   readHash();
   checkNewGates();
+  const deepTopic = new URLSearchParams(location.hash.split("?")[1] || "").get("topic");
+  const compose = S._composeOnOpen; S._composeOnOpen = false;
+  if (deepTopic || compose) history.replaceState(null, "", routeUrl(S.view));
+  clearDraft('progress-search');  // 예전 판이 검색어를 초안으로 남겨 새로 고친 뒤 칸과 목록이 어긋나던 값 정리
   render();
+  if (deepTopic && topicById(deepTopic)) openTopic(topicById(deepTopic));
+  else if (compose) openComposer();
   flushOutbox();  // 지난번에 10초 안에 창을 닫아 못 보낸 결정이 있으면 마저 보낸다
   // 보고 있을 때는 1분마다, 창을 내려 두었을 때도 5분마다 확인한다(새 관문 알림이 늦지 않게)
   if (!S.timer) { let tick = 0; S.timer = setInterval(() => { tick++; flushOutbox(); if (!document.hidden || tick % 5 === 0) refresh(); }, 60 * 1000); }
@@ -636,22 +647,99 @@ async function refresh(manual) {
     S._keepScroll = true; render(); toast('새 데이터를 반영했습니다');
   } catch (e) { if (manual) toast('갱신 실패: ' + e.message); }
 }
+// 메뉴·상세를 브라우저 방문 이력에 기록한다. 데이터/토큰은 history에 넣지 않는다.
+// history.state = { realops: 화면 식별값, depth: 앱 안에서 몇 번째 화면인지(0 = 이 앱의 첫 화면) }
+const screenHistory = new Map();
+let screenId = null, restoringScreen = false, lastRestoredHref = null;
+const screenKey = () => `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+let curDepth = 0, closingPanel = false;
+const histDepth = () => (history.state?.realops ? Number(history.state.depth) || 0 : curDepth);
+function pushScreen(url) { curDepth = histDepth() + 1; history.pushState({ realops: screenId, depth: curDepth }, '', url); }
+function replaceScreen(url) { curDepth = histDepth(); history.replaceState({ realops: screenId, depth: curDepth }, '', url); }
+function saveScreen() {
+  if (!screenId) {
+    screenId = history.state?.realops || screenKey();
+    replaceScreen(location.href);
+  }
+  snapshotDrafts(document.body);
+  const old = screenHistory.get(screenId) || {};
+  const panel = document.querySelector('.drawer');
+  screenHistory.set(screenId, { ...old, view: S.view, f: { ...S.f }, q: S.q, mineSel: S.mineSel,
+    scroll: window.scrollY, inner: [...document.querySelectorAll('.mine-list,.mine-detail .ms-main,.mine-detail .ms-side,.msg-list,.reader')].map(e => e.scrollTop),
+    panelScroll: panel?.querySelector('.drawer-b')?.scrollTop || 0 });
+}
+// 기록 메뉴 안의 화면(완료·보류·전체 요약)은 '기록' 한 화면에서 칩으로 오간다. 예전 주소(#/done 등)도 그대로 열린다
+const RECORD_KINDS = [['done', '완료'], ['parked', '보류'], ['overview', '전체 요약'], ['restart', '재시작 전']];
+const RECORD_ALIAS = { done: 'done', parked: 'parked', overview: 'overview' };
+function routeUrl(view, topic) {
+  const params = new URLSearchParams();
+  if (view === 'brain' && S.q) params.set('q', S.q);
+  if (view === 'history' && S.f.recordKind && S.f.recordKind !== 'done') params.set('k', S.f.recordKind);
+  if (topic) params.set('topic', topic);
+  const qs = params.toString();  // URLSearchParams.size는 iOS 16 이하에 없다
+  return '#/' + view + (qs ? '?' + qs : '');
+}
 function readHash() {
   const [v, qs] = location.hash.replace(/^#\/?/, '').split('?');
-  if (NAV.some(n => n.id === v)) S.view = v;
-  if (qs) { const q = new URLSearchParams(qs).get('q'); if (q != null) S.q = q; }
+  const p = new URLSearchParams(qs || '');
+  if (RECORD_ALIAS[v]) { S.view = 'history'; S.f.recordKind = RECORD_ALIAS[v]; }
+  else if ([...NAV,...ADMIN_NAV,...DETAIL_NAV].some(n => n.id === v)) S.view = v;
+  if (S.view === 'history' && RECORD_KINDS.some(([k]) => k === p.get('k'))) S.f.recordKind = p.get('k');
+  if (p.get('q') != null) S.q = p.get('q');
+  // 바로가기 '주제 던지기'(#/progress?new=1): 진행 현황에서 새 주제 작성창을 연다
+  S._composeOnOpen = S.view === 'progress' && p.get('new') === '1';
 }
 function go(view, opts = {}) {
+  saveScreen();
+  removePanels();
+  if (RECORD_ALIAS[view]) { S.f.recordKind = RECORD_ALIAS[view]; view = 'history'; }
+  const same = S.view === view && !screenHistory.get(screenId)?.panel;
   S.view = view;
-  if (view === 'mine') { S.freshGates = new Set([...(S.freshGates || []), ...newGates()]); store.set('newGates', []); }  // 열어 봤으면 새 도착 표시는 이 화면의 '새' 표시로만 남김
+  if (view === 'mine') { S.freshGates = new Set([...(S.freshGates || []), ...newGates()]); store.set('newGates', []); }
   if (opts.msg) S.f.msg = opts.msg;
   if (opts.stage) S.f.stage = opts.stage;
   if (opts.q != null) S.q = opts.q;
-  history.replaceState(null, '', '#/' + view + (view === 'brain' && S.q ? '?q=' + encodeURIComponent(S.q) : ''));
+  if (!same) { screenId = screenKey(); pushScreen(routeUrl(view)); } else replaceScreen(routeUrl(view));
   $('.side')?.classList.remove('on');
-  render();
-  window.scrollTo({ top: 0 });
+  render(); window.scrollTo({ top: 0 }); saveScreen();
 }
+function restoreScreen() {
+  if (!S.data) return;
+  closingPanel = false;
+  lastRestoredHref = location.href;
+  // popstate 시 브라우저는 이미 이전 엔트리를 가리키므로 현재 화면은 Map에만 보존한다.
+  saveScreen();
+  if (history.state?.realops) { screenId = history.state.realops; curDepth = histDepth(); }
+  else {  // 주소창에서 해시를 바꾼 방문: 화면 식별값을 이 기록에 써 둔다(hashchange가 다시 그리지 않게)
+    screenId = screenKey(); curDepth += 1;
+    history.replaceState({ realops: screenId, depth: curDepth }, '', location.href);
+  }
+  const saved = screenHistory.get(screenId);
+  restoringScreen = true;
+  removePanels();
+  if (saved) { S.view = saved.view; S.f = { ...saved.f }; S.q = saved.q; S.mineSel = saved.mineSel; }
+  else readHash();
+  render();
+  // 상세는 저장해 둔 화면 조각을 다시 붙이지 않고 지금 데이터로 새로 그린다.
+  // 다시 그릴 방법이 없는 확인·입력 창(묶음 완료 확정·묶음 만들기·작성창 등)은 닫힌 상태로 복원한다(같은 결정을 다시 보내지 않게)
+  if (saved?.panel) {
+    if (saved.panel.topic && topicById(saved.panel.topic)) openTopic(topicById(saved.panel.topic));
+    else if (typeof saved.panel.rebuild === 'function') { try { saved.panel.rebuild(); } catch { removePanels(); } }
+  } else if (!saved) {
+    const id = new URLSearchParams(location.hash.split('?')[1] || '').get('topic');
+    if (id && topicById(id)) openTopic(topicById(id));
+    else if (S._composeOnOpen) openComposer();
+  }
+  S._composeOnOpen = false;
+  restoringScreen = false;
+  requestAnimationFrame(() => {
+    window.scrollTo(0, saved?.scroll || 0);
+    [...document.querySelectorAll('.mine-list,.mine-detail .ms-main,.mine-detail .ms-side,.msg-list,.reader')].forEach((e,i) => { e.scrollTop = saved?.inner?.[i] || 0; });
+    const body = document.querySelector('.drawer-b'); if (body) body.scrollTop = saved?.panelScroll || 0;
+  });
+}
+window.addEventListener('popstate', restoreScreen);
+history.scrollRestoration = 'manual';
 
 function render() {
   if (!S.data) return;
@@ -671,13 +759,18 @@ function render() {
 function sidebar() {
   const d = S.d, data = S.data;
   const badges = {
-    mine: myQueue().total || null,
+    mine: approvals().total || null,
     topics: d.topics.filter(t => t.status === 'new').length || null,
     tasks: d.tasks.filter(t => t.stage !== 'done').length,
     messages: d.unprocessed.length || null,
     sources: data.sources.filter(s => !s.ok && !/선택/.test(s.error || '')).length || null,
   };
   const hot = { mine: true, topics: true, messages: true, sources: true };
+  // 접힌 '관리'에도 연결 이상·미처리 메시지·새 주제 합계를 보인다(펼치면 같은 자리에 바로 가는 버튼)
+  const adminParts = [['sources', '연결 이상', badges.sources], ['messages', '미처리 메시지', badges.messages], ['topics', '새 주제', badges.topics]].filter(([, , n]) => n);
+  const adminSum = adminParts.reduce((a, [, , n]) => a + n, 0);
+  // 기록 메뉴에서 들어가는 화면들은 '기록'을 현재 메뉴로 표시
+  const navOn = id => S.view === id || (id === 'history' && DETAIL_NAV.some(n => n.id === S.view));
   // 출처는 한 줄 요약만 두고, 문제가 있는 출처만 아래에 따로 보여 준다(목록이 길어 스크롤이 생기지 않게)
   const srcs = data.sources.filter(s => !/선택/.test(s.error || '') || s.count);
   const srcState = s => (!s.ok ? 'bad' : s.last_modified && hoursSince(s.last_modified) > 48 ? 'warn' : '');
@@ -690,14 +783,19 @@ function sidebar() {
       h('span', { class: 'src-name muted' }, s.name), h('span', { class: `dot ${srcState(s)}` }))),
   ];
   return h('nav', { class: 'side', 'aria-label': '주 메뉴' },
-    h('button', { class: 'side-brand', title: '개요로', 'aria-label': '개요로 가기', onclick: () => { $('.side')?.classList.remove('on'); go('overview'); } },
+    h('button', { class: 'side-brand', title: '진행 현황으로', 'aria-label': '진행 현황으로 가기', onclick: () => { $('.side')?.classList.remove('on'); go('progress'); } },
       h('span', { class: 'brand-mark', 'aria-hidden': 'true' }), data.meta.project || 'REAL 작업실'),
-    NAV.map(n => h('button', { class: 'nav-btn', 'aria-current': S.view === n.id ? 'page' : null, onclick: () => go(n.id) },
+    NAV.map(n => h('button', { class: 'nav-btn', 'aria-current': navOn(n.id) ? 'page' : null, onclick: () => go(n.id) },
       icon(n.icon), n.label, badges[n.id] ? h('span', { class: `badge${hot[n.id] ? ' hot' : ''}` }, badges[n.id]) : null)),
-    h('div', { class: 'side-h' }, 'SOURCES'),
-    srcRows,
-    h('div', { class: 'side-h' }, 'TEAM'),
-    h('div', { class: 'team-row' }, ['user', 'claude', 'astra', 'cli'].map(id => av(id))),
+    h('details', { class: 'side-admin', open: S.adminOpen ? true : null, ontoggle: e => { S.adminOpen = e.target.open; } },
+      h('summary', { title: adminParts.map(([, l, n]) => `${l} ${n}`).join(' · ') || '작업자·연결 상태' }, '관리',
+        adminSum ? h('span', { class: 'badge hot', 'aria-label': `확인할 것 ${adminSum}건` }, adminSum) : null),
+      ADMIN_NAV.map(n => h('button', { class: 'nav-btn', 'aria-current': S.view === n.id ? 'page' : null, onclick: () => go(n.id) }, icon(n.icon), n.label,
+        badges[n.id] ? h('span', { class: 'badge hot' }, badges[n.id]) : null)),
+      badges.messages ? h('button', { class: 'nav-btn', 'aria-current': S.view === 'messages' ? 'page' : null, onclick: () => go('messages', { msg: 'unprocessed' }) }, icon('messages'), '미처리 메시지', h('span', { class: 'badge hot' }, badges.messages)) : null,
+      badges.topics ? h('button', { class: 'nav-btn', 'aria-current': S.view === 'topics' ? 'page' : null, onclick: () => go('topics') }, icon('topics'), '새 주제', h('span', { class: 'badge hot' }, badges.topics)) : null),
+    h('div', { class: 'side-src' }, srcRows),
+    h('div', { class: 'side-command' }, h('b', null, '서버컴 Astra'), h('span', null, '작업 분배 · 검수 · 배포 총괄')),
     h('div', { class: 'side-foot' },
 
       h('div', { class: 'row' }, av('user'), h('b', null, '내 계정'),
@@ -713,7 +811,7 @@ function toggleTheme() {
 
 function topbar() {
   const gen = S.data.meta.generated_at, age = hoursSince(gen);
-  const nav = NAV.find(n => n.id === S.view);
+  const nav = [...NAV, ...ADMIN_NAV, ...DETAIL_NAV].find(n => n.id === S.view);
   const missed = openMissed().length;
   const search = h('input', { type: 'search', placeholder: '검색', 'aria-label': '전체 검색', value: S.view === 'brain' ? S.q : '',
     onkeydown: e => { if (e.key === 'Enter') go('brain', { q: e.target.value }); } });
@@ -725,13 +823,15 @@ function topbar() {
       h('span', { class: 'dot' }), h('span', { class: 'lbl' }, age > 1.5 ? fmtRel(gen) + ' 갱신' : 'live')),
     h('button', { class: 'icon-btn', title: '새 데이터 확인', 'aria-label': '새 데이터 확인', onclick: () => refresh(true) }, icon('refresh')),
     S.newVersion ? h('button', { class: 'btn mine-btn hot', title: '대시보드 화면이 새로 게시됐습니다. 쓰던 글은 저장되어 있습니다.', onclick: () => location.reload() }, icon('refresh'), '새 화면 반영') : null,
-    (() => { const n = newGates().length; return n ? h('button', { class: 'btn mine-btn hot gate-new', title: '새로 도착한 ★ 관문 — 누르면 내 차례 관문 목록', onclick: () => { S.f.mine = 'gate'; S.mineSel = null; go('mine'); } }, icon('scale'), `새 관문 ${n}`) : null; })(),
-    (() => { const n = myQueue().total; return h('button', { class: `btn mine-btn${n ? ' hot' : ''}`, onclick: () => go('mine'), title: '아키텍트가 답하거나 확인할 것' }, icon('user'), n ? `내 차례 ${n}` : '내 차례 없음'); })(),
+    (() => { const n = newGates().length; return n ? h('button', { class: 'btn mine-btn hot gate-new', title: '새로 도착한 ★ 관문 — 누르면 결재함 관문 목록', onclick: () => { S.f.mine = 'gate'; S.mineSel = null; go('mine'); } }, icon('scale'), `새 관문 ${n}`) : null; })(),
+    (() => { const a = approvals(), n = a.total; return h('button', { class: `btn mine-btn${n ? ' hot' : ''}`, 'data-approvals': String(n), onclick: () => go('mine'),
+      title: `아키텍트가 답할 것 ${n}건${a.waiting.length ? ` · 답 보냄·반영 대기 ${a.waiting.length}건` : ''}` }, icon('user'), n ? `결재 ${n}` : '결재할 일 없음'); })(),
     h('button', { class: 'icon-btn bell', title: `놓친 항목 ${missed}`, 'aria-label': `놓친 항목 ${missed}건 보기`, onclick: openMissedDrawer },
       icon('bell'), missed ? h('span', { class: 'count' }, missed) : null));
 }
 function openMissedDrawer() {
   const items = openMissed();
+  reopenWith(openMissedDrawer);
   drawer('놓친 항목',
     h('div', { style: { display: 'flex', gap: '8px', 'align-items': 'center', 'flex-wrap': 'wrap' } },
       h('h3', null, `놓친 항목 ${items.length}건`),
@@ -743,8 +843,8 @@ function openMissedDrawer() {
 }
 
 function page() {
-  const views = { mine: vMine, overview: vOverview, agents: vAgents, topics: vTopics, tasks: vTasks, done: vDone, parked: vParked, deploy: vDeploy, messages: vMessages, verify: vVerify, brain: vBrain, sources: vSources };
-  return h('div', { class: 'page' }, (views[S.view] || vOverview)());
+  const views = { progress: vProgress, history: vHistory, mine: vMine, overview: vOverview, agents: vAgents, topics: vTopics, tasks: vTasks, done: vDone, parked: vParked, deploy: vDeploy, messages: vMessages, verify: vVerify, brain: vBrain, sources: vSources };
+  return h('div', { class: 'page' }, (views[S.view] || vProgress)());
 }
 function head(eyebrow, title, small, ...tools) {
   return h('div', { class: 'page-head' },
@@ -777,7 +877,7 @@ function listCard(title, rows, opts = {}) {
 }
 
 // ------------------------------------------------------------ 개요
-function vOverview() {
+function vOverview(embedded) {
   const d = S.d, data = S.data, now = new Date();
   // 완료율은 주제 기준: 완료 확정 ÷ 착수한 주제(새 주제·검토·준비·진행·관문 대기·완료). 미처리·보류·삭제는 뺀다
   const aiOf = id => ((data.agents || []).find(a => a.id === id) || {}).ai || (/claude/.test(id || '') ? 'claude' : /astra|gpt/.test(id || '') ? 'gpt' : '');
@@ -788,14 +888,14 @@ function vOverview() {
   const ownerChips = chips([['all', '전체'], ['claude', 'Claude', av('claude', true)], ['astra', 'Astra', av('astra', true)], ['user', '나', av('user', true)]],
     S.f.owner, v => { S.f.owner = v; render(); }, '담당 필터');
 
-  return [
-    head('OVERVIEW', '전체 현황', `${pad(now.getMonth() + 1)}.${pad(now.getDate())} (${DAY[now.getDay()]})`, ownerChips),
-    // 넓고 높은 화면(1500×860 이상)에서는 한 화면에 스크롤 없이: 윗줄 요약 5칸 + 아랫줄 4칸(칸마다 최대 3건)
-    h('div', { class: 'ov-fit' },
-      h('div', { class: 'ov-top' }, completionCard(pct, started, S.f.owner), collectedCard(), pipelineCard(), missedCard()),
-      h('div', { class: 'ov-bottom' }, todayCard(), decisionsNeededCard(), projectsCard(), activityCard()),
-      teamStrip()),
-  ];
+  // 넓고 높은 화면(1500×860 이상)에서는 한 화면에 스크롤 없이: 윗줄 요약 5칸 + 아랫줄 4칸(칸마다 최대 3건)
+  const body = h('div', { class: 'ov-fit' },
+    h('div', { class: 'ov-top' }, completionCard(pct, started, S.f.owner), collectedCard(), pipelineCard(), missedCard()),
+    h('div', { class: 'ov-bottom' }, todayCard(), decisionsNeededCard(), projectsCard(), activityCard()),
+    teamStrip());
+  const day = `${pad(now.getMonth() + 1)}.${pad(now.getDate())} (${DAY[now.getDay()]})`;
+  if (embedded) return { small: `${day} · 완료율 ${pct}%`, tools: ownerChips, body: [body] };
+  return [head('OVERVIEW', '전체 현황', day, ownerChips), body];
 }
 // 개요 아랫줄: 진행 중 프로젝트(막힘·이번 주 마감을 먼저)
 // 개요 아랫줄: 진행 중인 업무 = 업무 보드 흐름(막힘 → 검증 → 진행 → 요청 순, 아키텍트 대기는 '오늘 확인할 일'에 있으므로 뺌)
@@ -939,17 +1039,31 @@ function myQueue() {
   const d = S.d, data = S.data;
   const done = k => S.acks.has(k) || S.serverAcks?.has(k);
   const decisions = (data.decisions_needed || []).filter(q => !d.answers[q.id]);
-  const tests = d.tasks.filter(t => t.stage !== 'done' && (t.stage === 'user_test' || t.waiting_on === 'user') && !done(`mine-test:${t.id}:${t.updated_at}`));
-  const actions = (data.user_actions || []).filter(a => !done(`ua:${a.id}`));
+  const tests = (data.meta.command_epoch ? [] : d.tasks).filter(t => t.stage !== 'done' && (t.stage === 'user_test' || t.waiting_on === 'user') && !done(`mine-test:${t.id}:${t.updated_at}`));
+  const actions = (data.user_actions || []).filter(a => !done(`ua:${a.id}`) && (!data.meta.command_epoch || a.kind === 'health' || d.topics.some(t => !t.archived && t.id === a.task_id)));
   const questions = [];
   for (const t of d.topics) {
     const lastUser = Math.max(0, ...commentsFor({ kind: 'topic', id: t.id }).filter(c => c.by === 'user').map(c => toMs(c.ts) || 0));
     for (const n of t.notes || []) {
-      if (n.kind === 'question' && n.by !== 'user' && toMs(n.ts) > lastUser && !done(`mine-q:${t.id}:${n.ts}`)) questions.push({ topic: t, note: n });
+      if (!t.command_mode && !t.archived && n.kind === 'question' && n.by !== 'user' && toMs(n.ts) > lastUser && !done(`mine-q:${t.id}:${n.ts}`)) questions.push({ topic: t, note: n });
     }
   }
   const backlog = d.topics.filter(t => t.status === 'backlog');
   return { decisions, tests, actions, questions, backlog, total: decisions.length + tests.length + actions.length + questions.length };
+}
+// 결재 건수의 단일 기준(위쪽 버튼·사이드바 배지·결재함·진행 현황이 모두 이 값을 쓴다).
+// open = 아직 답을 보내지 않은 관문·결정·질문·할 일(결재함 목록 그대로, 착수 고르기 제외)
+// waiting = 답은 보냈고 허브 반영(다음 동기화)을 기다리는 결정 — 건수에 넣지 않고 따로 표시
+function approvals() {
+  const open = mineItems().filter(i => i.type !== 'backlog');
+  const waiting = (S.data.decisions_needed || []).filter(q => {
+    const a = S.d.answers[q.id];
+    if (!a) return false;
+    if (a.pending) return true;  // 이 기기에서 보냄 · PC 반영 전
+    const t = topicById(q.task_id);
+    return q.kind === 'gate' ? !!(t && t.status === 'review_user' && t.gate && t.gate.id === q.id) : (q.options || []).length > 0 && !['done', 'neutral'].includes(decisionReflect(q, a).cls);
+  }).map(q => ({ q, topic: topicById(q.task_id), ans: S.d.answers[q.id] }));
+  return { open, waiting, total: open.length };
 }
 // 아키텍트 관문 대기열: 주제가 관문에 도착하면 여기서 끝까지 추적한다(답할 때까지 내 차례·개요·새 도착 알림에 남음)
 const GATE_ORDER = { 9: 0, 7: 1, 5: 2, 40: 3, 4: 4 };  // 읽고 고르기만 하면 되는 것부터, 실게임 시험이 필요한 ★4는 맨 뒤 묶음(보고서 6번)
@@ -981,11 +1095,11 @@ function histCount(topic, taskId) {
 }
 // 내 차례 소분류: [값, 이름, 아이콘, 강조]
 const MINE_TYPES = [
-  ['gate', '★ 관문', 'scale', 'warn'],
-  ['decision', '결정·승인', 'scale', 'warn'],
+  ['gate', '검토·결재', 'scale', 'warn'],
+  ['decision', '판단 요청', 'scale', 'warn'],
   ['question', 'AI 질문', 'messages', 'warn'],
-  ['action', '할 일', 'user', ''],
-  ['backlog', '착수 고르기', 'inbox', ''],
+  ['action', '직접 조치', 'user', ''],
+  ['backlog', '미착수', 'inbox', ''],
 ];
 // 옛 작업표의 실게임·확인 대기(test)는 탭 없이 ★ 관문 '실게임 시험 필요' 묶음에 같이 보인다(보고서 5번)
 const MINE_TYPE = Object.fromEntries([...MINE_TYPES, ['test', '실게임·확인', 'flask', 'warn']].map(([v, l, i, c]) => [v, { label: l, icon: i, cls: c }]));
@@ -1002,7 +1116,7 @@ function mineItems() {
   for (const t of S.d.topics.filter(t => (t.conflict || []).length && !['done', 'dropped'].includes(t.status)))
     items.push({ key: `c:${t.id}:${t.conflict.join(',')}`, type: 'action', title: `중복 착수: ${t.title}`, sub: `담당 ${person(t.assignee).name} · 추가 착수 ${t.conflict.map(c => person(c).name).join(', ')} — 누가 계속할지 고르기`,
       who: t.assignee, when: t.updated_at, topic: t, taskId: null, ref: { kind: 'conflict', id: `conflict:${t.id}` } });
-  for (const t of q.backlog) items.push({ key: `b:${t.id}`, type: 'backlog', title: t.title, sub: t.body || '', who: t.proposed_by || 'user', when: t.created_at, topic: t, ref: t });
+  for (const t of (S.data.meta.command_epoch ? [] : q.backlog)) items.push({ key: `b:${t.id}`, type: 'backlog', title: t.title, sub: t.body || '', who: t.proposed_by || 'user', when: t.created_at, topic: t, ref: t });
   return items;
 }
 // 화면에 보이는 순서 그대로(전체 탭: 관문 → 대응할 것 → 착수 고르기). 키보드 이동도 이 순서를 쓴다
@@ -1028,12 +1142,12 @@ function vMine() {
   const sel = list.find(i => i.key === S.mineSel) || null;
   const narrow = matchMedia('(max-width: 1100px)').matches;
   const pick = it => { if (narrow) return openMineItem(it); if (S.mineSel !== it.key) S.editTopic = null; S.mineSel = it.key; S._keepScroll = true; render(); };
-  const tabs = h('div', { class: 'mine-tabs', role: 'tablist', 'aria-label': '내 차례 소분류' },
+  const tabs = h('div', { class: 'mine-tabs', role: 'tablist', 'aria-label': '결재함 소분류' },
     [['all', '전체', 'user', '', urgent.length], ...MINE_TYPES.map(([v, l, i, c]) => [v, l, i, c, count(v)])].map(([v, l, i, c, n]) =>
       h('button', { role: 'tab', 'aria-selected': String(f === v), class: `mine-tab${n && c ? ' ' + c : ''}`, onclick: () => { S.f.mine = v; S.mineSel = null; S.mineSelecting = false; S.editTopic = null; render(); } },
         icon(i), h('span', null, l), h('b', null, n))),
     h('label', { class: 'mine-search' }, icon('search'),
-      h('input', { type: 'search', placeholder: '내 차례에서 찾기', 'aria-label': '내 차례에서 찾기', value: S.f.mineQ || '', 'data-draft': 'mine-search',
+      h('input', { type: 'search', placeholder: '결재함에서 찾기', 'aria-label': '결재함에서 찾기', value: S.f.mineQ || '', 'data-draft': 'mine-search',
         oninput: e => { S.f.mineQ = e.target.value; S.mineSel = null; S._keepScroll = true; render(); } })));
   // 착수 고르기: 여러 개 골라 한 번에 지우기
   const checked = S.mineChecked || (S.mineChecked = new Set());
@@ -1072,14 +1186,14 @@ function vMine() {
     dropped.map(t => h('div', { class: 'dropped-row' }, h('span', { class: 'clamp-1' }, t.title), h('button', { class: 'btn sm', onclick: () => dropTopics(t.id, true) }, icon('refresh'), '되살리기')))) : null;
   const detail = sel ? mineDetail(sel, null) : null;
   return [
-    head('MY TURN', '내 차례', urgent.length ? `대응할 것 ${urgent.length}건 · 미처리 주제 ${count('backlog')}건` : `지금 대응할 것 없음 · 미처리 주제 ${count('backlog')}건`,
+    head('MY TURN', '결재함', urgent.length ? `대응할 것 ${urgent.length}건 · 미처리 주제 ${count('backlog')}건` : `지금 대응할 것 없음 · 미처리 주제 ${count('backlog')}건`,
       !('Notification' in window) ? null : Notification.permission === 'default'
         ? h('button', { class: 'btn', title: '대시보드 창이 열려 있으면(내려 두어도) 새 ★ 관문이 도착할 때 바탕화면 알림을 띄웁니다', onclick: () => Notification.requestPermission().then(() => render()) }, icon('bell'), '새 관문 알림 켜기')
         : Notification.permission === 'granted' ? h('span', { class: 'hint' }, '새 관문 바탕화면 알림 켜짐') : h('span', { class: 'hint' }, '알림이 브라우저에서 막혀 있음(사이트 설정에서 허용)')),
     mineSummary(all),
     tabs,
     h('div', { class: `mine-split fit-page${narrow ? ' narrow' : ''}` },
-      h('div', { class: 'card mine-list', role: 'listbox', 'aria-label': '내 차례 목록', 'aria-multiselectable': selecting ? 'true' : null }, listTools, listBody, droppedBox),
+      h('div', { class: 'card mine-list', role: 'listbox', 'aria-label': '결재함 목록', 'aria-multiselectable': selecting ? 'true' : null }, listTools, listBody, droppedBox),
       narrow ? null : h('section', { class: 'card mine-detail', 'aria-label': '선택한 항목' },
         detail ? [h('div', { class: 'mine-detail-h' }, h('span', { class: 'eyebrow' }, detail.eyebrow),
             h('button', { class: 'btn sm', title: '크게 보기', onclick: () => openMineItem(sel) }, icon('arrow'), '크게 보기')),
@@ -1098,7 +1212,7 @@ function mineSummary(all) {
     ['AI 질문', n(i => i.type === 'question'), () => { S.f.mine = 'question'; }],
     ['할 일', n(i => i.type === 'action'), () => { S.f.mine = 'action'; }],
     ['착수 고르기', n(i => i.type === 'backlog'), () => { S.f.mine = 'backlog'; }],
-    ['보류', S.d.topics.filter(t => t.status === 'parked').length, () => go('parked')],
+    ['보류', S.d.topics.filter(t => t.status === 'parked' && !t.archived).length, () => go('parked')],
     ['배포 대기열', S.d.topics.filter(t => t.status === 'active' && t.stage === 'queue').length, () => go('deploy')],
     ['배포 대화 대기(묶음)', new Set(S.d.topics.filter(t => t.status === 'active' && t.deploy_session && t.deploy_batch).map(t => t.deploy_batch.id)).size, () => go('deploy')],
     ['헛도는 중', S.d.missed.filter(m => m.key.startsWith('idle:')).length, null],
@@ -1144,6 +1258,8 @@ function openLiveBatch(ts) {
 // 좁은 화면·"크게 보기": 같은 내용을 가운데 모달로
 function openMineItem(it) {
   const d = mineDetail(it, () => { const again = mineItems().find(x => x.key === it.key); again ? openMineItem(again) : closeDrawer(); });
+  // 뒤로/앞으로 복원 때는 지금 데이터로 다시 연다(이미 답한 항목이면 목록에서 빠져 닫힌 채로)
+  reopenWith(() => { const x = mineItems().find(i => i.key === it.key); if (x) openMineItem(x); });
   modalSplit(d.eyebrow, [d.main, kbHint()], d.side);
   const panel = [...document.querySelectorAll('.drawer.modal.split')].pop();
   if (panel) { panel.dataset.kb = 'mine'; panel.dataset.key = it.key; }
@@ -1342,7 +1458,7 @@ function agentStats(id) {
   const legacy = S.d.tasks.filter(t => t.stage !== 'done' && (t.owner === id || LEGACY[t.owner] === id || t.waiting_on === id || LEGACY[t.waiting_on] === id));
   return { assigned, turn, works, legacy, tasks: [...works, ...legacy] };
 }
-// 왜 이 작업자 차례인가(작업자 카드 '내 차례' 목록)
+// 왜 이 작업자 차례인가(작업자 카드 'AI 차례' 목록)
 function turnWhy(t, id) {
   if (t.live_session) return '실게임 대화';
   if ((t.open_request || {}).to === id) return '요청 받음';
@@ -1402,7 +1518,7 @@ function agentLists(a, s) {
   const pick = v => () => { S.agentTab[a.id] = v; S._keepScroll = true; render(); };
   const cell = (v, n, l) => h('button', { class: `stat-btn${tab === v ? ' on' : ''}`, 'aria-pressed': String(tab === v), onclick: pick(v) }, h('b', null, n), h('span', null, l));
   const topicRow = (t, extra) => h('button', { class: 'item', onclick: () => openTopic(t) },
-    h('span', { class: 'body' }, h('div', { class: 't clamp-1' }, t.title), h('div', { class: 'meta' }, extra || [topicChip(t.status), priChip(t.priority), t.turn === a.id ? h('span', { class: 'tag' }, '내 차례') : null])));
+    h('span', { class: 'body' }, h('div', { class: 't clamp-1' }, t.title), h('div', { class: 'meta' }, extra || [topicChip(t.status), priChip(t.priority), t.turn === a.id ? h('span', { class: 'tag' }, 'AI 차례') : null])));
   const lastRun = t => (runsFor(t.id).find(r => r.agent === a.id) || {}).started;
   let body;
   if (tab === 'turn') body = s.turn.length ? s.turn.map(t => topicRow(t, [h('span', { class: 'tag' }, turnWhy(t, a.id)), h('span', { class: 'tag' }, runnerVerdict(t, a.id)),
@@ -1413,7 +1529,7 @@ function agentLists(a, s) {
     ...s.legacy.map(t => h('button', { class: 'item', onclick: () => openTask(t) }, h('span', { class: 'body' }, h('div', { class: 't clamp-1' }, t.title), h('div', { class: 'meta' }, h('span', { class: 'tag' }, '옛 작업표')))))]
     : [empty('관련 작업물이 없습니다.')];
   else body = s.assigned.length ? s.assigned.map(t => topicRow(t)) : [empty('맡은 주제가 없습니다.')];
-  return [h('div', { class: 'stats' }, cell('assigned', s.assigned.length, '맡은 주제'), cell('turn', s.turn.length, '내 차례'), cell('tasks', s.tasks.length, '관련 작업')),
+  return [h('div', { class: 'stats' }, cell('assigned', s.assigned.length, '맡은 주제'), cell('turn', s.turn.length, 'AI 차례'), cell('tasks', s.tasks.length, '관련 작업')),
     h('div', { class: 'list agent-topics' }, body)];
 }
 // 작업자 카드: 자동 실행기가 지금 무엇을 하는지, 차례인 일이 왜 멈춰 있는지
@@ -1505,7 +1621,7 @@ function vTopics() {
   const dropped = d.topics.filter(t => t.status === 'dropped');
   return [
     head('TOPICS', '주제 보드', `${d.topics.filter(t => !['dropped'].includes(t.status)).length}건`,
-      h('button', { class: 'btn primary', onclick: () => modal('새 주제 보내기', composerCard(repo), topicFlowHint()) }, icon('send'), '새 주제'),
+      h('button', { class: 'btn primary', onclick: openComposer }, icon('send'), '새 주제'),
       pending.length ? h('button', { class: 'btn', onclick: () => drawer('가져오기 대기', h('div', { class: 'list' }, pending.map(p => h('div', { class: 'item' },
         h('span', { class: 'lead-ico' }, icon('send')),
         h('div', { class: 'body' }, h('div', { class: 't' }, p.title), h('div', { class: 's' }, `${p.id} · ${fmtRel(p.created_at)} · PC가 가져가면 보드에 나타납니다`)),
@@ -1518,24 +1634,27 @@ function vTopics() {
     })),
   ];
 }
+// 새 주제 작성창(진행 현황·이전 주제 보드·바로가기 #/progress?new=1 공용). 입력용 창이라 뒤로/앞으로 때 되살리지 않는다(쓰던 글은 초안으로 남음)
+function openComposer() { modal('새 주제', composerCard(S.data.meta.repo), topicFlowHint()); }
 function topicFlowHint() {
   return h('ol', { class: 'hint steps' },
     h('li', null, h('b', null, '보내기'), ' — 주제를 적고 보내면 암호문만 GitHub 이슈로 올라갑니다.'),
-    h('li', null, h('b', null, '분배'), ' — 허브가 규칙과 부하에 맞춰 담당을 정합니다(배정 잠금한 작업자는 빠짐).'),
-    h('li', null, h('b', null, '진행'), ' — 담당이 진행 베이스를 쓰고, 같은 PC의 짝이 교차 검토합니다.'));
+    h('li', null, h('b', null, '분배'), ' — 서버컴 Astra가 목표·완료 기준을 정리하고 작업을 나눕니다.'),
+    h('li', null, h('b', null, '진행'), ' — 작업자가 실행하고 Astra가 검수합니다. 아키텍트는 필요한 결정만 결재합니다.'));
 }
 function composerCard(repo) {
   const title = h('input', { id: 'tp-title', placeholder: '주제 (예: 거래소 검색 속도 개선)', maxlength: '120', required: true, 'data-draft': 'new-topic:title' });
   const body = h('textarea', { id: 'tp-body', placeholder: '대략적인 내용·배경·원하는 결과. 정리 안 된 메모여도 됩니다.', 'data-draft': 'new-topic:body' });
   const kind = h('select', { id: 'tp-kind', 'aria-label': '유형' }, ['기능·개선', '버그', '조사·분석', '디자인', '운영·도구', '기타'].map(k => h('option', null, k)));
   const pri = h('select', { id: 'tp-pri', 'aria-label': '우선순위' }, ['P2 보통', 'P1 높음', 'P0 긴급', 'P3 낮음'].map(k => h('option', { value: k.slice(0, 2) }, k)));
-  const prefer = h('select', { id: 'tp-prefer', 'aria-label': '담당 선호' }, (S.data.agents || []).length
-    ? agentOptions(null, [h('option', { value: 'auto' }, '자동 배분 (추천)')]).map(o => { if (o.value !== 'auto') o.textContent += ' 우선'; return o; })
-    : [['auto', '자동 배분'], ['claude', 'Claude 우선'], ['astra', 'Astra 우선']].map(([v, l]) => h('option', { value: v }, l)));
+  // 담당은 서버컴 Astra가 정한다(예전 '담당 선호' 칸은 보내지 않던 값이라 뺐다)
+  const start = h('select', { 'aria-label': '시작 시점', 'data-draft': 'new-topic:start', onchange: () => setSendLabel() }, h('option', {value:'later'}, '주제만 저장 · 나중에 시작'), h('option', {value:'now'}, '지금 시작 · Astra에게 맡기기'));
+  const sendLabel = h('span');
+  const setSendLabel = () => { sendLabel.textContent = start.value === 'now' ? '보내고 바로 시작' : '주제 저장(나중에 시작)'; };
   const status = h('div', { class: 'hint', role: 'status', 'aria-live': 'polite' });
   function make() {
     if (!title.value.trim()) { title.focus(); status.textContent = '주제를 적어주세요.'; return null; }
-    const topic = { id: newId('T', 3), title: title.value.trim(), body: body.value.trim(), kind: kind.value, priority: pri.value, prefer: prefer.value, created_at: new Date().toISOString(), from: 'dashboard' };
+    const topic = { id: newId('T', 3), title: title.value.trim(), body: body.value.trim(), kind: kind.value, priority: pri.value, prefer: 'auto', backlog: start.value !== 'now', created_at: new Date().toISOString(), from: 'dashboard' };
     return { topic };
   }
   function remember(topic) {
@@ -1552,14 +1671,15 @@ function composerCard(repo) {
       remember(r.topic); afterSend(res);
       S._keepScroll = true; render();
     } catch (e) { status.textContent = e.message; } finally { send.disabled = false; }
-  } }, icon('send'), '보내기');
+  } }, icon('send'), sendLabel);
+  setSendLabel();
   const copy = h('button', { class: 'btn', onclick: async () => {
     const r = make(); if (!r) return;
     try { await navigator.clipboard.writeText(`python topics.py add-blob ${await sealTopic(r.topic)}`); remember(r.topic); toast('복사했습니다. PC 터미널에 붙여넣으세요.'); S._keepScroll = true; render(); }
     catch { status.textContent = '클립보드 복사가 막혔습니다.'; }
   } }, icon('copy'), '암호문 복사 (PC용)');
   return card('주제 던지기', null,
-    h('div', { class: 'composer' }, title, body, h('div', { class: 'row' }, kind, pri, prefer),
+    h('div', { class: 'composer' }, title, body, h('div', { class: 'row' }, kind, pri, start),
       h('div', { class: 'row' }, send, copy),
       !repo ? h('div', { class: 'callout warn' }, h('b', null, 'GitHub 저장소가 아직 연결되지 않았습니다. '), '연결 전에는 "암호문 복사"로 PC에서 넣을 수 있습니다.') : null,
       status, sendHint(),
@@ -1572,7 +1692,7 @@ function topicCard(t) {
       t.status === 'review_user' && t.gate && hoursSince(t.gate.opened_at) >= GATE_LATE_H ? h('span', { class: 'st blocked' }, '오래 대기') : null),
     h('div', { class: 'ttl clamp-2' }, t.title),
     phaseLine(t, true),
-    t.status === 'review_user' && t.gate ? h('div', { class: 'gate-wait' }, waitText(t.gate.opened_at), ' · 내 차례에서 결정') : null,
+    t.status === 'review_user' && t.gate ? h('div', { class: 'gate-wait' }, waitText(t.gate.opened_at), ' · 결재함에서 결정') : null,
     h('div', { class: 'foot' }, t.assignee ? h('span', { class: 'wait' }, av(t.assignee, true), person(t.assignee).name) : h('span', { class: 'wait' }, '미배정'),
       t.turn ? h('span', { class: 'tag' }, `차례: ${person(t.turn).name}`) : null,
       (t.notes || []).length ? h('span', null, `메모 ${(t.notes || []).length}`) : null,
@@ -1630,7 +1750,7 @@ function flowItems(f = 'all', pcF = 'all') {
 }
 // ------------------------------------------------------------ 완료(아키텍트 요청 2026-10-03: 보드에서 빼고 기록으로만 본다)
 const GATE_SHORT = { 4: '실게임 시험', 5: '배포본 결정', 7: '운영 반영 승인', 9: '완료 확정', 40: '결과 확인' };
-function vDone() {
+function vDone(embedded) {
   const win = S.f.doneWin || '30d';
   const days = { '7d': 7, '30d': 30, all: 1e5 }[win];
   const doneAt = t => t.status_at || t.updated_at;
@@ -1657,17 +1777,15 @@ function vDone() {
         h('span', { class: 'when' }, ` ${fmtAbs(x.answered_at)}`))))
         : h('div', { class: 'hint' }, '관문 기록이 없습니다(9단계 흐름 이전에 끝난 주제).'),
       h('button', { class: 'btn sm', onclick: () => openTopic(t) }, icon('topics'), '주제 전체 보기')));
-  return [
-    head('DONE', '완료', `완료 ${all.length}건`,
-      chips([['7d', '7일'], ['30d', '30일'], ['all', '전체']], win, v => { S.f.doneWin = v; render(); }, '완료 기간')),
-    h('div', { class: 'done-fit fit-page' },
+  const winChips = chips([['7d', '7일'], ['30d', '30일'], ['all', '전체']], win, v => { S.f.doneWin = v; S._keepScroll = true; render(); }, '완료 기간');
+  const body = h('div', { class: 'done-fit fit-page' },
       card('완료한 주제', { big: list.length, unit: '건', cls: 'fill scroll-card' },
         list.length ? h('div', { class: 'done-list' }, list.map(row)) : empty('이 기간에 완료한 주제가 없습니다.'),
         oldTasks.length ? h('details', { class: 'done-old' }, h('summary', null, `옛 작업표 완료 ${oldTasks.length}건`),
           h('div', { class: 'list' }, oldTasks.map(t => h('button', { class: 'item', onclick: () => openTask(t) },
-            h('span', { class: 'body' }, h('div', { class: 't clamp-1' }, t.title), h('div', { class: 's' }, fmtAbs(t.updated_at))))))) : null)),
-    h('p', { class: 'hint fit-hint' }, '완료한 주제는 주제 보드·업무 보드에서 빠지고 여기에 기록으로 남습니다. 항목을 펼치면 관문마다 언제 무엇을 골랐는지 보입니다.'),
-  ];
+            h('span', { class: 'body' }, h('div', { class: 't clamp-1' }, t.title), h('div', { class: 's' }, fmtAbs(t.updated_at))))))) : null));
+  if (embedded) return { small: `완료 ${all.length}건 · 줄기 단위`, tools: winChips, body: [body] };
+  return [head('DONE', '완료', `완료 ${all.length}건`, winChips), body];
 }
 // 보류 메뉴(아키텍트 2026-10-03): 보류한 주제를 따로 모아 보고, 필요할 때 '다시 진행'으로 꺼내 쓴다.
 // 관문에서 보류했으면 그 ★ 관문이 내 차례에 다시 열리고, 진행 중에 보류했으면 진행 중으로 돌아가 AI가 이어서 한다
@@ -1687,7 +1805,7 @@ function parkInfo(t) {
   const last = (t.gate_history || []).at(-1);
   const h_ = last && last.act === 'park' && !last.resumed_at ? last : null;  // 마지막 관문 답이 보류이고 아직 재개 안 됐을 때만 관문 보류
   if (h_) return { where: `${gateName(h_.n, GATE_SHORT[h_.n] || '관문')}에서 보류`, note: h_.note || '', at: h_.answered_at,
-    back: `${gateName(h_.n, GATE_SHORT[h_.n] || '관문')}이 내 차례에 다시 열립니다(메모는 기록에 남고, 관문은 직접 고르시면 됩니다)` };
+    back: `${gateName(h_.n, GATE_SHORT[h_.n] || '관문')}이 결재함에 다시 열립니다(메모는 기록에 남고, 관문은 직접 고르시면 됩니다)` };
   // 진행 중 보류의 메모: 보류 시각(status_at)까지의 기록 중 아키텍트 보류 결정 → 보류 언급 순으로
   const upto = (t.notes || []).filter(x => !t.status_at || toMs(x.ts) <= toMs(t.status_at) + 1000);
   const n = upto.filter(x => /^\[아키텍트 보류 결정\]/.test(x.body || '')).at(-1) || upto.filter(x => /보류/.test(x.body || '')).at(-1);
@@ -1707,14 +1825,14 @@ function resumeControl(t) {
 }
 function parkedBox(t) {
   if (t._pendingResume) return h('div', { class: 'callout' }, h('b', null, '다시 진행 반영 대기 · '), '다음 동기화 때 보류가 풀립니다.');
-  if (t.status !== 'parked') return null;
+  if (t.status !== 'parked' || t.archived) return null;  // 재시작 보관은 '다시 진행' 대상이 아니다(새 주제로 이어짐)
   const p = parkInfo(t);
   return h('div', { class: 'callout' }, h('div', null, h('b', null, `보류 중 · ${p.where}`), p.at ? ` (${fmtAbs(p.at)})` : '', p.note ? h('div', { class: 'muted' }, p.note) : null,
     h('div', { class: 'hint' }, `다시 진행하면 ${p.back}`)), resumeControl(t));
 }
-function vParked() {
+function vParked(embedded) {
   const at = t => parkInfo(t).at || t.status_at || t.updated_at;
-  const list = S.d.topics.filter(t => t.status === 'parked' || t._pendingResume).sort((a, b) => toMs(at(b)) - toMs(at(a)));
+  const list = S.d.topics.filter(t => (t.status === 'parked' && !t.archived) || t._pendingResume).sort((a, b) => toMs(at(b)) - toMs(at(a)));
   const row = t => {
     const p = parkInfo(t);
     return h('details', { class: 'done-row' },
@@ -1729,13 +1847,11 @@ function vParked() {
         t._pendingResume ? h('div', { class: 'hint' }, '다음 동기화 때 보류가 풀립니다.') : [h('div', { class: 'hint' }, `다시 진행하면 ${p.back}`), resumeControl(t)],
         h('button', { class: 'btn sm', onclick: () => openTopic(t) }, icon('topics'), '주제 전체 보기')));
   };
-  return [
-    head('PARKED', '보류', `보류 ${list.length}건`),
-    h('div', { class: 'done-fit fit-page' },
-      card('보류한 주제', { big: list.length, unit: '건', cls: 'fill scroll-card' },
-        list.length ? h('div', { class: 'done-list' }, list.map(row)) : empty('보류한 주제가 없습니다.'))),
-    h('p', { class: 'hint fit-hint' }, '관문에서 보류를 고르거나 AI 보류 제안을 승인한 주제가 여기 모입니다. 필요할 때 펼쳐서 "다시 진행"을 누르면 보류했던 자리(관문 또는 진행 중)로 돌아갑니다.'),
-  ];
+  const body = h('div', { class: 'done-fit fit-page' },
+    card('보류한 주제', { big: list.length, unit: '건', cls: 'fill scroll-card' },
+      list.length ? h('div', { class: 'done-list' }, list.map(row)) : empty('보류한 주제가 없습니다.')));
+  if (embedded) return { small: `보류 ${list.length}건`, tools: null, body: [body] };
+  return [head('PARKED', '보류', `보류 ${list.length}건`), body];
 }
 // 배포 대기열(아키텍트 2026-10-03): 서버컴 반영은 바로 하지 않는다. ★7 → 서버컴 배포 준비(자동) → 대기열 →
 // 날을 잡아 배포 묶음(R-YYYYMMDD) → 서버컴 Astra 대화에서 배포 → 주제마다 ★9(묶음 단위로 한 번에 완료 확정)
@@ -1757,15 +1873,15 @@ function deployGroups() {
 }
 function prepFiles(t) { return ((t.deploy_prep || {}).files || []); }
 function conflictTags(t) {
-  return (t.deploy_conflicts || []).map(c => { const y = topicById(c.id); return h('button', { class: 'tag tag-btn st blocked', onclick: e => { e.stopPropagation(); if (y) openTopic(y); }, title: c.files.join(', ') || '배포 준비에서 겹침으로 적음' },
-    `겹침: ${y ? y.title : c.id}${c.files.length ? ` (${c.files.slice(0, 2).join(', ')}${c.files.length > 2 ? ' 외' : ''})` : ''}`); });
+  return (t.deploy_conflicts || []).map(c => { const y = topicById(c.id); return h('button', { class: 'tag tag-btn st blocked', onclick: e => { e.stopPropagation(); if (y) openTopic(y); }, title: (c.files || []).join(', ') || '배포 준비에서 겹침으로 적음' },
+    `겹침: ${y ? y.title : c.id}${(c.files || []).length ? ` (${c.files.slice(0, 2).join(', ')}${c.files.length > 2 ? ' 외' : ''})` : ''}`); });
 }
 function deployBatchText(b) {
   const lines = b.topics.map(t => {
     const p = t.deploy_prep || {};
     const w = t.work_id ? (S.data.works || {})[t.work_id] : null;
     return `- ${t.id} "${t.title}"${t.gate && t.gate.n === 9 ? ' (배포 끝남 · ★9 대기)' : ''}\n  대상 파일: ${prepFiles(t).join(', ') || '(준비 요약 확인)'}` +
-      `${(t.deploy_conflicts || []).length ? `\n  겹침: ${t.deploy_conflicts.map(c => c.id + (c.files.length ? `(${c.files.join(', ')})` : '')).join(', ')}` : ''}` +
+      `${(t.deploy_conflicts || []).length ? `\n  겹침: ${t.deploy_conflicts.map(c => c.id + ((c.files || []).length ? `(${c.files.join(', ')})` : '')).join(', ')}` : ''}` +
       `${w ? `\n  작업물: ${w.url}` : ''}\n  배포 준비 요약: ${String(p.summary || '').split('\n').slice(0, 6).join(' / ').slice(0, 500)}`;
   });
   return `배포 묶음 ${b.id} — 배포 날짜 ${b.date || '미정'}${b.note ? ` (${b.note})` : ''} · 주제 ${b.topics.length}개\n` +
@@ -1798,10 +1914,11 @@ function openBatchMaker(queue, preset, exclude) {
       h('div', { class: 'opt-list' }, queue.map(t => h('label', { class: 'opt' }, h('input', { type: 'checkbox', checked: on.has(t.id) ? true : null, onchange: e => { e.target.checked ? on.add(t.id) : on.delete(t.id); draw(); } }),
         h('span', null, t.title, h('span', { class: 'opt-hint' }, `대상 파일 ${prepFiles(t).length}개${(t.deploy_conflicts || []).length ? ' · 겹침 있음' : ''}`))))),
       clash.length ? h('div', { class: 'callout' }, h('b', null, '같은 파일을 고치는 항목이 함께 들어갑니다: '), clash.map(t => t.title).join(', '), h('div', { class: 'hint' }, '서버컴 Astra 대화에서 합친 diff로 순서를 정하면 됩니다. 따로 하려면 체크를 빼세요.')) : null,
-      h('div', { class: 'row', style: { 'margin-top': '10px' } }, note, h('button', { class: 'btn primary', disabled: picked.length && day.value ? null : true, onclick: async () => {
+      h('div', { class: 'row', style: { 'margin-top': '10px' } }, note, h('button', { class: 'btn primary', disabled: picked.length && day.value ? null : true, onclick: async e => {
         const b = (no.value.trim() || batchNo(day.value));
         if (!/^R-\d{8}(-[0-9a-z]{1,8})?$/.test(b)) { toast('묶음 번호 형식: R-YYYYMMDD 또는 R-YYYYMMDD-2'); return; }
         if (exclude && b === exclude) { toast(`지금 묶음(${exclude})과 같은 번호입니다. 다른 날짜를 고르세요.`); return; }
+        e.currentTarget.disabled = true;
         closeDrawer();
         await batchOp('add', b, picked.map(t => t.id), { date: day.value, note: note.value.trim() });
       } }, icon('calendar'), `${picked.length}건으로 배포 묶음 만들기`)));
@@ -1817,9 +1934,11 @@ function confirmBatch9(b) {
   const on = new Set(g9.filter(t => !/실패|되돌림/.test(t.gate.summary || '')).map(t => t.id));
   const list = h('div', { class: 'opt-list' }, g9.map(t => h('label', { class: 'opt' }, h('input', { type: 'checkbox', checked: on.has(t.id) ? true : null, onchange: e => { e.target.checked ? on.add(t.id) : on.delete(t.id); } }),
     h('span', null, t.title, h('span', { class: 'opt-hint' }, (String(t.gate.summary || '').split('\n').find(Boolean) || '(배포 결과 요약 없음)').slice(0, 160))))));
-  box.append(list, h('div', { class: 'row', style: { 'margin-top': '10px' } }, h('button', { class: 'btn primary', onclick: async () => {
-    const pick = g9.filter(t => on.has(t.id));
-    if (!pick.length) return;
+  box.append(list, h('div', { class: 'row', style: { 'margin-top': '10px' } }, h('button', { class: 'btn primary', onclick: async e => {
+    // 보낼 때 다시 확인: 이미 답을 보낸 ★9는 빼고(연타·다른 창에서 보낸 것), 버튼은 한 번만
+    const pick = g9.filter(t => on.has(t.id) && !S.d.answers[t.gate.id]);
+    if (!pick.length) { toast('이미 보낸 완료 확정입니다'); closeDrawer(); return; }
+    e.currentTarget.disabled = true;
     closeDrawer();
     try {
       for (const t of pick) await sendOps('decide', { decision_id: t.gate.id, choice: '완료 확정', note: `배포 묶음 ${b.id} 일괄 완료 확정` }, `★9 완료 확정: ${t.title}`);
@@ -1851,7 +1970,7 @@ function vDeploy() {
       h('div', { class: 'row' }, h('span', null, `배포 날짜 ${b.date || '미정'}`), b.note ? h('span', { class: 'muted' }, b.note) : null,
         h('button', { class: 'btn primary sm', style: { 'margin-left': 'auto' }, onclick: async () => {
           const text = deployBatchText(b);
-          try { await navigator.clipboard.writeText(text); toast('묶음 대화 문구를 복사했습니다. 서버컴 Astra 대화에 붙여 넣으세요.'); } catch { modal('배포 묶음 대화 문구', h('pre', { class: 'pre' }, text)); }
+          try { await navigator.clipboard.writeText(text); toast('서버컴 Astra 대화 시작 문구를 복사했습니다. 서버컴 Astra 대화에 붙여 넣으세요.'); } catch { modal('서버컴 Astra 대화 시작 문구', h('pre', { class: 'pre' }, text)); }
         } }, icon('copy'), '서버컴 Astra 대화 시작 문구 복사'),
         g9.length ? h('button', { class: 'btn sm', onclick: () => confirmBatch9(b) }, icon('check'), `★9 묶음 완료 확정 ${g9.length}건`) : null),
       h('div', { class: 'list' }, b.topics.map(t => row(t, t.stage === 'deploy' && t.status === 'active' ? h('div', { class: 'row' },
@@ -1864,7 +1983,7 @@ function vDeploy() {
     pend.length ? h('div', { class: 'callout' }, `보낸 묶음 조작 ${pend.length}건 — 다음 동기화(1~2분) 때 반영됩니다.`) : null,
     h('div', { class: 'grid2' }, queueCard, prepCard),
     batchCards.length ? h('div', { class: 'grid2' }, batchCards) : null,
-    h('p', { class: 'hint fit-hint' }, '서버컴 반영은 바로 하지 않습니다. ★7에서 대기열에 넣으면 서버컴 Astra가 실서버 기준 diff·겹침·순서·백업·되돌리기를 준비합니다(운영 서버에는 쓰지 않음). 날을 잡아 묶음을 만들고, 서버컴 Astra 대화에서 함께 검토·배포합니다.'),
+    h('p', { class: 'hint fit-hint' }, '묶음을 만든 뒤 "서버컴 Astra 대화 시작 문구 복사"를 눌러 서버컴 Astra 대화에 붙여 넣으세요. 운영 반영은 그 대화에서 승인한 것만 합니다.'),
   ];
 }
 function vTasks() {
@@ -1915,7 +2034,7 @@ function vMessages() {
     head('MESSAGES', 'Claude ↔ Astra', `${all.length}건`,
       chips([['all', '전체'], ['a2c', 'Astra→Claude'], ['c2a', 'Claude→Astra'], ['unprocessed', `미처리 ${unp.length}`], ['unanswered', `답장 대기 ${S.d.unanswered.length}`], ['auto', `자동 알림·사본 ${all.filter(m => m.auto).length}`]], f, v => { S.f.msg = v; S.msgSel = null; render(); }, '메시지 필터'),
       unp.length ? h('button', { class: 'btn primary', onclick: () => ackMessages(unp.map(m => m.id)) }, icon('check'), `미처리 ${unp.length}건 모두 확인 처리`) : null),
-    h('p', { class: 'hint', style: { margin: '-6px 0 12px' } }, '여기는 AI 사이 기록입니다. 아키텍트가 답하거나 확인할 것은 "내 차례"에 모입니다. ',
+    h('p', { class: 'hint', style: { margin: '-6px 0 12px' } }, '여기는 AI 사이 기록입니다. 아키텍트가 답하거나 확인할 것은 "결재함"에 모입니다. ',
       '아키텍트 결정·답의 사본과 대시보드 자동 알림은 "미처리"에서 빠지고, 작업자가 반영하면 수신함에서 자동으로 정리됩니다.'),
     h('div', { class: 'split fit-page' },
       h('div', { class: 'card msg-list', role: 'listbox', 'aria-label': '메시지 목록' },
@@ -2032,7 +2151,7 @@ function snippet(text, terms) {
 function vBrain() {
   const terms = S.q.toLowerCase().split(/\s+/).filter(Boolean);
   const input = h('input', { type: 'search', value: S.q, placeholder: '무엇을, 왜 결정했는지 찾기 (예: 웹토큰, 오버레이, P0)', 'aria-label': '세컨드 브레인 검색',
-    oninput: e => { clearTimeout(S._qt); S._qt = setTimeout(() => { S.q = e.target.value; history.replaceState(null, '', '#/brain' + (S.q ? '?q=' + encodeURIComponent(S.q) : '')); render(); const i = $('.searchbox input'); if (i) { i.focus(); i.setSelectionRange(i.value.length, i.value.length); } }, 180); } });
+    oninput: e => { clearTimeout(S._qt); S._qt = setTimeout(() => { S.q = e.target.value; replaceScreen(routeUrl('brain')); render(); const i = $('.searchbox input'); if (i) { i.focus(); i.setSelectionRange(i.value.length, i.value.length); } }, 180); } });
   let results = null;
   if (terms.length) {
     results = corpus().map(x => {
@@ -2133,9 +2252,9 @@ function sendHint() {
 }
 function thread(target, redraw, opts = {}) {
   const items = commentsFor(target);
-  const ta = h('textarea', { placeholder: opts.placeholder || '여기에 답을 적으면 Claude에게 전달됩니다', rows: '3', 'aria-label': '답 입력', 'data-draft': `reply:${target.kind}:${target.id}`, 'data-kb-reply': '1' });
+  const ta = h('textarea', { placeholder: opts.placeholder || '여기에 의견을 적으면 서버컴 Astra에게 전달됩니다', rows: '3', 'aria-label': '답 입력', 'data-draft': `reply:${target.kind}:${target.id}`, 'data-kb-reply': '1' });
   const to = h('select', { 'aria-label': '받는 사람' }, (S.data.agents || []).length
-    ? agentOptions(LEGACY[opts.to] || opts.to || 'dev-claude').map(o => { o.textContent += '에게'; return o; })
+    ? agentOptions(LEGACY[opts.to] || opts.to || 'server-astra').map(o => { o.textContent += '에게'; return o; })
     : [h('option', { value: 'dev-claude' }, 'Claude에게'), h('option', { value: 'dev-astra' }, 'Astra에게')]);
   if (opts.to) to.value = LEGACY[opts.to] || opts.to;
   // 키보드(내 차례)에서도 같은 보내기를 쓴다: 성공하면 true
@@ -2163,6 +2282,7 @@ function thread(target, redraw, opts = {}) {
     sendHint());
 }
 async function decide(q, choice, note, redraw) {
+  if (S.d.answers[q.id]) { toast('이미 보낸 결정입니다'); return false; }  // 되살아난 창·연타로 같은 결정을 두 번 보내지 않게
   try {
     await sendOps('decide', { decision_id: q.id, choice, note: note || '' }, `결정: ${choice || '메모'}`, { undo: q.kind !== 'stall' });
     clearDraft(`decide:${q.id}`);
@@ -2182,6 +2302,7 @@ async function decide(q, choice, note, redraw) {
 // 번호는 허브와 같은 규칙(G4-… → G5-…)이라 허브 게시 전에 답해도 그대로 반영된다. 허브 게시본에 생기면 임시본은 지운다
 function chainNextGate(q, choice) {
   if (!q || q.kind !== 'gate' || !/^G4-/.test(q.id) || !/^통과/.test(choice || '')) return null;
+  if (topicById(q.task_id)?.command_mode) return;
   const id = 'G5-' + q.id.slice(3);
   const list = S.data.decisions_needed || (S.data.decisions_needed = []);
   if (!list.some(x => x.id === id)) {
@@ -2246,8 +2367,8 @@ function activateControl(t) {
     btn.disabled = true;
     try { await sendOps('activate', { topic: t.id }, `착수 지시: ${t.title}`); render(); openTopic(S.d.topics.find(x => x.id === t.id) || t); }
     catch (e) { toast(e.message); } finally { btn.disabled = false; }
-  } }, icon('play'), '착수하기 (자동 배분)');
-  return h('div', { class: 'callout' }, h('div', { style: { 'margin-bottom': '8px' } }, h('b', null, '미처리 주제입니다. '), '착수를 지시하면 다음 동기화 때 규칙에 따라 담당이 정해집니다. 담당을 직접 고르려면 아래 "담당 바꾸기"를 쓰세요.'), btn);
+  } }, icon('play'), '시작하기 · Astra에게 맡기기');
+  return h('div', { class: 'callout' }, h('div', { style: { 'margin-bottom': '8px' } }, h('b', null, '보관 중인 주제입니다. '), '시작하면 서버컴 Astra가 원래 목표부터 정리하고 실행 작업을 나눕니다.'), btn);
 }
 function assignControl(t) {
   if (!(S.data.agents || []).length || t.status === 'done') return null;
@@ -2308,6 +2429,7 @@ function conflictParts(t, redraw) {
 }
 function openDecisionNeeded(q) {
   const p = decisionParts(q, () => openDecisionNeeded(q));
+  reopenWith(() => { const x = (S.data.decisions_needed || []).find(y => y.id === q.id); if (x) openDecisionNeeded(x); });
   modalSplit('결정이 필요한 문제', p.main, p.side);
 }
 // 결정 화면 내용: 오른쪽 칸(내 차례)과 가운데 모달이 같이 쓴다
@@ -2329,11 +2451,13 @@ function decisionParts(q, redraw) {
       q.recommendation ? h('div', { class: 'callout' }, h('b', null, '권장 '), q.recommendation) : null,
       ans ? h('div', { class: 'callout' }, h('b', null, '내 결정: '), ans.choice || '(메모)', ans.note ? ' — ' + ans.note : '',
         (() => { const r = decisionReflect(q, ans); return h('div', { class: `reflect ${r.cls}` }, icon(r.cls === 'done' ? 'check' : 'clock'), h('span', null, r.text)); })()) : null,
-      (q.options || []).length ? [h('h4', null, '선택지 — 누르면 바로 결정 · 키보드는 숫자로 고르고 Enter'), optionList(q, o => decide(q, o, note.value.trim(), redraw))] : null,
-      h('h4', null, '직접 적기'),
-      MEMO_HINT[gateNOf(q)] ? h('div', { class: 'hint' }, MEMO_HINT[gateNOf(q)]) : null,
-      h('div', { class: 'composer' }, note, h('div', { class: 'row' }, h('button', { class: 'btn primary', onclick: () => { if (!note.value.trim()) { note.focus(); return; } decide(q, '', note.value.trim(), redraw); } }, icon('send'), '메모로 결정 보내기', kbd('Ctrl+Enter')))),
-      sendHint(),
+      // 이미 보낸 결정은 다시 보낼 수 없다(바꾸려면 10초 안에 취소 띠에서 취소)
+      ans ? null : [
+        (q.options || []).length ? [h('h4', null, '선택지 — 누르면 바로 결정 · 키보드는 숫자로 고르고 Enter'), optionList(q, o => decide(q, o, note.value.trim(), redraw))] : null,
+        h('h4', null, '직접 적기'),
+        MEMO_HINT[gateNOf(q)] ? h('div', { class: 'hint' }, MEMO_HINT[gateNOf(q)]) : null,
+        h('div', { class: 'composer' }, note, h('div', { class: 'row' }, h('button', { class: 'btn primary', onclick: () => { if (!note.value.trim()) { note.focus(); return; } decide(q, '', note.value.trim(), redraw); } }, icon('send'), '메모로 결정 보내기', kbd('Ctrl+Enter')))),
+        sendHint()],
     ],
     side: historyPanel(topic, task, `ask:${q.id}`),
   };
@@ -2341,6 +2465,7 @@ function decisionParts(q, redraw) {
 // AI 질문(주제 기록의 질문)을 가운데 모달로: 질문 본문 + 답 보내기 + 히스토리
 function openQuestion(topic, n) {
   const p = questionParts(topic, n, () => openQuestion(topic, n));
+  reopenWith(() => openQuestion(topicById(topic.id) || topic, n));
   modalSplit('AI 질문', p.main, p.side);
 }
 function questionParts(topic, n, redraw) {
@@ -2378,6 +2503,7 @@ function topicPhase(t) {
   if (t.status === 'done' && t.followed) return { cls: t.chain && t.chain.state === 'done' ? 'done' : 'progress', icon: 'arrow', label: t.chain && t.chain.state === 'done' ? '줄기 완료(후속까지 완료 확정)' : `후속으로 이어짐 · ${t.chain ? t.chain.label : ''}`,
     detail: t.chain ? t.chain.head : null, next: t.chain && t.chain.state !== 'done' ? '후속 주제에서 계속 — 후속이 완료 확정되면 이 주제도 완료로 셉니다' : null };
   if (t.status === 'done') return { cls: 'done', icon: 'check', label: t.confirmed ? '완료 확정' : '완료' };
+  if (t.archived) return { cls: 'neutral', icon: 'arrow', label: `재시작 전 기록 → ${t.restarted_as || ''}`.trim() };  // 사령탑 전환 재시작 보관(보류 아님)
   if (t.status === 'parked') return { cls: 'neutral', icon: 'pause', label: '보류' };
   // 9단계 관문: 아키텍트 결정 차례(★4 실게임 시험 · ★5 배포본 결정 · ★7 운영 반영 승인 · ★9 완료 확정 · 조사·분석은 결과 확인)
   if (t.status === 'review_user' && t.gate && S.d.answers[t.gate.id]) {  // 답은 보냈고 허브 반영(1~2분)을 기다리는 중
@@ -2389,12 +2515,12 @@ function topicPhase(t) {
     const open =(S.data.decisions_needed || []).filter(q => !S.d.answers[q.id]);
     const ask = open.find(q => q.id === t.gate.id) || open.find(q => q.task_id === t.id);
     return { cls: 'user_test', icon: 'scale', label: `${gateName(t.gate.n, t.gate.label)}${t.live_session ? ' · 개발컴 Claude 대화' : ''}`, detail: (t.gate.summary || '').slice(0, 300) || null,
-      next: `아키텍트 — ${t.live_session ? '개발컴 Claude 대화를 열어 시험·수정, 그다음 ' : ''}내 차례에서 고르기: ${(t.gate.options || []).map(o => o.replace(/\(.*\)/, '')).join(' · ')}`, ask };
+      next: `아키텍트 — ${t.live_session ? '개발컴 Claude 대화를 열어 시험·수정, 그다음 ' : ''}결재함에서 고르기: ${(t.gate.options || []).map(o => o.replace(/\(.*\)/, '')).join(' · ')}`, ask };
   }
   if (t.live_session) return { cls: 'user_test', icon: 'user', label: '실게임 시험 수정 · 개발컴 Claude 대화',
     detail: '실게임 시험에서 나온 문제를 대화 세션에서 고치는 중입니다(자동 실행기는 손대지 않음).', next: '개발컴 Claude 대화 — 고치고 끝냄을 남기면 바로 ★4 실게임 시험으로' };
-  if (t.park_proposed) return { cls: 'user_test', icon: 'pause', label: `AI 보류 제안 · ${name(t.park_proposed.by)}`, detail: t.park_proposed.body || null, next: '아키텍트 — 내 차례 ★ 관문에서 보류 승인·다시 진행·즉시 완료 중 고르기' };
-  if (t.status === 'backlog') return { cls: 'neutral', icon: 'inbox', label: '미처리', next: '아키텍트 — 내 차례 → 착수 고르기에서 착수·담당 정하기' };
+  if (t.park_proposed) return { cls: 'user_test', icon: 'pause', label: `AI 보류 제안 · ${name(t.park_proposed.by)}`, detail: t.park_proposed.body || null, next: '아키텍트 — 결재함 ★ 관문에서 보류 승인·다시 진행·즉시 완료 중 고르기' };
+  if (t.status === 'backlog') return { cls: 'neutral', icon: 'inbox', label: '주제 보관 · 시작 전', next: '아키텍트 — 이 주제의 시작 버튼으로 Astra에게 맡기기' };
   const hold = holdOf(t.id);
   if (hold) return { cls: 'progress', icon: 'user', label: `대화 세션 작업 중 · ${name(hold.agent)}`, detail: `${hold.note || ''} (${fmtAbs(hold.until)}까지 자동 실행 멈춤)` };
   const run = runsFor(t.id)[0];
@@ -2403,9 +2529,17 @@ function topicPhase(t) {
     detail: `${name(rq.from)} → ${name(rq.to)}: ${rq.body || '-'}`, next: `${name(rq.to)} — 답하면 ${name(rq.from)}에게 자동으로 돌아감` };
   if (isRunning(run)) return { cls: 'progress', icon: 'play', label: `실행 중 · ${name(run.agent)}`, detail: `${fmtRel(run.started)} 시작 · 이유: ${run.reason || '-'}` };
   const ask = (S.data.decisions_needed || []).find(q => q.task_id === t.id && !S.d.answers[q.id]);
-  if (ask) return { cls: 'user_test', icon: 'scale', label: '아키텍트 답 대기', detail: ask.question, next: '아키텍트 — 내 차례에서 결정', ask };
+  if (ask) return { cls: 'user_test', icon: 'scale', label: '아키텍트 답 대기', detail: ask.question, next: '아키텍트 — 결재함에서 결정', ask };
   if (run && run.result === 'fail') return { cls: 'blocked', icon: 'alert', label: `실행 실패 · ${HEALTH[run.error_class] || '오류'}`,
     detail: `${run.fix || ''} (${fmtRel(run.ended || run.started)})`, next: run.needs_user ? `아키텍트 — ${run.fix || '확인 필요'}` : '자동으로 다시 시도' };
+  if (t.command_mode) {
+    const stage=flowStage(t), label=FLOW_STAGES.find(x=>x[0]===stage)?.[1]||stage;
+    return {cls:stage==='decision'?'user_test':'progress',icon:stage==='test'?'check':'play',label,
+      detail:testHeadline(t)||`현재 담당: ${t.turn?person(t.turn).full:'배포 큐 대기'}`,
+      next:stage==='deploy'?'서버컴 Astra가 묶음을 준비합니다. 최종 대화에서는 묶음 번호로 검토·배포합니다.':
+        stage==='queue'?'아키텍트 — 배포 메뉴에서 준비된 주제를 묶음으로 선택':
+        stage==='test'?'세부 시험 결과·막힌 이유·재시험 이력을 아래에서 확인하세요.':'Astra가 분배·검수하고 다음 단계로 이어갑니다.'};
+  }
   const who = t.turn;
   const partial = run && run.result === 'partial' ? ` · 지난 실행 일부 실패: ${(run.failed || []).join('; ').slice(0, 160)}` : '';
   if (!t.assignee) return { cls: 'request', icon: 'topics', label: '배분 대기', next: `${name(who || 'dev-claude')} — 자동 배분` };
@@ -2468,6 +2602,7 @@ function docLink(w, f) {
 }
 function openDoc(w, path, text) {
   const f = (w.files || []).find(x => x.path === path);
+  reopenWith(() => openDoc(w, path, text));
   modal(`${w.id} · ${path}`, f && f.url ? h('a', { class: 'btn sm', href: f.url, target: '_blank', rel: 'noopener noreferrer' }, icon('link'), 'GitHub에서 열기') : null,
     h('pre', { class: 'pre doc-pre' }, text));
 }
@@ -2586,6 +2721,10 @@ function historyPanel(topic, task, focusKey) {
     h('dl', { class: 'fields' }, h('dt', null, '담당'), h('dd', null, topic.assignee ? person(topic.assignee).full : '미배정'),
       h('dt', null, '지금 차례'), h('dd', null, topic.turn ? person(topic.turn).full : '—'),
       topic.dispatch_reason ? [h('dt', null, topic.assign_by === 'user' ? '담당 지정' : topic.assign_by === 'handoff' ? '인계' : '배분 근거'), h('dd', null, topic.dispatch_reason)] : null),
+    priorContextBox(topic),
+    flowRibbon(topic),
+    commandBox(topic),
+    testBox(topic),
     phaseLine(topic),
     workBox(topic),
     planRows.length ? h('details', { class: 'hist-plan' }, h('summary', null, `진행 베이스 · ${person(topic.plan_by).name}`),
@@ -2709,24 +2848,62 @@ function modal(eyebrow, ...content) { return openPanel('drawer modal', eyebrow, 
 function modalSplit(eyebrow, main, side) {
   return openPanel('drawer modal split', eyebrow, [h('div', { class: 'ms-main' }, main), h('div', { class: 'ms-side' }, side)]);
 }
+function removePanels() {
+  snapshotDrafts(document.body);
+  document.querySelectorAll('.scrim, .drawer').forEach(e => e.remove());
+}
+// 다음에 여는 창을 뒤로/앞으로 때 어떻게 다시 열지 정한다(지금 데이터로 새로 그리는 함수).
+// 정하지 않은 창(확인·입력용: 묶음 완료 확정·묶음 만들기·작성창 등)은 복원 때 닫힌 상태로 둔다
+function reopenWith(fn) { S._reopen = fn; }
 function openPanel(cls, eyebrow, content) {
-  closeDrawer(true);
+  const topic = S._openingTopic || null; S._openingTopic = null;
+  const rebuild = S._reopen || null; S._reopen = null;
+  const panelKey = topic ? 'topic:' + topic : cls + ':' + eyebrow;
+  closingPanel = false;
+  if (!restoringScreen) {
+    saveScreen();
+    const same = screenHistory.get(screenId)?.panel?.key === panelKey;
+    if (!same) { screenId = screenKey(); pushScreen(routeUrl(S.view, topic)); } else replaceScreen(routeUrl(S.view, topic));
+    // 화면 조각(DOM)은 저장하지 않는다 — 되살아난 확인창에서 같은 결정을 다시 보내는 일을 막는다
+    screenHistory.set(screenId, { view: S.view, f: { ...S.f }, q: S.q, mineSel: S.mineSel, scroll: window.scrollY,
+      panel: { key: panelKey, topic, cls, title: eyebrow, rebuild } });
+  }
+  removePanels();
   const scrim = h('div', { class: 'scrim', onclick: () => closeDrawer() });
   const panel = h('aside', { class: cls, role: 'dialog', 'aria-modal': 'true', 'aria-label': eyebrow },
-    h('div', { class: 'drawer-h' }, h('span', { class: 'eyebrow' }, eyebrow), h('button', { class: 'icon-btn', 'aria-label': '닫기', onclick: () => closeDrawer() }, icon('x'))),
+    h('div', { class: 'drawer-h' }, h('span', { class: 'eyebrow' }, eyebrow), h('button', { class: 'icon-btn', 'aria-label': '이전 화면', onclick: () => closeDrawer() }, icon('arrow'))),
     h('div', { class: 'drawer-b' }, content));
   document.body.append(scrim, panel);
   S._lastFocus = document.activeElement;
   requestAnimationFrame(() => { scrim.classList.add('on'); panel.classList.add('on'); panel.querySelector('.drawer-h button').focus(); });
 }
+// 닫기: 창을 열 때 쌓은 방문 기록 한 칸만 되돌린다. 닫기·Esc를 연달아 눌러도 한 번만 처리하고(되돌아가는 중 표시),
+// 이 앱의 첫 화면이면 사이트 밖으로 나가지 않게 back 대신 같은 자리 기록을 창 없는 화면으로 바꾼다
 function closeDrawer(instant) {
-  const els = document.querySelectorAll('.scrim, .drawer');
-  if (!els.length) return;
-  if (instant) { els.forEach(e => e.remove()); return; }
-  els.forEach(e => e.classList.remove('on'));
-  setTimeout(() => els.forEach(e => e.remove()), 250);
-  S._lastFocus?.focus?.();
+  if (instant) { removePanels(); return; }
+  if (!document.querySelector('.drawer')) return;  // 열린 창이 없으면 아무것도 하지 않는다
+  if (closingPanel) return;
+  const entry = screenHistory.get(screenId);
+  if (entry?.panel && !restoringScreen) {
+    saveScreen();
+    if (histDepth() > 0) {
+      closingPanel = true;
+      document.querySelectorAll('.drawer, .scrim').forEach(e => e.classList.remove('on'));
+      history.back();
+      setTimeout(() => { if (closingPanel) { closingPanel = false; removePanels(); } }, 1500);  // popstate가 오지 않는 환경 대비
+      return;
+    }
+    removePanels();
+    screenId = screenKey();
+    replaceScreen(routeUrl(S.view));
+    screenHistory.set(screenId, { ...entry, panel: null });
+    saveScreen();
+    S._lastFocus?.focus?.();
+    return;
+  }
+  removePanels(); S._lastFocus?.focus?.();
 }
+
 function fieldList(obj) {
   const rows = Object.entries(obj || {}).filter(([, v]) => v != null && v !== '' && !(Array.isArray(v) && !v.length));
   if (!rows.length) return null;
@@ -2740,6 +2917,7 @@ function openTask(t) {
   const vals = S.data.validations.filter(v => (v.job && blob.includes(v.job)) || blob.includes(v.id));
   const decs = S.data.decisions.filter(x => x.task_id === t.id);
   const topics = S.d.topics.filter(x => x.linked_task_id === t.id);
+  reopenWith(() => openTaskById(t.id));
   drawer('작업 상세',
     h('div', { style: { display: 'flex', gap: '6px', 'flex-wrap': 'wrap' } }, priChip(t.priority), stChip(t.stage), t.area ? h('span', { class: 'tag' }, t.area) : null, t._stale ? h('span', { class: 'st blocked' }, icon('clock'), `${Math.round(t._age)}시간 멈춤`) : null),
     h('h3', null, t.title),
@@ -2761,16 +2939,19 @@ function openTask(t) {
       h('button', { class: 'btn', onclick: () => setStages([t.id], s.id, () => openTaskById(t.id)) }, h('span', { style: { color: `var(--st-${s.id})`, display: 'grid' } }, icon(s.icon)), s.label))),
     t.fields && Object.keys(t.fields).length ? [h('h4', null, 'tasks.json 원본 필드'), fieldList(t.fields)] : null);
 }
-function openMessage(m) { drawer('메시지', messageDetail(m, () => openMessage(m))); }
+function openMessage(m) { reopenWith(() => { const x = S.data.messages.find(y => y.id === m.id); if (x) openMessage(x); }); drawer('메시지', messageDetail(m, () => openMessage(m))); }
 function openLedger(e) {
+  reopenWith(() => openLedger(e));
   drawer('감사 원장', h('div', { style: { display: 'flex', gap: '6px' } }, h('span', { class: `st ${LEDGER_ST[e.status].cls}` }, icon(LEDGER_ST[e.status].icon), LEDGER_ST[e.status].label), h('span', { class: 'tag' }, e.has_time ? fmtAbs(e.ts) : e.date)),
     h('h3', null, e.title), h('pre', { class: 'pre' }, e.body));
 }
 function openValidation(v) {
+  reopenWith(() => openValidation(v));
   drawer('QA 검증', h('div', { style: { display: 'flex', gap: '6px' } }, h('span', { class: `st ${v.result === 'pass' ? 'done' : v.result === 'fail' ? 'blocked' : 'neutral'}` }, icon('verify'), v.result === 'pass' ? '통과' : v.result === 'fail' ? '실패' : '불명'), v.live === 'pending' ? h('span', { class: 'st user_test' }, icon('flask'), '실게임 미실행') : null),
     h('h3', null, v.id), fieldList({ 시각: fmtAbs(v.ts), 파일: v.path, '해시 기록 파일 수': v.file_count, ...v.summary }));
 }
 function openMemory(m) {
+  reopenWith(() => openMemory(m));
   drawer('Claude 메모리', h('div', { style: { display: 'flex', gap: '6px', 'flex-wrap': 'wrap' } }, h('span', { class: 'tag' }, m.type), h('span', { class: 'tag' }, fmtAbs(m.ts))),
     h('h3', null, m.id), h('p', { class: 'muted', style: { margin: 0 } }, m.description), h('pre', { class: 'pre' }, m.body),
     m.links?.length ? [h('h4', null, '연결된 기억'), h('div', { style: { display: 'flex', gap: '6px', 'flex-wrap': 'wrap' } }, m.links.map(l => {
@@ -2779,6 +2960,7 @@ function openMemory(m) {
     }))] : null);
 }
 function openDecision(x) {
+  reopenWith(() => openDecision(x));
   drawer('결정 기록', decisionCard(x), fieldList({ 출처: x.source, 기록자: x._author, ID: x.id }));
 }
 // 개발컴 Claude 대화 시작 문구(실게임 시험 단계·멈춤 결정 '대화로 처리' 공용)
@@ -2809,6 +2991,7 @@ function liveBox(t) {
     } }, icon('send'), '대화 시작 문구 복사')));
 }
 function openTopic(t) {
+  S._openingTopic = t.id;
   if (S.editTopic && S.editTopic !== t.id) S.editTopic = null;
   const plan = t.plan || {};
   const planRows = [['goal', '목표'], ['scope', '범위'], ['inputs', '필요한 입력'], ['first_steps', '첫 단계'], ['risks', '위험·확인'], ['done_when', '완료 기준']]
@@ -2822,6 +3005,10 @@ function openTopic(t) {
     conflictBox(t),
     parkedBox(t),
     t.chain ? chainBox(t) : linkBox(t),
+    priorContextBox(t),
+    flowRibbon(t),
+    commandBox(t),
+    testBox(t),
     phaseLine(t),
     gateBox(t),
     liveBox(t),
@@ -2829,7 +3016,7 @@ function openTopic(t) {
     workBox(t, true),
     runsFor(t.id).length ? [h('h4', null, `자동 실행 이력 ${runsFor(t.id).length}`), h('div', { class: 'run-list' }, runsFor(t.id).slice(0, 8).map(runRow))] : null,
     t.status === 'backlog' ? activateControl(t) : null,
-    assignControl(t),
+    t.command_mode || S.data.meta.command_epoch ? null : assignControl(t),
     h('dl', { class: 'fields' }, h('dt', null, '담당'), h('dd', null, t.assignee ? person(t.assignee).full : '미배정'),
       h('dt', null, '지금 차례'), h('dd', null, t.turn ? `${person(t.turn).full} · ${t.status === 'new' ? '분배' : !t.plan ? '진행 베이스 작성' : t.turn !== t.assignee ? '교차 검토' : '진행'}` : '—'),
       h('dt', null, '선호'), h('dd', null, ({ auto: '자동 분배', claude: 'Claude 우선', astra: 'Astra 우선' })[t.prefer] || '—'),
@@ -2839,9 +3026,9 @@ function openTopic(t) {
       Array.isArray(plan[k]) ? h('ul', null, plan[k].map(x => h('li', null, x))) : h('div', null, plan[k]))))] : null,
     [h('h4', null, `메모·검토 ${(t.notes || []).length}`), (t.notes || []).length ? h('div', { class: 'note-thread' }, t.notes.map(n => h('div', { class: 'note' }, av(n.by, false),
       h('div', { class: 'bubble' }, h('div', { class: 'h' }, h('b', null, person(n.by).name), h('span', { class: 'tag' }, NOTE_KIND[n.kind] || n.kind || '메모'), h('span', null, fmtAbs(n.ts))), h('p', null, n.body)))))
-      : empty('아직 메모가 없습니다. Claude가 분배하면 여기에 기록됩니다.')],
+      : empty('아직 메모가 없습니다. 서버컴 Astra가 목표를 정리하고 작업을 배정합니다.')],
     t.chain ? h('details', { class: 'doc-fold' }, h('summary', null, h('b', null, `줄기 전체 히스토리 · ${t.chain.members.length}개 주제를 한 라인으로`)), historyPanel(t, null).slice(1)) : null,
-    thread({ kind: 'topic', id: t.id, title: t.title }, () => openTopic(S.d.topics.find(x => x.id === t.id) || t), { placeholder: '이 주제에 덧붙일 말이나 답을 적으세요', to: t.assignee === 'astra' ? 'astra' : 'claude' }));
+    thread({ kind: 'topic', id: t.id, title: t.title }, () => openTopic(S.d.topics.find(x => x.id === t.id) || t), { placeholder: 'Astra에게 목표 수정·검토 의견을 남기세요', to: t.commander || t.assignee || 'server-astra' }));
 }
 
 // ------------------------------------------------------------ 기타
@@ -2869,7 +3056,7 @@ const KB_HELP = [
 ];
 function kbHelp() {
   if (document.querySelector('.drawer.on[data-kb="help"]')) return closeDrawer();
-  modal('키보드 단축키 · 내 차례', h('div', { class: 'kb-help' }, KB_HELP.map(([title, rows]) => [h('h4', null, title),
+  modal('키보드 단축키 · 결재함', h('div', { class: 'kb-help' }, KB_HELP.map(([title, rows]) => [h('h4', null, title),
     h('table', { class: 'kb-table' }, h('tbody', null, rows.map(([k, d]) => h('tr', null, h('th', null, k), h('td', null, d)))))])),
     h('p', { class: 'hint' }, '한글 입력 상태에서도 글자 키가 그대로 동작합니다. 입력칸 안에서는 단축키가 꺼집니다.'));
   const p = [...document.querySelectorAll('.drawer.modal')].pop();
@@ -3044,7 +3231,8 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape') { closeDrawer(); $('.side')?.classList.remove('on'); }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k' && S.data) { e.preventDefault(); const i = $('.top-search input'); i?.focus(); }
 });
-window.addEventListener('hashchange', () => { if (S.data) { readHash(); render(); } });
+// 해시 이동은 popstate가 먼저 처리한다(restoreScreen이 이 기록에 화면 식별값을 써 둠). popstate가 오지 않은 경우에만 여기서 한 번 그린다
+window.addEventListener('hashchange', () => { if (S.data && location.href !== lastRestoredHref) restoreScreen(); });
 let resizeT;
 window.addEventListener('resize', () => { clearTimeout(resizeT); resizeT = setTimeout(() => { if (S.data && S.view === 'messages') render(); }, 200); });
 document.addEventListener('visibilitychange', () => { if (!document.hidden && S.data && hoursSince(S.env?.published_at) > 0.08) refresh(); });
@@ -3057,3 +3245,225 @@ async function installApp() {
   toast(/iPhone|iPad/.test(navigator.userAgent) ? 'Safari 공유 버튼 → "홈 화면에 추가"를 누르세요' : 'Chrome 메뉴(⋮) → "앱 설치" 또는 "전송, 저장, 공유 → 앱으로 설치"');
 }
 boot();
+
+
+// 사령탑 작업실: 주제 하나에서 목표·하위 작업·근거·결재·배포를 추적한다.
+function commandBox(t) {
+  if (!t.command_mode && !t.archived) return null;
+  if (t.archived) return h('section', { class: 'callout' }, h('b', null, '재시작 전 기록'),
+    h('p', null, '이전 이력과 결과물은 보존했습니다. 이전 결재는 새 작업을 진행시키지 않습니다.'),
+    topicTag(t.restarted_as));
+  const rows = t.command?.tasks || [], labels = { ready: '실행 대기', review: 'Astra 검수', accepted: '검수 통과', blocked: 'Astra 조정 중' };
+  return h('section', { class: 'command-box card' }, h('h3', null, '서버컴 Astra가 총괄합니다'),
+    h('p', { class: 'muted' }, rows.length ? `작업 ${rows.filter(x => x.state === 'accepted').length}/${rows.length} 검수 통과 · 현재 ${t.turn ? person(t.turn).full : '결재·배포 대기'}` : '원래 목표와 완료 기준을 정리한 뒤 실행 작업자에게 배정합니다.'),
+    t.restart_of ? h('div', { class: 'row' }, h('span', null, '이전 기록'), topicTag(t.restart_of)) : null,
+    rows.map(x => h('details', { class: 'command-task', open: x.state === 'review' || x.state === 'blocked' },
+      h('summary', null, h('b', null, x.title), h('span', { class: 'tag' }, labels[x.state] || x.state), h('span', { class: 'muted' }, person(x.assignee).full)),
+      h('dl', { class: 'fields' }, h('dt', null, '맡은 범위'), h('dd', null, x.scope), h('dt', null, '완료 기준'), h('dd', null, x.done_when),
+        h('dt', null, '선행 작업'), h('dd', null, (x.depends_on || []).join(', ') || '없음')),
+      x.feedback ? h('p', null, (x.accepted_acting_for ? '개발컴 대행 검수: ' : 'Astra 검토: ') + x.feedback) : null,
+      x.result ? [h('p', null, x.result.summary), h('details', null, h('summary', null, `검증 근거 ${(x.result.evidence || []).length}개`),
+        (x.result.evidence || []).map(e => h('p', { class: 'mono' }, e.path + ' · SHA256 ' + e.sha256)))] : null)),
+    t.command?.rejected?.length ? h('p', { class: 'hint' }, '낡거나 중복된 응답은 적용하지 않았습니다. 전체 기록에서 확인할 수 있습니다.') : null);
+}
+// 진행 9단계 + 보관·완료. 세 번째 값은 짧은 툴팁(화면 본문에는 쓰지 않는다)
+const FLOW_STAGES = [
+  ['saved','주제 보관','시작 전 · 자동 착수 안 함'],
+  ['goal','목표 정리','Astra · 목표·완료 기준·작업 나누기'],
+  ['execute','실행','작업자 · 조사·구현'],
+  ['review','Astra 검수','Astra · 수락 또는 재작업'],
+  ['test','자동 시험','개발컴 · 빌드·격리 시험'],
+  ['decision','아키텍트 검토','결재함 · ★4 실게임 시험 등'],
+  ['pack','배포본 작성','개발컴 · 변경 파일·적용·복구 절차'],
+  ['prep','서버 준비','서버컴 · 수신·해시 확인'],
+  ['queue','배포 대기','배포 메뉴 · 묶음 고르기'],
+  ['deploy','묶음 배포','서버컴 Astra 대화 · ★7 승인 범위만'],
+  ['done','완료','★9 완료 확정'],
+];
+function flowStage(t) {
+  if (t.status === 'backlog') return 'saved';
+  if (t.status === 'done') return 'done';
+  if (t.status === 'review_user' || (S.data.decisions_needed || []).some(q => q.task_id === t.id && !S.d.answers[q.id])) return 'decision';
+  if (['test','pack','prep','queue','deploy'].includes(t.stage)) return t.stage;
+  const tasks = t.command?.tasks || [];
+  if (!tasks.length) return 'goal';
+  if (tasks.some(x => ['review','blocked'].includes(x.state)) || tasks.every(x => x.state === 'accepted')) return 'review';
+  return 'execute';
+}
+function flowRibbon(t) {
+  if (!t.command_mode || t.archived) return null;
+  const at = flowStage(t);
+  return h('ol', { class: 'topic-flow', 'aria-label': '전체 단계와 현재 위치' }, FLOW_STAGES.map(([id,label],i) =>
+    h('li', { class: id === at ? 'current' : '', 'aria-current': id === at ? 'step' : null }, `${id === 'saved' || id === 'done' ? '' : i + '. '}${label}`, id === at ? ' · 현재' : '')));
+}
+// 진행 현황(아키텍트 원칙: 데스크톱 한 화면 · 목록 카드는 3건 + 더보기 · 가로 배치 · 경고 옆 같은 자리 행동 버튼)
+// 구성: 머리줄(검색·보류·새 주제) → 요약 4칸(결재할 일 · 막힘 · 자동 시험 · 전체 상태) → 단계 막대(필터 하나) → 단계 보드
+function vProgress() {
+  const all = S.d.topics.filter(t => !['parked', 'dropped'].includes(t.status) && !t.followed);
+  const q = S.f.progressQ || '', selected = S.f.flowStage || 'all';
+  const list = all.filter(t => (t.title + ' ' + t.id + ' ' + (t.body || '')).toLowerCase().includes(q.toLowerCase()));
+  const groups = FLOW_STAGES.filter(([id]) => selected === 'all' || id === selected);
+  const running = all.filter(t => !['done','backlog'].includes(t.status)).length;
+  const parkedN = S.d.topics.filter(t => t.status === 'parked' && !t.archived).length;
+  const one = selected !== 'all';
+  return [head('', '진행 현황', `진행 ${running}건`,
+      h('input', { type: 'search', class: 'progress-search', 'aria-label': '진행 중인 주제 검색', 'data-focus': 'progress-search', placeholder: '주제·내용 검색', value: q,
+        oninput: e => { S.f.progressQ = e.target.value; S._keepScroll = true; render(); } }),
+      h('button', { class: 'btn', onclick: () => go('parked') }, icon('pause'), `보류 ${parkedN}건`),
+      h('button', { class: 'btn primary', onclick: openComposer }, icon('send'), '새 주제')),
+    S.data.meta.command_version && !S.data.meta.command_epoch ? h('div',{class:'callout warn'},h('b',null,'사령탑 전환 준비 중'),h('p',null,(S.data.meta.command_pending||['PC 동기화 확인 중']).join(' · '))) : null,
+    progressSummary(all),
+    stageStrip(list, selected),
+    h('div', { class: `command-board full-flow${one ? ' one' : ''}`, 'data-selected': selected }, groups.map(([id,label,desc]) => {
+      const rows = list.filter(t=>flowStage(t)===id).sort((a,b)=>(a.priority||'P2').localeCompare(b.priority||'P2')||toMs(b.updated_at)-toMs(a.updated_at));
+      const number = id === 'saved' ? '·' : id === 'done' ? '✓' : FLOW_STAGES.findIndex(x=>x[0]===id);
+      const open = one || S.f['expand:' + id];
+      return h('section', { class: 'card flow-lane', 'data-stage': id, 'aria-label': label },
+        h('h2', { title: desc }, h('span', { class: 'flow-number' }, number), label, h('span', { class: 'badge' }, rows.length)),
+        rows.length ? h('div', { class: 'lane-cards' }, rows.slice(0, open ? rows.length : 3).map(t => laneCard(t, id, label))) : h('div', { class: 'lane-empty' }, '없음'),
+        !one && rows.length > 3 ? h('button', { class: 'more-btn lane-more', onclick: () => { S.f['expand:' + id] = !S.f['expand:' + id]; S._keepScroll = true; render(); } },
+          S.f['expand:' + id] ? '접기' : `${rows.length - 3}건 더 보기`) : null);
+    }))];
+}
+// 단계 보드 카드 두 줄: 제목 / 지금 상태 · 담당 · 시간(하위 작업 수 등은 툴팁)
+function laneCard(t, id, label) {
+  const ans = t.gate && S.d.answers[t.gate.id];
+  const state = id === 'decision' ? `${t.gate?.label || '아키텍트 결정'} · ${ans ? '답 보냄 · 반영 대기' : '결재함에서 결정'}`
+    : testHeadline(t) || (id === 'queue' ? '배포 메뉴에서 묶음 고르기' : id === 'done' ? '완료 확정' : t.gate?.label || label);
+  const tasks = t.command?.tasks || [];
+  const who = t.turn ? person(t.turn).name : id === 'decision' ? '아키텍트' : null;
+  const meta = [tasks.some(x => x.attempt > 1) ? '검토 의견 반영 중' : null, who, fmtRel(t.updated_at)].filter(Boolean).join(' · ');
+  return h('button', { class: `command-card${id === 'decision' && !ans ? ' need' : ''}`, onclick: () => openTopic(t),
+    title: [t.title, state, tasks.length ? `하위 작업 ${tasks.filter(x => x.state === 'accepted').length}/${tasks.length} 검수 통과` : null, meta].filter(Boolean).join('\n') },
+    h('b', { class: 'clamp-1' }, t.title),
+    h('span', { class: `clamp-1${testHeadline(t) ? ' test-headline' : ''}` }, state, h('small', null, ' · ', meta)));
+}
+// 단계 막대 = 필터 하나(예전 '단계별 주제 분포' 그래프와 단계 버튼을 합침). 막대 높이는 주제 수
+function stageStrip(list, selected) {
+  const counts = Object.fromEntries(FLOW_STAGES.map(([id]) => [id, list.filter(t => flowStage(t) === id).length]));
+  const max = Math.max(1, ...Object.values(counts));
+  const pick = id => { S.f.flowStage = id; S._keepScroll = true; render(); };
+  return h('nav', { class: 'flow-overview', 'aria-label': '단계별 주제 수 · 눌러서 그 단계만 보기' },
+    h('button', { class: `stage-all${selected === 'all' ? ' selected' : ''}`, 'aria-label': '전체 단계', 'aria-pressed': String(selected === 'all'), onclick: () => pick('all') }, h('b', null, '전체 단계'), h('span', { class: 'n' }, list.length)),
+    FLOW_STAGES.map(([id, label, desc], i) => h('button', { class: selected === id ? 'selected' : '', 'aria-pressed': String(selected === id), title: desc,
+      'aria-label': `${label} ${counts[id]}건 보기`, onclick: () => pick(selected === id ? 'all' : id) },
+      h('small', null, id === 'saved' ? '보관' : id === 'done' ? '완료' : String(i)), h('b', null, label),
+      h('span', { class: 'stage-meter', 'aria-hidden': 'true' }, h('i', { style: { width: `${counts[id] / max * 100}%` } })),
+      h('span', { class: 'n' }, counts[id]))));
+}
+
+const TEST_STATES = {pending:'대기',running:'실행 중',review:'통과 · Astra 검수 대기',passed:'통과',failed:'실패 · 수정/재시험',blocked:'환경·의존 문제',skipped:'Astra 판단으로 제외'};
+// 서버컴 화면 계약(10-03): passed라도 사령탑 수락(accepted_by)이 없으면 '검수 대기' — 최종 통과로 세지 않는다
+const testState = x => x.state === 'passed' && !x.accepted_by ? 'review' : x.state;
+function testHeadline(t) {
+  const rows = t.command?.tests || [];
+  if (!rows.length || t.stage !== 'test') return '';
+  const at = rows.find(x=>!['passed','skipped'].includes(testState(x)));
+  return `시험 ${rows.filter(x=>testState(x)==='passed').length}/${rows.length} 통과` + (at ? ` · ${at.title}: ${TEST_STATES[testState(at)]}` : ' · 결과 정리');
+}
+function testBox(t) {
+  const rows = t?.command?.tests || [];
+  if (!rows.length || t.archived) return null;
+  const byId = Object.fromEntries(rows.map(x=>[x.id,x.title]));
+  return h('section', {class:'card test-box'}, h('h3', null, '시험 과정과 결과'),
+    t.test_reset_needed ? h('p', {class:'callout warn'}, '아키텍트 검토 의견을 반영하여 Astra가 재시험을 준비합니다.') : null,
+    rows.map((x,i)=>h('details', {class:`test-item ${testState(x)}`,open:['running','failed','blocked','review'].includes(testState(x))},
+      h('summary', null,h('b',null,`${i+1}. ${x.title}`),h('span',{class:'tag'},TEST_STATES[testState(x)]||x.state)),
+      h('dl',{class:'fields'},h('dt',null,'담당'),h('dd',null,person(x.assignee).full),
+        h('dt',null,'선행 시험'),h('dd',null,(x.depends_on||[]).map(id=>byId[id]||id).join(' → ')||'없음'),
+        h('dt',null,'방법·환경'),h('dd',null,x.method),h('dt',null,'통과 기준'),h('dd',null,x.expected),
+        h('dt',null,'시작 / 마지막 기록'),h('dd',null,`${fmtAbs(x.started_at)} / ${fmtAbs(x.updated_at)}`),
+        h('dt',null,'시도'),h('dd',null,`${x.attempt}회`)),
+      x.accepted_acting_for ? h('p',{class:'tag'},'개발컴 대행 검수 · '+person(x.accepted_by).full) : null,
+      x.summary ? h('p',null,x.summary) : h('p',{class:'muted'},'실행 결과가 아직 없습니다.'),
+      x.evidence?.length ? h('details',null,h('summary',null,`실제 로그 근거 ${x.evidence.length}개`),x.evidence.map(e=>h('p',{class:'mono'},`${e.path} · SHA256 ${e.sha256}`))) : null,
+      x.history?.length ? h('details',null,h('summary',null,`이전 시도·진행 기록 ${x.history.length}건`),x.history.map(e=>h('p',null,`${fmtAbs(e.ts)} · ${person(e.agent).full} · ${e.op}: ${e.body}`))) : null)));
+}
+// 진행 현황 위쪽 4칸: 결재할 일(결재함과 같은 기준) · 막힘(행동 버튼) · 자동 시험 · 전체 상태
+function progressSummary(all) {
+  const active = all.filter(t=>!['done','backlog'].includes(t.status));
+  const ap = approvals();
+  const blocked = active.map(t=>{
+    const check=t.stage === 'test' ? (t.command?.tests||[]).find(x=>['failed','blocked'].includes(x.state)) : null;
+    const task=(t.command?.tasks||[]).find(x=>x.state==='blocked');
+    const who=(S.data.agents||[]).find(a=>a.id===t.turn);
+    const offline=who?.last_seen && hoursSince(who.last_seen)>1;
+    const why=check ? `${check.title} · ${TEST_STATES[check.state]}` : task ? (task.feedback || `${task.title} · Astra 조정 중`) : t.open_request ? `작업자 응답 대기 · ${person(t.open_request.to).full}` : offline ? `${person(t.turn).name} 신호 1시간 넘게 없음` : null;
+    if (!why) return null;
+    const act = check ? ['시험 결과 보기', () => { openTopic(t); requestAnimationFrame(() => document.querySelector('.drawer .test-item.failed, .drawer .test-item.blocked')?.scrollIntoView({ block: 'center' })); }]
+      : offline ? ['작업자 상태', () => go('agents')] : ['주제 열기', () => openTopic(t)];
+    return {t,why,act,at:check?.updated_at||t.open_request?.ts||t.updated_at};
+  }).filter(Boolean);
+  const showAllBlocked = !!S.f.blockedAll;
+  const tested = all.filter(t=>t.stage==='test' && t.command?.tests?.length);
+  const openMine = it => { S.f.mine = 'all'; S.mineSel = it.key; go('mine'); };
+  const n = st => all.filter(t => st.includes(t.status)).length;
+  const stat = (label, val, fn) => h(fn ? 'button' : 'div', { class: 'ps-stat', onclick: fn || null }, h('b', null, val), h('span', null, label));
+  return h('section',{class:'progress-summary','aria-label':'결재와 병목 요약'},
+    h('div',{class:'card ps-card'},
+      h('div', { class: 'card-h' }, h('h2',null,`결재할 일 ${ap.total}건`), moreBtn(ap.total - 3, () => go('mine'))),
+      ap.open.length ? ap.open.slice(0, 3).map(it => h('button', { class: 'summary-topic', onclick: () => openMine(it) },
+        h('b', { class: 'clamp-1' }, it.topic ? it.topic.title : it.title), h('span', { class: 'clamp-1' }, it.type === 'gate' ? it.sub : MINE_TYPE[it.type]?.label || ''))) : h('p',{class:'muted'},'지금 결재할 일이 없습니다.'),
+      ap.waiting.length ? h('div', { class: 'ps-wait', title: ap.waiting.map(x => x.topic ? x.topic.title : x.q.id).join('\n') }, icon('clock'), `답 보냄 · 반영 대기 ${ap.waiting.length}건`) : null),
+    h('div',{class:'card ps-card'},
+      h('div', { class: 'card-h' }, h('h2',null,`막힘·응답 대기 ${blocked.length}건`),
+        blocked.length > 3 ? h('button', { class: 'more-btn', onclick: () => { S.f.blockedAll = !showAllBlocked; S._keepScroll = true; render(); } }, showAllBlocked ? '접기' : `더보기 +${blocked.length - 3}`) : null),
+      blocked.length ? blocked.slice(0, showAllBlocked ? blocked.length : 3).map(x => h('div', { class: 'summary-topic blocked-row' },
+        h('div', { class: 'grow' }, h('b', { class: 'clamp-1' }, x.t.title), h('span', { class: 'clamp-1' }, x.why)),
+        h('button', { class: 'btn sm', onclick: x.act[1] }, x.act[0]))) : h('p',{class:'muted'},'막힌 주제가 없습니다.')),
+    h('div',{class:'card ps-card'},
+      h('div', { class: 'card-h' }, h('h2',null,`자동 시험 ${tested.length}건`), tested.length > 3 ? moreBtn(tested.length - 3, () => { S.f.flowStage = 'test'; S._keepScroll = true; render(); }) : null),
+      tested.length ? tested.slice(0, 3).map(t=>h('button',{class:'test-chart-row',onclick:()=>{openTopic(t);requestAnimationFrame(()=>document.querySelector('.drawer .test-box')?.scrollIntoView({block:'start'}));}},
+        h('b',{class:'clamp-1'},t.title),h('span',{class:'test-segments','aria-label':testHeadline(t)},(t.command.tests||[]).map(x=>h('span',{class:`test-segment ${testState(x)}`,title:`${x.title}: ${TEST_STATES[testState(x)]}`},h('span',{class:'sr-only'},`${x.title} ${TEST_STATES[testState(x)]}`)))),
+        h('small',{class:'clamp-1'},testHeadline(t)))) : h('p',{class:'muted'},'자동 시험 중인 주제가 없습니다.'),
+      tested.length ? h('div',{class:'test-legend'},Object.entries(TEST_STATES).map(([state,label])=>h('span',{title:label},h('i',{class:`test-segment ${state}`}),({pending:'대기',running:'실행',review:'검수 대기',passed:'통과',failed:'실패',blocked:'환경',skipped:'제외'})[state]))) : null),
+    h('div',{class:'card ps-card'},
+      h('div', { class: 'card-h' }, h('h2',null,'전체 상태')),
+      h('div', { class: 'ps-stats' },
+        stat('보관', n(['backlog']), () => { S.f.flowStage = 'saved'; S._keepScroll = true; render(); }),
+        stat('진행', active.length, null),
+        stat('완료', n(['done']), () => go('done')),
+        stat('자동 시험', active.filter(t=>t.stage==='test').length, () => { S.f.flowStage = 'test'; S._keepScroll = true; render(); }),
+        stat('배포 대기', active.filter(t=>t.stage==='queue').length, () => go('deploy')),
+        stat('보류', S.d.topics.filter(t => t.status === 'parked' && !t.archived).length, () => go('parked'))),
+      h('p',{class:'hint'},`마지막 동기화 ${fmtRel(S.data.meta.generated_at)}`)));
+}
+// 기록: 완료(줄기 단위·관문 이력·기간) · 보류(다시 진행) · 전체 요약(줄기 완료율·팀 현황) · 재시작 전 — 한 화면에서 칩으로 오간다
+function vHistory() {
+  const f = RECORD_KINDS.some(([k]) => k === S.f.recordKind) ? S.f.recordKind : 'done';
+  const pick = v => { saveScreen(); S.f.recordKind = v; replaceScreen(routeUrl('history')); render(); window.scrollTo({ top: 0 }); saveScreen(); };
+  let sub;
+  if (f === 'done') sub = vDone(true);
+  else if (f === 'parked') sub = vParked(true);
+  else if (f === 'overview') sub = vOverview(true);
+  else {
+    const rows = S.d.topics.filter(t => t.archived).sort((a, b) => toMs(b.updated_at) - toMs(a.updated_at));
+    sub = { small: `재시작 전 ${rows.length}건`, tools: null, body: [h('div', { class: 'done-fit fit-page' }, card('재시작 전 기록', { big: rows.length, unit: '건', cls: 'fill scroll-card' },
+      rows.length ? h('div', { class: 'list' }, rows.map(t => h('button', { class: 'item', onclick: () => openTopic(t) },
+        h('span', { class: 'body' }, h('b', { class: 'clamp-1' }, t.title), h('span', { class: 's clamp-1' }, `${t.id}${t.restarted_as ? ` → 새 주제 ${(topicById(t.restarted_as) || {}).title || t.restarted_as}` : ''}`))))) : empty('기록이 없습니다.')))] };
+  }
+  const more = h('details', { class: 'rec-more' }, h('summary', null, '상세 기록'),
+    h('div', { class: 'rec-more-b' }, [['messages','작업자 메시지'],['verify','검증 기록'],['brain','통합 검색'],['tasks','이전 업무표'],['topics','이전 주제 보드']].map(([id,label]) => h('button', { class: 'btn sm', onclick: () => go(id) }, label))));
+  return [head('', '기록', sub.small, sub.tools),
+    h('div', { class: 'rec-bar' }, chips(RECORD_KINDS, f, pick, '기록 종류'), more),
+    ...sub.body];
+}
+
+function priorContextBox(t) {
+  const rows=t?.prior_context||[];
+  if (!rows.length) return null;
+  return h('section',{class:'card prior-context'},h('h3',null,'이 주제가 이어진 과정'),
+    h('ol',{class:'lineage-graph','aria-label':'이전 주제에서 현재까지의 연결'},[...rows,t].map(p=>h('li',null,
+      h('button',{class:p.id===t.id?'current':'',onclick:()=>{const x=topicById(p.id);if(x && p.id!==t.id)openTopic(x);}},p.title||p.id),
+      h('small',null,p.id===t.id?'현재 주제':(p.decisions||[]).at(-1)?.choice||'이전 기록')))),
+    rows.map(p=>h('details',{open:true},h('summary',null,p.title||p.id,p.missing?' · 이전 기록 미수신':''),
+      p.missing?null:[h('p',null,p.goal||'원래 목표 기록 없음'),
+        (p.decisions||[]).map(d=>h('div',{class:'callout'},h('b',null,`아키텍트 선택: ${d.choice||'메모로 결정'}`),
+          h('p',null,d.note||'별도 사유 메모 없음'),h('small',null,fmtAbs(d.answered_at)),
+          h('details',null,h('summary',null,'결정 당시 작업 결과'),h('pre',{class:'pre'},d.summary||'결과 요약 없음')))),
+        (p.results||[]).map(r=>h('p',null,r.summary)),
+        p.tests?.length?h('p',null,`이전 시험: 통과 ${p.tests.filter(x=>testState(x)==='passed').length} / 실패 ${p.tests.filter(x=>x.state==='failed').length} / 제외 ${p.tests.filter(x=>x.state==='skipped').length}`):null,
+        p.work_id?h('p',{class:'mono'},`이전 작업물: ${p.work_id}`):null,
+        h('button',{class:'btn',onclick:()=>{const x=topicById(p.id);if(x)openTopic(x);else toast('이전 주제 기록이 아직 수신되지 않았습니다.');}},'이전 주제·시험 근거·전체 기록 열기')])),
+    h('div',{class:'callout'},h('b',null,'이번 주제의 범위'),h('p',null,t.body||t.title)));
+}

@@ -4,7 +4,7 @@
   "short_name": "REAL",
   "description": "REAL 작업실 — 아키텍트와 AI 작업자들의 작업 현황",
   "lang": "ko",
-  "start_url": "./#/overview",
+  "start_url": "./#/progress",
   "scope": "./",
   "display": "standalone",
   "orientation": "any",
@@ -16,8 +16,8 @@
     { "src": "icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
   ],
   "shortcuts": [
-    { "name": "주제 던지기", "short_name": "주제", "url": "./#/topics", "icons": [{ "src": "icon-192.png", "sizes": "192x192" }] },
-    { "name": "업무 보드", "short_name": "업무", "url": "./#/tasks", "icons": [{ "src": "icon-192.png", "sizes": "192x192" }] },
-    { "name": "메시지", "short_name": "메시지", "url": "./#/messages", "icons": [{ "src": "icon-192.png", "sizes": "192x192" }] }
+    { "name": "주제 던지기", "short_name": "주제", "url": "./#/progress?new=1", "icons": [{ "src": "icon-192.png", "sizes": "192x192" }] },
+    { "name": "결재함", "short_name": "결재", "url": "./#/mine", "icons": [{ "src": "icon-192.png", "sizes": "192x192" }] },
+    { "name": "배포", "short_name": "배포", "url": "./#/deploy", "icons": [{ "src": "icon-192.png", "sizes": "192x192" }] }
   ]
 }

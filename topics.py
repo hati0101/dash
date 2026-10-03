@@ -129,6 +129,8 @@ def clean_topic(raw: dict) -> dict:
         "kind": str(raw.get("kind", "기타"))[:20],
         "priority": pri if pri in ("P0", "P1", "P2", "P3") else "P2",
         "prefer": prefer,
+        "backlog": raw.get("backlog") is True,
+        "command_mode": True,
         "created_at": str(raw.get("created_at", now_iso()))[:40],
         "from": str(raw.get("from", "dashboard"))[:20],
     }
@@ -694,7 +696,8 @@ def cmd_status(args, cfg):
 
 # 허브(개발컴)의 기존 작성자 파일 이름 → 작업자 ID
 FILE_AGENT = {"claude": "dev-claude", "astra": "dev-astra"}
-LEAD = "dev-claude"
+LEAD = "server-astra"
+LEGACY_LEAD = "dev-claude"
 
 
 def to_dt(v) -> datetime:
@@ -750,6 +753,8 @@ NO_TEST_SAID = re.compile(r"시험할 것 없음|배포할 것 없음|바꾼 파
 def is_research(t: dict, body: str = "", ts=None) -> bool:
     """True면 2 진행을 끝냈을 때 3 자체 시험을 건너뛰고 바로 ★결과 확인.
     새 규칙: 종류가 조사·분석이거나, AI가 끝냄 요약에 '시험할 것 없음'이라고 적었을 때만(제목 단어로는 판정하지 않음)."""
+    if t.get("command_mode"):
+        return t.get("kind") == "조사·분석"  # AI 요약 한 줄로 구현 검증을 우회하지 않는다.
     if t.get("kind") == "조사·분석" or NO_TEST_SAID.search(body or "") or NO_TEST_META.search(t.get("title") or ""):
         return True
     old_rule = ts is not None and to_dt(ts) < RULES_V2_FROM
@@ -814,8 +819,22 @@ def owners_at(t: dict, ts) -> set:
     return out
 
 
-def finish_counts(by: str, stage: str, live: bool, t: dict, known, ts) -> bool:
+def finish_counts(by: str, stage: str, live: bool, t: dict, known, ts, after=None) -> bool:
     """그 단계 담당의 끝냄만 다음 단계로 넘긴다(새 규칙). 교차 검토자·요청받은 작업자·남은 답 처리 작업의 done은 세지 않는다."""
+    if t.get("command_mode"):
+        if stage == "work":
+            import command
+            events = [e for e in (t.get("command") or {}).get("events", []) if to_dt(e.get("ts")) <= to_dt(ts)]
+            return by == LEAD and command.finished(command.project(events, known or {LEAD, LIVE_AGENT}))
+        if stage in ("prep", "deploy"):
+            return by == LEAD
+        if stage == "test":
+            import command, testflow
+            events = [e for e in (t.get("command") or {}).get("events", []) if to_dt(e.get("ts")) <= to_dt(ts)]
+            state = command.project(events, known or {LEAD, LIVE_AGENT})
+            return by == stage_owner(stage, t, known) and testflow.finished(state.get("tests", [])) and all(to_dt(x.get("updated_at")) > to_dt(after) for x in state.get("tests", []))
+        if stage == "pack":
+            return by == stage_owner(stage, t, known)
     if to_dt(ts) < RULES_V2_FROM:
         return True  # 옛 기록은 그때 판정 그대로
     # 끝낸 시각의 담당으로 판정한다: 담당이 나중에 바뀌어도(자동 이관·인계·아키텍트 지정) 그때 담당의 끝냄은 그대로 인정되고,
@@ -827,7 +846,7 @@ def finish_counts(by: str, stage: str, live: bool, t: dict, known, ts) -> bool:
     if stage == "work":
         return by in owners
     if stage in ("test", "pack"):
-        return by == stage_owner(stage, t, known, a) or (by in owners and (str(by).startswith("dev-") or by == LEAD))
+        return by == stage_owner(stage, t, known, a) or (by in owners and (str(by).startswith("dev-") or by == LEGACY_LEAD))
     if stage in ("prep", "deploy"):
         return str(by).startswith("server-")
     return False  # 배포 대기열(queue): 묶음에 들어가기 전 끝냄은 세지 않는다
@@ -837,7 +856,7 @@ SKIP_DONE = "즉시 완료 확정(남은 단계 건너뜀)"  # 아키텍트가 �
 
 
 def gate_options(n: int, t: dict, tested: bool = False) -> list[str]:
-    return {4: ["통과", "문제 있음(메모에 내용 적기 → 진행으로 되돌림)", "보류", SKIP_DONE],
+    return {4: ["통과", ("문제 있음(메모에 내용 적기 → 사령탑 재시험 초기화)" if t.get("command_mode") else "문제 있음(메모에 내용 적기 → 진행으로 되돌림)"), "보류", SKIP_DONE],
             5: ["배포본 만들기", "보류", "수정", SKIP_DONE],
             7: ["배포 대기열에 넣기", "배포본 수정(메모에 고칠 내용)", "보류", SKIP_DONE],
             9: ["완료 확정", "배포 실패·되돌림 — 다시 대기열로(배포본 그대로)", "문제 있음 — 배포본 고침(배포본 작성으로)",
@@ -924,7 +943,7 @@ def run_gates(t: dict, finishes: list, answered: dict, known=None) -> dict:
             if not nxt:
                 break
             ts, by, body = nxt
-            if stamp(ts) not in anchored and not finish_counts(by, stage, live, t, known, ts):
+            if stamp(ts) not in anchored and not finish_counts(by, stage, live, t, known, ts, since):
                 fin = [f for f in fin if f is not nxt]  # 그 단계 담당이 아닌 작업자의 끝냄: 단계를 넘기지 않는다
                 continue
             since = ts
@@ -945,6 +964,10 @@ def run_gates(t: dict, finishes: list, answered: dict, known=None) -> dict:
         if not ans:
             break
         act = gate_action(gate["n"], ans)
+        if t.get("command_mode"):
+            if act == "work":
+                act = "test"
+                live = False  # 실게임 반려: 사령탑 test-reset 후 자동 시험부터 다시 진행.
         history.append({**gate, "choice": ans.get("choice"), "note": ans.get("note"), "answered_at": ans.get("ts"), "act": act})
         since = ans.get("ts") or since
         prev, gate = gate, None
@@ -1000,7 +1023,7 @@ def stage_owner(stage: str, t: dict, known, assignee: str | None = None) -> str 
     peers = sorted(known or [])
     a = assignee or t.get("assignee") or LEAD
     if stage in ("test", "pack"):
-        return a if a.startswith("dev-") else LEAD
+        return a if a.startswith("dev-") else LIVE_AGENT
     if stage in ("prep", "deploy"):  # 8a 배포 준비(자동)·8b 배포(대화 세션)는 서버컴 메인 Astra
         for cand in ("server-astra", *[p for p in peers if p.startswith("server-")]):
             if cand in (known or {cand}):
@@ -1017,6 +1040,12 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
     # 검토자 짝 계산용 작업자 목록(작업자 목록을 넘기지 않은 호출에서도 같은 짝이 나오게). 인계·요청 검증은 known만 쓴다
     peers = set(known) if known else ({a.get("id") for a in (cfg or {}).get("agents", []) if a.get("id")}
                                       | {r.get("agent") for r in node_records or [] if r.get("agent")})
+    reset = read_json(data_dir(cfg) / "command-reset.json", {}) if cfg else {}
+    archived = {r["old"]: r["new"] for r in reset.get("topics", [])} if reset.get("complete") else {}
+    for marker in folder.glob('*/topic.json'):
+        restored = read_json(marker, {})
+        if restored.get('restart_of') and restored.get('command_epoch'):
+            archived[restored['restart_of']] = restored['id']
     assigns = user_assigns(cfg)
     urec = (read_json(data_dir(cfg) / "user.json", None) or {}) if cfg else {}
     activations = {r.get("topic") for r in urec.get("topic_activate", [])}
@@ -1042,16 +1071,31 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
         if d.is_dir() and ID_RE.match(d.name):
             tj = read_json(d / "topic.json") or {}
             ot = tj.get("origin_topic")
+            ot = archived.get(ot, ot)
             if ot:
-                linked_of.setdefault(ot, []).append(d.name)
+                child = archived.get(d.name, d.name)
+
+                if child not in linked_of.setdefault(ot, []): linked_of[ot].append(child)
                 if d.name not in drops and (not tj.get("backlog") or d.name in activations):
-                    followups_of.setdefault(ot, []).append(d.name)
+
+                    if child not in followups_of.setdefault(ot, []): followups_of[ot].append(child)
     for d in sorted(p for p in folder.iterdir() if p.is_dir() and ID_RE.match(p.name)):
         base = read_json(d / "topic.json")
         if not base:
             continue
         recs = {FILE_AGENT[a]: r for a in AUTHORS if (r := read_json(d / f"{a}.json", None))}
         t = dict(base)
+        t['package_receipts'] = {}
+        for record in sorted(by_topic.get(t['id'], []), key=lambda r: str(r.get('ts') or '')):
+            if record.get('kind') == 'status' and record.get('status') == 'done' and record.get('package_stage') in ('pack','prep'):
+                t['package_receipts'][record['package_stage']] = record.get('package_sha256')
+        if t.get('origin_topic') in archived:
+            t['origin_topic'] = archived[t['origin_topic']]
+        t["commander"] = LEAD
+        t["command_mode"] = bool(base.get("command_mode") or (recs.get(LEGACY_LEAD) or {}).get("command_mode"))
+        if t["command_mode"]:
+            import command
+            t["command"] = command.project([r for r in by_topic.get(t["id"], []) if r.get("kind") == "command"], peers)
         if followups_of.get(t["id"]):
             t["followups"] = sorted(followups_of[t["id"]])
         if linked_of.get(t["id"]):
@@ -1111,7 +1155,7 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
         if t["status"] == "parked" and resumed:  # 진행 중 보류 → 다시 진행: 진행 중으로(진행 베이스가 없으면 검토 중)
             t["status"] = "active" if plans else "triage"
             t["status_at"] = max(resume_ts, key=to_dt)
-        lead = recs.get(LEAD) or {}
+        lead = recs.get(LEGACY_LEAD) or {}
         t["assignee"] = norm_agent(lead.get("assignee") or (recs.get("dev-astra") or {}).get("assignee"))
         t["dispatch_reason"] = lead.get("dispatch_reason")
         t["dispatch_scores"] = lead.get("dispatch_scores")
@@ -1136,7 +1180,7 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
                 t["status"] = "triage"
         if finishes:  # 단계·관문: AI 끝냄은 다음 단계·관문으로, 완료는 아키텍트 ★9(조사·분석은 결과 확인)에서만
             t["_owners"] = ({a for a, _ in claims} | ({handoff["from"], handoff["to"]} if handoff else set())
-                            | set((recs.get(LEAD) or {}).get("prev_assignees") or []))  # 이 주제를 맡았던 작업자(착수·인계·자동 이관 전 담당)
+                            | set((recs.get(LEGACY_LEAD) or {}).get("prev_assignees") or []))  # 이 주제를 맡았던 작업자(착수·인계·자동 이관 전 담당)
             # 끝냄 시점 담당 판정용: 허브가 남긴 담당 변경 이력 + 지금 담당이 정해진 시각
             t["_owner_log"], t["_assigned_at"], t["_base_assignee"] = lead.get("owner_log"), assigned_at, t.get("assignee")
             t["_resume"] = resume_ts
@@ -1202,7 +1246,7 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
         t["requests"] = sorted(reqs, key=lambda q: q["ts"] or "")[-10:]
         # 끝냄 이전에 보낸 요청은 그 단계와 함께 닫힌다(요청 받은 쪽을 계속 깨우지 않음)
         last_fin = max((to_dt(f[0]) for f in finishes), default=None)
-        hub_closed = {x.get("id"): x for x in (recs.get(LEAD) or {}).get("closed_requests", [])}  # 허브가 닫은 요청(대상 잠김·신호 끊김)
+        hub_closed = {x.get("id"): x for x in (recs.get(LEGACY_LEAD) or {}).get("closed_requests", [])}  # 허브가 닫은 요청(대상 잠김·신호 끊김)
         for q in reqs:
             if q["status"] == "open" and last_fin and to_dt(q["ts"]) <= last_fin:
                 q["status"] = "closed"
@@ -1221,6 +1265,18 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
         t["assigned_at"] = assigned_at if t.get("assignee") else None  # 지금 담당(실게임 이관 전)이 정해진 시각 — 허브가 담당 변경 이력에 남긴다
         t["updated_at"] = max([base.get("received_at", "")] + [e[0] or "" for e in events])
         t["authors"] = sorted(set(list(recs) + [r.get("agent") for r in by_topic.get(t["id"], [])]))
+        if t.get("command_mode"):
+            import command
+            t["command"] = command.project([r for r in by_topic.get(t["id"], []) if r.get("kind") == "command"], peers)
+        if t["id"] in archived:
+            t.update(status="parked", archived=True, restarted_as=archived[t["id"]], turn=None)
+            t.pop("gate", None)
+            t.pop("live_session", None)
+            t.pop("deploy_session", None)
+        if t.get("command_mode") and t.get("stage") == "test":
+            rejected_at = max((to_dt(x.get("answered_at")) for x in t.get("gate_history", []) if x.get("act") == "test"), default=to_dt(None))
+            reset_at = max((to_dt(x.get("ts")) for x in t["command"]["events"] if x.get("op") == "test-reset"), default=to_dt(None))
+            t["test_reset_needed"] = rejected_at > reset_at
         t["turn"] = whose_turn(t)
         out.append(t)
     # 배포 대기열 겹침: 배포 준비가 적은 '대상 파일'이 같은 주제끼리(준비 중·대기열·배포 중). 준비 요약의 '겹침: T-…'도 잇는다
@@ -1241,7 +1297,33 @@ def merged_topics(folder: Path, cfg: dict | None = None, node_records: list[dict
             x["origin"] = brief[x["origin_topic"]]
         if x.get("linked"):
             x["followup_topics"] = [brief[f] for f in x["linked"] if f in brief]  # 화면 연결: 미처리·삭제 포함 모두
+    attach_context(out)
     return out
+
+
+def attach_context(rows):
+    """이전 결정은 맥락으로만 전달한다. 현재 주제의 승인·상태를 상속하지 않는다."""
+    by = {t["id"]: t for t in rows}
+    for t in rows:
+        seen, ancestors = {t["id"]}, []
+        def visit(tid):
+            if not tid or tid in seen or len(seen) > 64:
+                return
+            seen.add(tid)
+            previous = by.get(tid)
+            if not previous:
+                ancestors.append({"id": tid, "missing": True})
+                return
+            visit(previous.get("origin_topic"))
+            visit(previous.get("restart_of"))
+            ancestors.append({"id":tid,"title":previous.get("title"),"goal":previous.get("body"),
+                "status":previous.get("status"),"work_id":previous.get("work_id"),
+                "decisions":previous.get("gate_history",[]),
+                "tests":(previous.get("command") or {}).get("tests",[]),
+                "results":[x.get("result") for x in (previous.get("command") or {}).get("tasks",[]) if x.get("result")]})
+        visit(t.get("origin_topic"))
+        visit(t.get("restart_of"))
+        t["prior_context"] = ancestors
 
 
 CHAIN_STATE = {"done": "줄기 완료", "active": "진행 중", "parked": "후속 보류", "backlog": "후속 미처리", "dropped": "후속 삭제"}
@@ -1330,9 +1412,19 @@ def whose_turn(t: dict) -> str | None:
         return None
     if t.get("live_session"):
         return t.get("assignee")  # 실게임 시험 단계: 개발컴 Claude 대화 세션(자동 실행기는 깨우지 않음)
+    if t.get("command_mode") and t.get("stage", "work") == "work":
+        import command
+        return command.turn(t.get("command") or command.initial())
+    if t.get("command_mode") and t.get("stage") == "test" and t.get("test_reset_needed"):
+        return LEAD
     req = t.get("open_request")
     if req and req.get("to"):
         return req["to"]  # 요청받은 쪽 차례. 답(reply)하면 담당에게 돌아간다
+    if t.get("command_mode") and t.get("stage") == "test":
+        import testflow
+        item = testflow.current((t.get("command") or {}).get("tests", []))
+        if item:
+            return LEAD if item["state"] in ("blocked", "passed") else item["assignee"]
     if t.get("stage") == "queue":
         return None  # 배포 대기열: 아키텍트가 묶음을 만들 때까지 아무도 깨우지 않는다
     if t.get("stage_owner") and t.get("stage") in ("test", "pack", "prep", "deploy"):
@@ -1614,6 +1706,15 @@ def cmd_dispatch(args, cfg):
         if t.get("assignee") and t["status"] not in ("done", "parked", "dropped", "review_user"):
             loads[t["assignee"]] = loads.get(t["assignee"], 0) + 1
     labels = {a["id"]: f"{a['pc_label']} {a.get('label', a['id'])}" for a in all_list}
+    import command_reset
+    ready = {a["id"] for a in all_list if a.get("command_version") == 1}
+    migration_ready = not command_reset.pending(nodes)
+    reset = read_json(data_dir(cfg) / "command-reset.json", {})
+    if not reset.get("complete") and not migration_ready:
+        print("새 흐름 전환 대기: " + ' · '.join(command_reset.pending(nodes)) + " — 기존 일감은 계속 배분합니다")
+    if migration_ready:
+        command_reset.migrate(cfg, topics)
+        topics = merged_topics(topics_dir(cfg), cfg, node_recs, {a["id"] for a in all_list})
     logged = log_owners(cfg, topics)  # 자동 배분을 꺼도 담당 이력은 남긴다(끝냄 시점 판정)
     if logged:
         print(f"담당 변경 이력 기록 {logged}건")
@@ -1627,7 +1728,10 @@ def cmd_dispatch(args, cfg):
     for t in topics:
         if t.get("assignee") or t["status"] in ("done", "parked", "backlog", "dropped", "review_user"):
             continue
-        rows = score_agents(t, agents, loads, routing)
+        # 판단은 서버컴 Astra가 한다. 허브는 최초 사령탑 연결만 기록한다.
+        if LEAD not in ready or LEAD in locks:
+            continue
+        rows = [(100, LEAD, ["최종 사령탑: 목표 정리·작업 분해·배정·검수"])]
         if not rows:
             continue
         best = rows[0]
@@ -1639,14 +1743,15 @@ def cmd_dispatch(args, cfg):
         ts = now_iso()
         owner_log_add(rec, best[1], ts)
         rec.update({"assignee": best[1], "status": rec.get("status") if rec.get("status") not in (None, "new") else "triage",
-                    "dispatch_reason": reason, "dispatch_scores": {r[1]: r[0] for r in rows}, "assigned_at": ts, "status_at": ts, "updated_at": ts})
+                    "dispatch_reason": reason, "command_mode": True, "dispatch_scores": {r[1]: r[0] for r in rows}, "assigned_at": ts, "status_at": ts, "updated_at": ts})
         add_note(rec, "triage", f"자동 배분: {reason}")
         write_json(path, rec)
         loads[best[1]] = loads.get(best[1], 0) + 1
         done += 1
         print(f"{t['id']} → {best[1]} · {reason}")
-    moved = rebalance(cfg, topics, agents, loads, routing, labels)
-    rescued = rescue(cfg, topics, all_list, agents, loads, routing, labels)
+    legacy_topics = [t for t in topics if not t.get("command_mode") and not t.get("archived")]
+    moved = rebalance(cfg, legacy_topics, agents, loads, routing, labels)
+    rescued = rescue(cfg, legacy_topics, all_list, agents, loads, routing, labels)
     print(f"자동 배분 {done}건" + (f" · 재분배 {moved}건" if moved else "") + (f" · 자동 이관 {rescued}건" if rescued else ""))
 
 

@@ -56,7 +56,7 @@ SCHEMA = {
             "required": ["type", "kind", "body", "status", "plan", "work_id", "question", "options", "title", "origin", "task", "to", "file", "edits", "cmd"],
             "properties": {
                 "type": {"type": "string", "enum": ["claim", "plan", "note", "state", "work_note", "ask", "propose", "handoff", "request", "reply",
-                                                    "dev_edit", "dev_run", "dev_revert"]},
+                                                    "dev_edit", "dev_run", "dev_revert", "command"]},
                 "file": {"type": ["string", "null"]},
                 "edits": {"type": ["array", "null"], "items": {"type": "object", "additionalProperties": False, "required": ["old", "new"],
                                                                 "properties": {"old": {"type": "string"}, "new": {"type": "string"}}}},
@@ -132,6 +132,8 @@ def overlay_local(data: dict, rec: dict, only_after_gen: bool = False):
     for r in rec.get("topic_records", []):
         mine.setdefault(r.get("topic"), []).append(r)
     for t in data.get("topics", []):
+        if t.get("archived"):
+            continue
         rows = sorted(mine.get(t["id"], []), key=lambda r: to_dt(r.get("ts")))
         if not rows:
             continue
@@ -164,6 +166,11 @@ def overlay_local(data: dict, rec: dict, only_after_gen: bool = False):
                 changed = True
         if changed:
             t["turn"] = whose_turn(t)
+        if t.get("command_mode"):
+            import command
+            t["command"] = command.project([r for r in rows if r.get("kind") == "command"], known, t.get("command"))
+            t["turn"] = whose_turn(t)
+            command.route_deputy(t, command.delegation(data))
 
 
 # ---------------------------------------------------------------- 깨울 일 찾기
@@ -192,6 +199,11 @@ def sig_parts(t: dict, who: str, mode: str, data: dict, st: dict) -> dict:
     talk = sum(1 for c in data.get("comments", [])
                if (c.get("target") or {}).get("id") == t["id"] and (c.get("_author") or c.get("by")) != who)
     replies = sum(1 for q in t.get("requests") or [] if q.get("from") == who and q.get("status") == "answered")
+    if t.get("command_mode") and t.get("stage", "work") in ("work", "test"):
+        state = t.get('command') or {}
+        meaningful = [e for e in state.get('events', []) if e.get('op') != 'test-progress']
+        revision = meaningful[-1].get('revision', 0) if meaningful else (0 if state.get('events') else state.get('revision', 0))
+        stage = f"command-{revision}"
     return {"stage": stage, "mode": mode, "others": others, "talk": talk, "cont": st.get("cont", 0), "replies": replies}
 
 
@@ -262,7 +274,7 @@ def find_jobs(data: dict, state: dict, only: str | None = None) -> list[dict]:
         # 담당이고 진행 베이스가 있고 진행 중이면 '작업 모드'(작업물 저장소의 자기 폴더에 결과물을 직접 만든다)
         req_to_me = (t.get("open_request") or {}).get("to") == who
         stage_mine = t.get("stage") in ("test", "pack", "prep") and t.get("stage_owner") == who
-        mode = "impl" if (impl_allowed() and (req_to_me or stage_mine or (who == t.get("assignee") and t.get("plan") and t.get("status") == "active"))) else "plan"
+        mode = "impl" if (impl_allowed() and (req_to_me or stage_mine or t.get("command_mode") or (who == t.get("assignee") and t.get("plan") and t.get("status") == "active"))) else "plan"
         st = state.setdefault("topics", {}).setdefault(t["id"], {})
         parts = sig_parts(t, who, mode, data, st)
         sig = topic_sig(t, who, mode, data, st)
@@ -292,6 +304,18 @@ def find_jobs(data: dict, state: dict, only: str | None = None) -> list[dict]:
                 continue
             reason = f"이 단계를 처리한 뒤 변화 없이 차례가 그대로라 다시 깨움({wait}분 간격)"
         jobs.append({"kind": "topic", "agent": who, "topic": t, "sig": sig, "mode": mode, "parts": parts, "reason": reason})
+    # 배포 묶음은 AI·운영 반영 없이 로컬 ZIP을 준비한다. 최신 데이터로 매번 구성원을 검증한다.
+    if "server-astra" in agents and (only is None or only == "server-astra"):
+        batches = sorted({(t.get("deploy_batch") or {}).get("id") for t in data.get("topics", [])
+                          if t.get("command_mode") and t.get("stage") == "deploy" and t.get("status") == "active" and (t.get("deploy_batch") or {}).get("id")})
+        for batch in batches:
+            members = [t for t in data["topics"] if (t.get("deploy_batch") or {}).get("id") == batch and t.get("stage") == "deploy" and t.get("status") == "active"]
+            fingerprint = hashlib.sha256(json.dumps([(t["id"], t.get("status_at"), t.get("work_id"), t.get("package_receipts")) for t in members], sort_keys=True).encode()).hexdigest()
+            bst = state.setdefault("batches", {}).get(batch) or {}
+            if bst.get("fingerprint") == fingerprint or limited(bst):
+                continue
+            jobs.append({"kind": "batch", "agent": "server-astra", "topic": None, "batch": batch, "fingerprint": fingerprint,
+                         "sig": fingerprint, "mode": "local", "reason": "묶음 파일 자동 수신·검증·ZIP 준비"})
     # 내가 물었던 질문에 아키텍트가 답했으면 다시 깨운다(한 답에 한 번)
     used = state.setdefault("answers_used", [])
     for q in data.get("decisions_needed", []):
@@ -323,7 +347,7 @@ def find_jobs(data: dict, state: dict, only: str | None = None) -> list[dict]:
             newest[k].setdefault("older", []).append(j["ask"]["id"])
     jobs = [j for j in jobs if j["kind"] != "answer" or newest.get(((j.get("topic") or {}).get("id") or j["sig"], j["agent"])) is j]
     ans_keys = {((j.get("topic") or {}).get("id"), j["agent"]) for j in jobs if j["kind"] == "answer"}
-    jobs = [j for j in jobs if j["kind"] == "answer" or ((j["topic"] or {}).get("id"), j["agent"]) not in ans_keys]
+    jobs = [j for j in jobs if j["kind"] == "answer" or ((j.get("topic") or {}).get("id"), j["agent"]) not in ans_keys]
     if only:
         return jobs[:MAX_PER_RUN]
     return jobs
@@ -542,6 +566,11 @@ def dev_edit(agent_id: str, tid: str, a: dict, ws: Path | None) -> str:
         try:  # 파일은 이미 바뀌었다: diff를 못 써도 '거부'로 기록하지 않고 알린다(다음 수정 때 다시 쓴다)
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(f"# 원본 SHA256 {f['base_sha'] or '(새 파일)'}\n# 수정 SHA256 {f['last_sha']}\n# 인코딩 {enc} · 줄바꿈 {nl}\n" + "".join(lines), encoding="utf-8")
+            try:
+                f['diff_work_path'] = dest.resolve().relative_to(WORK_PY.parent.resolve()).as_posix()
+                _dev_save(mpath,man)
+            except ValueError:
+                pass  # scratch 사본은 real-work 보존 근거가 아니다.
         except OSError as exc:
             note = f"diff 쓰기 실패({exc}) — 수정은 적용됨"
     add = sum(1 for x in lines if x.startswith("+") and not x.startswith("+++"))
@@ -672,6 +701,35 @@ def dev_run(agent_id: str, tid: str, a: dict) -> tuple[str, bool]:
     return f"[{name}] 종료 코드 {rc} · {secs}초{artifact}\n{tail}\n(전체 기록: {log_path})", ok
 
 
+def _restart_diff_preserved(tid, name, f, raw, backup):
+    """승계 원복 전 real-work의 diff를 현재 바이트·원본 해시·실제 차이와 대조."""
+    import command
+    if _sha(raw) != f.get('last_sha'):
+        return False
+    original = b'' if f.get('created') else backup.read_bytes() if backup.is_file() else None
+    if original is None or (not f.get('created') and _sha(original) != f.get('base_sha')):
+        return False
+    before = _decode(original)[0].replace('\r\n','\n') if original else ''
+    after = _decode(raw)[0].replace('\r\n','\n')
+    expected = ''.join(difflib.unified_diff(before.splitlines(True),after.splitlines(True),'a/'+name,'b/'+name))
+    if not expected: return True  # 현재 바이트가 원본과 같아 보존할 변경이 없다.
+    root = WORK_PY.parent
+    candidates = []
+    if f.get('diff_work_path'): candidates.append(root / f['diff_work_path'])
+    for topic_id in (tid, f.get('inherited_from')):
+        for wid in linked_work_ids(topic_id):
+            candidates += list((root/'work'/wid).glob('*/patch/'+str(f.get('diff') or '__missing__')))
+    for candidate in candidates:
+        try:
+            checked = command.safe_file(root,candidate.relative_to(root).as_posix())
+            text = checked.read_text(encoding='utf-8-sig').replace('\r\n','\n')
+            header = text.split('\n',3)
+            if len(header)==4 and header[0]=='# 원본 SHA256 '+str(f.get('base_sha') or '(새 파일)') and header[1]=='# 수정 SHA256 '+f['last_sha'] and header[3]==expected:
+                return True
+        except (OSError,ValueError,UnicodeError): continue
+    return False
+
+
 def _dev_revert(dev: dict, tid: str, rel: str | None, force: bool) -> list[str]:
     sc = dev_scratch(dev)
     mpath = sc / tid / "manifest.json"
@@ -699,6 +757,9 @@ def _dev_revert(dev: dict, tid: str, rel: str | None, force: bool) -> list[str]:
             msgs.append(f"{name}: 다른 곳에서 바뀌어 되돌리지 않음")
             continue
         bk = sc / tid / "backup" / name
+        if f.get('inherited_from') and not _restart_diff_preserved(tid,name,f,path.read_bytes() if path.is_file() else b'',bk):
+            msgs.append(f"{name}: 승계 변경의 real-work diff·마지막 해시 검증 실패 — 원복하지 않고 보존")
+            continue
         if f.get("created"):
             path.unlink(missing_ok=True)
         elif bk.exists():
@@ -755,57 +816,107 @@ def dev_cleanup(data: dict) -> list[str]:
     return out
 
 
+def _inherit_restart_locks(sc, old, new, locks):
+    """dev_lock 안에서 호출. 이전 자료를 남기고 기준·백업을 먼저 복제한 뒤 잠금 승계."""
+    if not new or old == new or not re.fullmatch(r'T-\d{8}-[A-Za-z0-9_-]+', new):
+        raise ValueError('재시작 잠금 승계 대상 오류')
+    prior = _dev_json(sc / old / 'manifest.json', {})
+    target = sc / new / 'manifest.json'
+    man = _dev_json(target, {'files':{},'builds':[], 'created':now().isoformat()})
+    moving = [name for name, owner in locks.items() if owner == old]
+    for name in moving:
+        original = (prior.get('files') or {}).get(name)
+        if not original: raise ValueError('승계할 원본 manifest 항목 없음: '+name)
+        if name in man['files']:
+            if man['files'][name].get('inherited_from') != old: raise ValueError('새 주제의 기존 파일 기록과 승계 충돌: '+name)
+            continue  # 중간 종료 뒤 재실행. 새 주제의 변경 기록을 덮지 않는다.
+        rel = Path(name)
+        if rel.is_absolute() or '..' in rel.parts: raise ValueError('승계 경로 오류')
+        backup = sc / old / 'backup' / name
+        dest = sc / new / 'backup' / name
+        if not original.get('created'):
+            if not backup.is_file() or _sha(backup.read_bytes()) != original.get('base_sha'):
+                raise ValueError('승계할 원본 백업 해시 불일치: '+name)
+            dest.parent.mkdir(parents=True,exist_ok=True)
+            if not dest.exists() or _sha(dest.read_bytes()) != original['base_sha']:
+                # manifest에 아직 등록하지 않은 중간 복사만 복구한다. 기존 바이트도 별도 보존.
+                if dest.exists():
+                    saved = dest.with_name(dest.name+'.interrupted-'+_sha(dest.read_bytes()))
+                    if not saved.exists(): os.replace(dest,saved)
+                tmp = dest.with_name(dest.name+'.inherit.tmp')
+                tmp.write_bytes(backup.read_bytes())
+                if _sha(tmp.read_bytes()) != original['base_sha']: raise ValueError('승계 임시 백업 해시 불일치: '+name)
+                os.replace(tmp,dest)
+        man['files'][name] = {**original, 'inherited_from':old}
+    if moving:
+        _dev_save(target,man)
+        for name in moving: locks[name] = new
+        _dev_save(sc / 'locks.json',locks)
+    return len(moving)
+
+
 def _dev_cleanup_one(dev: dict, sc: Path, topics: dict) -> list[str]:
     out = []
     locks = _dev_json(sc / "locks.json", {})
     cutoff = now() - timedelta(days=7)
     for d in [p for p in sc.iterdir() if p.is_dir()]:
-        tid, man = d.name, _dev_json(d / "manifest.json", {"files": {}, "builds": []})
-        t = topics.get(tid)
-        if not t:
-            continue  # 게시본에 없는 주제(읽기 오류 등)는 건드리지 않는다
-        passed = dev_passed(t)
-        gone = t.get("status") in ("parked", "dropped")
-        if gone:
-            _dev_save(sc / "locks.json", locks)
-            out += [f"{tid} {m}" for m in _dev_revert(dev, tid, None, False)]
-            man = _dev_json(d / "manifest.json", man)
-            locks = _dev_json(sc / "locks.json", locks)
-        if passed or gone:
-            for b in man.get("builds", []):
-                if not b.get("removed"):
+        try:
+            tid, man = d.name, _dev_json(d / "manifest.json", {"files": {}, "builds": []})
+            t = topics.get(tid)
+            if not t:
+                continue  # 게시본에 없는 주제(읽기 오류 등)는 건드리지 않는다
+            if t.get('archived') or t.get('restarted_as'):
+                successor = t.get('restarted_as')
+                if successor and successor in topics:
+                    count = _inherit_restart_locks(sc, tid, successor, locks)
+                    if count: out.append(f'{tid} → {successor}: 파일 잠금 {count}개 승계, 이전 백업·기준 보존')
+                continue  # 재시작 보관은 삭제가 아니다. 개발 트리·백업을 자동 원복/정리하지 않는다.
+            passed = dev_passed(t)
+            gone = t.get("status") in ("parked", "dropped")
+            if gone:
+                _dev_save(sc / "locks.json", locks)
+                out += [f"{tid} {m}" for m in _dev_revert(dev, tid, None, False)]
+                man = _dev_json(d / "manifest.json", man)
+                locks = _dev_json(sc / "locks.json", locks)
+            if passed or gone:
+                for b in man.get("builds", []):
+                    if not b.get("removed"):
+                        _rm_build(dev, b["dir"])
+                        b["removed"] = True
+                left = list(man.get("files", {})) if gone else []
+                if left:  # 되돌리지 못한 파일: 백업·기록은 남기고 로그·빌드만 지운다
+                    shutil.rmtree(d / "logs", ignore_errors=True)
+                    _dev_save(d / "manifest.json", man)
+                    out.append(f"{tid} 정리(보류·삭제): 되돌리지 못한 파일 {len(left)}개({', '.join(left[:3])}) — 백업 유지, 로그·빌드 사본만 삭제")
+                    continue
+                for name in list(man.get("files", {})):
+                    if locks.get(name) == tid:
+                        locks.pop(name)
+                shutil.rmtree(d, ignore_errors=True)
+                out.append(f"{tid} 정리({'완료·★4 통과' if passed else '보류·삭제'}): 백업·로그·빌드 사본 삭제, 문서·diff는 작업물에 남김")
+                continue
+            for b in man.get("builds", []):  # 7일 지난 빌드 사본
+                if not b.get("removed") and b.get("at", "") < cutoff.isoformat():
                     _rm_build(dev, b["dir"])
                     b["removed"] = True
-            left = list(man.get("files", {})) if gone else []
-            if left:  # 되돌리지 못한 파일: 백업·기록은 남기고 로그·빌드만 지운다
-                shutil.rmtree(d / "logs", ignore_errors=True)
-                _dev_save(d / "manifest.json", man)
-                out.append(f"{tid} 정리(보류·삭제): 되돌리지 못한 파일 {len(left)}개({', '.join(left[:3])}) — 백업 유지, 로그·빌드 사본만 삭제")
-                continue
-            for name in list(man.get("files", {})):
-                if locks.get(name) == tid:
-                    locks.pop(name)
-            shutil.rmtree(d, ignore_errors=True)
-            out.append(f"{tid} 정리({'완료·★4 통과' if passed else '보류·삭제'}): 백업·로그·빌드 사본 삭제, 문서·diff는 작업물에 남김")
-            continue
-        for b in man.get("builds", []):  # 7일 지난 빌드 사본
-            if not b.get("removed") and b.get("at", "") < cutoff.isoformat():
-                _rm_build(dev, b["dir"])
-                b["removed"] = True
-        for lg in [*(d / "logs").glob("*.log"), *(d / "logs").glob("*.raw")] if (d / "logs").is_dir() else []:
-            try:
-                if lg.suffix == ".raw" or datetime.fromtimestamp(lg.stat().st_mtime, KST) < cutoff:
-                    lg.unlink(missing_ok=True)  # .raw는 명령이 끝난 뒤 남은 출력 사본(내용은 .log에 있음)
-            except OSError:
-                pass
-        _dev_save(d / "manifest.json", man)
+            for lg in [*(d / "logs").glob("*.log"), *(d / "logs").glob("*.raw")] if (d / "logs").is_dir() else []:
+                try:
+                    if lg.suffix == ".raw" or datetime.fromtimestamp(lg.stat().st_mtime, KST) < cutoff:
+                        lg.unlink(missing_ok=True)  # .raw는 명령이 끝난 뒤 남은 출력 사본(내용은 .log에 있음)
+                except OSError:
+                    pass
+            _dev_save(d / "manifest.json", man)
+        except (OSError,ValueError) as exc:
+            out.append(f'{d.name}: 정리·승계 실패 — 자료 보존, 다른 주제 계속: {exc}')
+            locks = _dev_json(sc / 'locks.json',locks)
+
     _dev_save(sc / "locks.json", locks)
     # 용량 상한: 오래된 빌드 사본부터
     cap = float(dev.get("scratch_cap_gb", 20)) * 1024 ** 3
 
     def size(p: Path) -> int:
         return sum(f.stat().st_size for f in p.rglob("*") if f.is_file()) if p.exists() else 0
-    builds = sorted(((d.name, b) for d in sc.iterdir() if d.is_dir() for b in _dev_json(d / "manifest.json", {}).get("builds", []) if not b.get("removed")),
+    builds = sorted(((d.name, b) for d in sc.iterdir() if d.is_dir() for b in _dev_json(d / "manifest.json", {}).get("builds", []) if not b.get("removed") and d.name in topics and not (topics[d.name].get("archived") or topics[d.name].get("restarted_as"))),
                     key=lambda x: x[1].get("at", ""))
     total = size(sc) + sum(size(Path(b["dir"])) for _, b in builds)
     for tid, b in builds:
@@ -1045,6 +1156,27 @@ def rule_files(agent_id: str | None = None) -> list[str]:
     return out
 
 
+
+def release_contract_prompt(t, job):
+    if not t.get("command_mode") or t.get("stage") not in ("test", "pack", "prep"):
+        return ""
+    return """## 자동 후속 단계와 배포 계약
+시험 중 발견한 문제는 개발컴에서 고쳐 재시험한다. 아키텍트가 시험을 반려해도 대화 복사를 요구하지 않는다.
+자체 시험 뒤 실게임 판단이 필요하면 결재함에 결과·시험 방법을 올린다. 불필요하다고 분해 계획에서 정한 경우 배포본으로 자동 진행한다.
+pack은 작업물 자기 폴더에 PACKAGE.json을 작성한다. version=1, topic=현재 주제 ID,
+summary/apply_steps/rollback_steps/verify_steps는 비어 있지 않은 문자열.
+changes 배열의 각 항목: operation=create|replace|patch|delete, target=server/상대경로 또는 client/상대경로,
+source=작업물 저장소 기준 실제 전달 파일 경로(work/작업ID/개발작업자/파일),
+before_sha256=기준 원본 해시(신규만 null), after_sha256=전달 파일 해시(삭제만 null).
+소스·NPC·설정 텍스트는 전체 파일 대신 patch(.diff), source_sha256=diff 해시, after_sha256=적용 후 파일 해시로 전달한다.
+evidence=[{path:작업물 저장소 상대경로,sha256:실제 검증 근거 파일 해시}]가 필수.
+운영 비밀값·게임 소스 전체·사용자 데이터는 포함하지 않는다. 대형 바이너리는 기존 허용된 전달 경로를 사용해야 하며
+계약에 필요한 파일이 실제 수신되지 않았다면 끝냄 대신 사령탑에 request로 막힌 원인을 보고한다.
+pack 완료 → 서버컴 prep은 자동이다. prep 완료 전 실행기가 모든 전달 파일/근거 해시를 읽어 확인하고 candidate.zip을 만든다.
+prep 요약에는 대상 파일: 과 겹침: 줄, 수신 검증 결과, 적용 순서·실제 운영 기준 확인 여부를 적는다.
+운영 적용과 실제 배포 승인은 하지 않는다. ZIP은 배포 후보이며 실게임 QA를 증명하지 않는다.
+"""
+
 def build_prompt(job: dict, data: dict, workspace: Path | None, st: dict) -> str:
     a = node.my_agents(CFG)[job["agent"]]
     pc = CFG.get("pc", {})
@@ -1056,7 +1188,7 @@ def build_prompt(job: dict, data: dict, workspace: Path | None, st: dict) -> str
     convo = "\n".join(f"- [{str(c.get('ts', ''))[:16]}] {c.get('_author') or c.get('by')}: {str(c.get('body', ''))[:900]}" for c in comments[-10:]) or "(없음)"
     plan = json.dumps(t.get("plan"), ensure_ascii=False, indent=1) if t.get("plan") else "(아직 없음)"
     req = t.get("open_request") if (t.get("open_request") or {}).get("to") == job["agent"] else None
-    role = "요청받은 작업자" if req else "담당" if t.get("assignee") == job["agent"] else "교차 검토자"
+    role = ("최종 사령탑" if job["agent"] == "server-astra" else "배정된 실행 작업자") if t.get("command_mode") else ("요청받은 작업자" if req else "담당" if t.get("assignee") == job["agent"] else "교차 검토자")
     mine_reqs = [q for q in t.get("requests") or [] if q.get("from") == job["agent"]][-3:]
     req_text = ""
     if req:
@@ -1085,6 +1217,10 @@ def build_prompt(job: dict, data: dict, workspace: Path | None, st: dict) -> str
 ## 먼저 읽을 것
 {rules}
 - 이 PC 규칙: {pc_rule or '로컬 지침의 PC 역할을 따른다'}
+
+## 이전 주제의 목표·아키텍트 선택·작업 결과
+아래는 과거 기록이다. 과거 승인을 이번 주제의 새 범위·운영 반영 승인으로 확대하지 않는다.
+{json.dumps(t.get("prior_context", []), ensure_ascii=False)}
 
 ## 허브 공지 (작업 방식이 바뀐 내용 — 이번 판단에 반영한다)
 {notices}
@@ -1118,6 +1254,9 @@ def build_prompt(job: dict, data: dict, workspace: Path | None, st: dict) -> str
 ## 아키텍트와의 대화
 {convo}
 {ans}{req_text}
+{__import__("command").prompt(t, job["agent"])}
+{release_contract_prompt(t, job)}
+{__import__("testflow").prompt(t)}
 ## 작업자 목록 (handoff·request 대상)
 {agent_directory(data)}
 {('- 배정 잠금(인계·요청 금지): ' + ', '.join(sorted(data.get('agent_locks') or {}))) if data.get('agent_locks') else ''}
@@ -1147,6 +1286,7 @@ def build_prompt(job: dict, data: dict, workspace: Path | None, st: dict) -> str
 {impl_section(job, workspace)}
 {dev_section(job)}
 ## 단계 가이드
+사령탑 워크플로우(command_mode) 주제는 앞의 command 규칙을 따른다. 아래 1~6은 이전 주제에만 적용한다.
 1) 담당인데 착수 기록이 없으면 `claim`
 2) 진행 베이스가 없으면 `plan` (goal·scope·inputs·first_steps·risks·done_when)
 3) 교차 검토자면 진행 베이스를 읽고 `note`(kind="review")로 검토 의견
@@ -1155,7 +1295,7 @@ def build_prompt(job: dict, data: dict, workspace: Path | None, st: dict) -> str
 6) 이 단계가 끝났으면 `state`(status="done", body=결과 요약) → 아키텍트 관문으로
 
 ## 답 형식 (이 JSON 하나만 출력. 다른 글 금지)
-{{"summary": "한 줄 요약", "actions": [{{"type": "claim|plan|note|state|work_note|ask|propose|handoff|request|reply|dev_edit|dev_run|dev_revert", "kind": null, "body": null, "status": null, "plan": null, "work_id": null, "question": null, "options": null, "title": null, "origin": null, "task": null, "to": null, "file": null, "edits": null, "cmd": null}}]}}
+{{"summary": "한 줄 요약", "actions": [{{"type": "claim|plan|note|state|work_note|ask|propose|handoff|request|reply|dev_edit|dev_run|dev_revert|command", "kind": null, "body": null, "status": null, "plan": null, "work_id": null, "question": null, "options": null, "title": null, "origin": null, "task": null, "to": null, "file": null, "edits": null, "cmd": null}}]}}
 - 각 action의 쓰지 않는 칸은 null로 둔다.
 """
 
@@ -1412,6 +1552,50 @@ def apply(job: dict, result: dict, data: dict | None = None) -> tuple[list[str],
         typ = a.get("type")
         body = (a.get("body") or "").strip()
         try:
+            import command
+            managed = t.get("command_mode") and t.get("stage", "work") == "work"
+            if typ == "command":
+                authority = None
+                if agent == command.DEV and a.get('cmd') in command.DEPUTY_OPS:
+                    pw = os.environ.get('REAL_OPS_PASSWORD')
+                    latest = load_data(pw) if pw else (data or {})
+                    authority = command.delegation(latest)
+                command.apply_action(job, a, CFG, known, locked, WORK_PY.parent, authority=authority)
+                done.append("command-progress" if a.get("cmd") == "test-progress" else "command")
+                continue
+            if managed and typ in ("handoff", "request", "reply", "plan"):
+                raise ValueError("사령탑 작업표를 사용하세요(command). 별도 인계·진행 베이스는 만들지 않습니다")
+            if managed and typ == 'state' and a.get('status') == 'parked' and agent != command.LEAD:
+                task = command.active(t.get('command') or command.initial()) or {}
+                command.apply_action(job, {'cmd':'blocked','file':task.get('id'),'body':body or '작업자가 보류를 제안했습니다'}, CFG, known, locked, WORK_PY.parent)
+                done.append('command')
+                continue
+            if managed and typ == "state" and a.get("status") == "done":
+                if agent != command.LEAD or not command.finished(t.get("command") or command.initial()):
+                    raise ValueError("작업자는 command submit, 사령탑은 모든 작업 수락 후 끝냄을 사용하세요")
+            if t.get("command_mode") and typ == "state" and a.get("status") == "done" and t.get("stage") == "test":
+                import testflow
+                checks = (t.get("command") or {}).get("tests", [])
+                if not testflow.finished(checks) or t.get("test_reset_needed"):
+                    raise ValueError("모든 필수 시험 결과를 기록하고 통과해야 합니다")
+                for check in checks:
+                    command.verify_evidence(WORK_PY.parent, check.get("evidence", []))
+            if t.get("command_mode") and typ == "ask":
+                if agent != command.LEAD:
+                    if managed:
+                        action = {"cmd": "blocked", "file": (command.active(t.get("command") or command.initial()) or {}).get("id"),
+                                  "body": a.get("question") or body}
+                        command.apply_action(job, action, CFG, known, locked, WORK_PY.parent)
+                        done.append("command")
+                        continue
+                    if not (t.get("open_request") or {}).get("id"):
+                        node.add_topic_record(CFG, tid, agent, "request", to=command.LEAD,
+                                              req_id=node.new_req_id(agent), body=(a.get("question") or body)[:4000])
+                        done.append("request")
+                    continue
+                q = a.get("question") or ""
+                if not all(k in q for k in ("끝낸 일", "결정할 것", "권장")) or len(a.get("options") or []) < 2:
+                    raise ValueError("결재 요청에는 끝낸 일·결정할 것·권장과 선택지 2개 이상이 필요합니다")
             if typ == "claim" and tid:
                 if t.get("assignee") != agent:  # 담당만 착수한다(검토·요청 처리 중인 작업자의 착수는 중복 착수가 된다)
                     done.append("착수 건너뜀(담당 아님)")
@@ -1450,8 +1634,18 @@ def apply(job: dict, result: dict, data: dict | None = None) -> tuple[list[str],
                 job["redo"] = True
                 continue
             elif typ == "state" and tid and a.get("status") in STATUSES:
+                receipt = {}
+                if t.get('command_mode') and a.get('status') == 'done' and t.get('stage') in ('pack','prep'):
+                    import release_queue
+                    wid = job.get('work_id') or t.get('work_id')
+                    package = release_queue.load_package(WORK_PY.parent, wid, tid)
+                    if t['stage'] == 'prep':
+                        release_queue.require_pin(package, (t.get('package_receipts') or {}).get('pack'))
+                        dst = ROOT / '.local' / 'release-candidates' / tid / 'candidate.zip'
+                        release_queue.export_packages([package], WORK_PY.parent, dst, batch=tid)
+                    receipt = {'package_stage': t['stage'], 'package_sha256': package['manifest_sha256']}
                 node.add_topic_record(CFG, tid, agent, "status", status=a["status"], body=body or f"상태 {a['status']}",
-                                      linked_task_id=a.get("task") if a.get("task") and node.REF_RE.match(a["task"]) else None)
+                                      linked_task_id=a.get("task") if a.get("task") and node.REF_RE.match(a["task"]) else None, **receipt)
             elif typ == "handoff" and tid:
                 to = (a.get("to") or "").strip()
                 if to == agent or to not in known:
@@ -1547,7 +1741,7 @@ def apply(job: dict, result: dict, data: dict | None = None) -> tuple[list[str],
                 done.append(f"건너뜀({typ})")
                 continue
             done.append(typ)
-        except SystemExit as exc:  # node.py 검증 실패
+        except (SystemExit, ValueError, OSError, TypeError) as exc:  # 행동·파일 검증 실패
             failed.append(f"{typ} 거부: {exc}")
     if work_touched:
         r = run_work("sync", "--agent", agent, "--message", f"자동 실행기 {tid or ''}")
@@ -1708,8 +1902,16 @@ def stage_doer(t: dict) -> str | None:
     from topics import LIVE_AGENT
     if t.get("live_session"):
         return LIVE_AGENT
+    if t.get('command_mode') and t.get('stage') == 'test':
+        import testflow
+        check=testflow.current((t.get('command') or {}).get('tests',[]))
+        if check:
+            return 'server-astra' if t.get('test_reset_needed') or check['state'] in ('blocked','passed') else check['assignee']
     if t.get("stage") in ("test", "pack", "prep", "deploy") and t.get("stage_owner"):
         return t["stage_owner"]
+    if t.get("command_mode") and t.get("stage", "work") == "work":
+        import command
+        return command.turn(t.get("command") or command.initial())
     return t.get("assignee")
 
 
@@ -1726,6 +1928,25 @@ def note_skip(st: dict, agent_id: str, tid: str, reason: str):
 
 
 def run_job(j: dict, data: dict, state: dict) -> bool:
+    if j.get("kind") == "batch":
+        import release_queue
+        rows = []
+        try:
+            if not re.fullmatch(r"R-\d{8}(-[0-9a-z]{1,8})?", j["batch"]):
+                raise ValueError("묶음 ID 오류")
+            rows = release_queue.select_batch(data, j["batch"])
+            packages = [release_queue.load_topic_package(WORK_PY.parent, t) for t in rows]
+            dest = ROOT / ".local" / "release-batches" / (j["batch"] + ".zip")
+            receipt = release_queue.export_packages(packages, WORK_PY.parent, dest, j["batch"])
+            node.write_json(dest.with_suffix(".json"), receipt)
+            state.setdefault("batches", {})[j["batch"]] = {"fingerprint": j["fingerprint"], "result": receipt}
+            for t in rows:
+                node.add_topic_record(CFG, t["id"], "server-astra", "memo", body=f"[묶음 준비] {j['batch']} · ZIP SHA256 {receipt['sha256']} · 운영 미적용. 서버컴 .local/release-batches에서 직접 검토 가능")
+        except (ValueError, OSError, TypeError, KeyError) as exc:
+            state.setdefault("batches", {})[j["batch"]] = {"error": str(exc), "fingerprint": j["fingerprint"], "requires_change": True}
+            for t in rows:
+                node.add_topic_record(CFG, t["id"], "server-astra", "memo", body=f"[묶음 준비 실패] {exc}. 운영 미적용")
+        return True
     agent_id = j["agent"]
     agent = node.my_agents(CFG)[agent_id]
     t = j.get("topic") or {}
@@ -1790,6 +2011,7 @@ def run_job(j: dict, data: dict, state: dict) -> bool:
         st["retry_after"] = (now() + timedelta(minutes=30 if needs_user else 10)).isoformat(timespec="seconds")
         st["retry_kind"] = "error"  # 실행 실패 재시도: 새 입력이 와도 이 시간까지는 기다린다
         st["last_error"] = err
+        # 실행기 인증·한도 오류는 health와 retry로 처리한다. 업무 실패로 바꿔 다른 AI를 깨우지 않는다.
         return True
     health = ((node.load_records(CFG).get("agents") or {}).get(agent_id) or {}).get("health") or {}
     if health.get("state") != "ok":
@@ -1832,7 +2054,7 @@ def run_job(j: dict, data: dict, state: dict) -> bool:
     to_me = ((t.get("open_request") or {}).get("to") == agent_id)
     reviewed = (t.get("reviewer") == agent_id and agent_id != t.get("assignee") and not to_me   # 교차 검토 차례의 검토만
                 and (("note" in applied and any(a.get("type") == "note" and a.get("kind") == "review" for a in acts)) or as_memo))
-    progressed = settled or grew or first_claim or new_state or new_plan or reviewed
+    progressed = settled or grew or first_claim or new_state or new_plan or reviewed or "command" in applied
     backoff = None
     dev_did = any(x in ("dev_edit", "dev_revert") for x in done)  # 고치지 않고 빌드만 반복하는 것은 진척이 아니다
     dev_bad = "dev_run(실패)" in done or any(x.startswith(("dev_edit 거부", "dev_run 거부", "dev_revert 거부")) for x in failed)

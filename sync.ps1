@@ -117,7 +117,7 @@ try {
   if ($LASTEXITCODE -eq 10) {
     # 데이터는 그대로여도 도구 코드(실행기·엔진·화면)가 바뀌었으면 검증 뒤 게시한다 — 다른 PC(서버컴)는 원격본을 받아 쓰므로
     # 데이터 변화가 생길 때까지 코드 게시가 밀리지 않게(2026-10-03)
-    $code = @(git status --porcelain -- runner.py topics.py build.py node.py sync.ps1 encrypt.mjs docs)
+    $code = @(git status --porcelain -- runner.py topics.py build.py node.py testflow.py command.py command_reset.py release_queue.py sync.ps1 encrypt.mjs docs)
     if (-not $code.Count) { return }
   } elseif ($LASTEXITCODE) { Log "생성 실패: $out"; return }
   $out = Py 'tests/verify.py'

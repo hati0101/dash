@@ -5,6 +5,14 @@
 !/README.md
 !/build.py
 !/topics.py
+!/command.py
+!/testflow.py
+!/command_reset.py
+!/release_queue.py
+!/TECHNICAL.md
+!/PLANS.md
+!/AUDIT_LEDGER.md
+!/TEST_RESULTS.md
 !/encrypt.mjs
 !/config.example.json
 !/publish.ps1

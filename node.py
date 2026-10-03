@@ -172,7 +172,7 @@ def load_records(cfg) -> dict:
     rec["agents"] = {k: v for k, v in (rec.get("agents") or {}).items() if k in my_agents(cfg)}
     for aid, a in my_agents(cfg).items():
         slot = rec["agents"].setdefault(aid, {})
-        slot.update({"id": aid, "ai": a.get("ai", ""), "label": a.get("label", aid)})
+        slot.update({"id": aid, "ai": a.get("ai", ""), "label": a.get("label", aid), "command_version": 1})
     return rec
 
 
@@ -259,7 +259,10 @@ def add_topic_record(cfg, topic: str, agent: str, kind: str, **fields):
         ts = now_iso()
         rec["topic_records"].append({"topic": topic, "agent": agent, "kind": kind, "ts": ts,
                                      **{k: v for k, v in fields.items() if v not in (None, "", [])}})
-        rec["topic_records"] = rec["topic_records"][-3000:]
+        # 분해·검수 원장은 재생에 필요하므로 일반 메모 제한으로 자르지 않는다.
+        commands = [r for r in rec["topic_records"] if r.get("kind") == "command"]
+        ordinary = [r for r in rec["topic_records"] if r.get("kind") != "command"][-3000:]
+        rec["topic_records"] = ordinary + commands
         rec["agents"][agent]["last_seen"] = ts
     update_records(cfg, fn)
 
