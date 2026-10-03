@@ -1,6 +1,6 @@
 """REVIEW-5 후속(r5) 시험: I-1 amend 계약·거부·즉시 깨움, I-2 시계 어긋남·보류 재개·연속 답, 옛 기록 이관, 검수 위임.
 실제 처리 경로(command.apply_action → 노드 기록 → merged_topics → runner 판정)로 재현한다. 운영/원격/AI 호출 없음."""
-import json, sys, tempfile, unittest
+import json, os, sys, tempfile, unittest
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
@@ -195,12 +195,12 @@ def impl_reject_twice(self):
 
 SCENARIOS = {'research_park_resume_memo': (research_park_resume_memo, True), 'impl_park_resume_reject': (impl_park_resume_reject, False),
              'impl_pass_then_fix': (impl_pass_then_fix, False), 'impl_reject_twice': (impl_reject_twice, False)}
+# 게시 전 검사(tests/verify.py, 120초 제한)에서는 대표 조합만 돈다. 전체 조합(96개)은 R5_CLOCK_FULL=1일 때만(검토·변경 검증용).
+FULL = os.environ.get('R5_CLOCK_FULL') == '1'
+COMBOS = [(b, (0, d), rx) for b in (-10, -3, 0, 3, 10) for d in (0, 5, -5) for rx in (True, False) if rx or b <= 0] if FULL else \
+    [(-3, (0, -5), True), (10, (0, 5), True)]
 for name, (fn, research) in SCENARIOS.items():
-    for b in (-10, -3, 0, 3, 10):
-        for lead, dev in ((0, 0), (0, 5), (0, -5)):
-            for rx in (True, False):
-                if not rx and b > 0:
-                    continue  # 허브 수신 시각이 없는 옛 기록 + 빠른 브라우저는 아래 P3 시험에서 따로 확인
+    for b, (lead, dev), rx in COMBOS:
                 cls = type(f'Clock_{name}_b{b}_l{lead}_d{dev}_{"rx" if rx else "old"}'.replace('-', 'm'), (Base,),
                            dict(research=research, browser=b, lead_clock=lead, dev_clock=dev, hub_rx=rx, test_scenario=fn))
                 globals()[cls.__name__] = cls
