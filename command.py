@@ -239,7 +239,7 @@ def check_size(size, tasks):
     if size not in SIZES:
         raise ValueError("size는 small·normal·risk 중 하나여야 합니다")
     if size == "small" and len(tasks) > 2:
-        raise ValueError("작은 일(small)은 작업 1~2개(구현 + 필요하면 직접 확인)로 나눕니다")
+        raise ValueError("작은 일(small)은 남은 작업 1~2개(구현 + 필요하면 직접 확인)여야 합니다")
     return size
 
 
@@ -284,6 +284,31 @@ def transition(state, event, known):
                     if reviewer: entry['reviewer'] = reviewer
                     else: entry.pop('reviewer', None)
         result['tasks'] = revised
+    elif op == 'rescope':
+        # 진행 중 주제 경량화(아키텍트 10-04): 크기 지정 + 미착수 작업 취소 + 대기 시험 제외를 한 번에. 이력은 취소·제외 상태로 남긴다
+        if who != LEAD or not str(event.get('body') or '').strip():
+            raise ValueError('범위 조정은 사령탑이 이유를 기록해야 합니다')
+        drop, skip = set(event.get('cancel') or []), set(event.get('skip') or [])
+        tasks = {t['id']: t for t in result['tasks']}
+        tests = {x['id']: x for x in result.get('tests', [])}
+        if drop - set(tasks) or skip - set(tests):
+            raise ValueError('없는 작업·시험 ID가 있습니다')
+        if any(tasks[i]['state'] != 'ready' for i in drop):
+            raise ValueError('미착수(ready) 작업만 취소합니다 — 제출·수락된 작업은 그대로 둡니다')
+        if any(tests[i]['state'] != 'pending' for i in skip):
+            raise ValueError('대기(pending) 시험만 제외합니다 — 진행·통과한 시험은 그대로 둡니다')
+        for i in drop:
+            tasks[i].update(state='cancelled', feedback=f"[범위 조정] {event['body']}"[:3000])
+        for i in skip:
+            tests[i].update(state='skipped', summary=f"[범위 조정] {event['body']}"[:3000], updated_at=event.get('ts'))
+            tests[i].setdefault('history', []).append({'op': 'rescope', 'agent': who, 'ts': event.get('ts'), 'body': event['body']})
+        if event.get('size') is not None:
+            if result.get('size') == 'risk' and event['size'] != 'risk':
+                raise ValueError('위험 작업(risk)은 낮추지 않습니다')
+            check_size(event['size'], [t for t in result['tasks'] if t['state'] not in ('accepted', 'cancelled')])
+            result['size'] = event['size']
+        if not result['tasks'] or all(t['state'] == 'cancelled' for t in result['tasks']):
+            raise ValueError('모든 작업을 취소할 수는 없습니다')
     elif op == 'cancel':
         selected = next((t for t in result['tasks'] if t['id'] == event.get('task_id')), None)
         if who != LEAD or not selected or not str(event.get('body') or '').strip():
@@ -445,6 +470,7 @@ def prompt(topic, who):
             "사령탑은 command 행동으로 작업을 나누고 결과를 검수한다. 조사로 풀 수 있는 질문은 작업자에게 배정한다.\n"
             "command: cmd=plan, body=JSON {tasks:[{id,title,scope,done_when,assignee,depends_on:[]}],size:\"small|normal|risk\",human_test:true,test_reason:\"실게임 확인 필요\"}로 최초 분해.\n"
             "size: small=메뉴·문구·설정처럼 작은 일(작업 1~2개, 시험 단계 없이 바로 ★4 실게임), normal=기본, risk=보상·재화·권한·데이터 변경. 교차 검토 작업은 risk에만 넣는다.\n"
+            "진행 중 주제 경량화: cmd=rescope, file=null, body=JSON {reason:\"이유\", size:\"small|normal\"(선택), cancel:[미착수 작업ID], skip:[대기 시험ID]} 한 번으로 크기 지정·중복 단계 취소·불필요 시험 제외. 수락·진행 이력과 ★4·★7은 그대로, risk는 낮추지 않는다.\n"
             "작업자는 맡은 작업만 수행한 뒤 command: cmd=submit, file=작업ID, body=결과 요약,\n"
             "options=[작업물 저장소 기준 근거 파일 상대 경로]로 제출한다. 자기 폴더 파일의 실제 SHA256을 실행기가 기록한다.\n"
             "사령탑은 받은 파일을 직접 읽고 검증 근거를 대조하여 cmd=accept 또는 revise, file=작업ID, body=검수 이유로 처리한다.\n"
@@ -477,7 +503,8 @@ def apply_action(job, action, cfg, known, locked, work_root, authority=None):
     topic, who = job["topic"], job["agent"]
     if not topic.get("command_mode") or topic.get("gate") or (
         str(action.get("cmd", "")).startswith("test-") and topic.get("stage") != "test") or (
-        not str(action.get("cmd", "")).startswith("test-") and topic.get("stage", "work") != "work"):
+        not str(action.get("cmd", "")).startswith("test-") and topic.get("stage", "work") != "work"
+        and not (action.get("cmd") == "rescope" and topic.get("stage") == "test")):
         raise ValueError("작업 분해 단계가 아닙니다")
     local = [r for r in node.load_records(cfg)["topic_records"] if r.get("topic") == topic["id"] and r.get("kind") == "command"]
     state = project(local, known, topic.get("command"))
@@ -505,6 +532,12 @@ def apply_action(job, action, cfg, known, locked, work_root, authority=None):
             raise ValueError("잠긴 작업자에게 배정할 수 없습니다(검수 담당 포함)")
         if any(t.get('assignee') in locked for t in testflow.plan(event.get('tests'),known)):
             raise ValueError('잠긴 작업자에게 시험을 배정할 수 없습니다')
+    if event["op"] == "rescope":
+        spec = json.loads(action.get("body") or "{}")
+        if not isinstance(spec, dict):
+            raise ValueError("범위 조정 본문은 JSON 객체여야 합니다: {reason, size?, cancel:[작업ID], skip:[시험ID]}")
+        event["body"], event["size"] = str(spec.get("reason") or ""), spec.get("size")
+        event["cancel"], event["skip"] = list(spec.get("cancel") or []), list(spec.get("skip") or [])
     returned = returned_gate(topic)
     if event['op'] in ('amend','test-reset'):
         event['review_gate_id'] = returned['id'] if returned else '-'  # 되돌아온 관문 없음도 '-'로 남긴다(빈 값은 기록에서 빠짐). 키 있음 = r5 이후 기록
