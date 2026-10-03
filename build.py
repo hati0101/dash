@@ -628,7 +628,8 @@ def load_works(cfg: dict, topics: list[dict], log: SourceLog) -> dict:
             for p in fl + ([notes] if notes.exists() else []):
                 m = datetime.fromtimestamp(p.stat().st_mtime, KST)
                 last = max(last, m) if last else m
-        hist = re.findall(r"^- (\S+) `([^`]+)` (.+)$", text, re.M)
+        sec = re.search(r"^## 진행 기록[ \t]*\n(.*?)(?=^## |\Z)", text, re.M | re.S)  # 진행 기록 칸 안의 줄만(결과 요약 속 목록이 섞이지 않게)
+        hist = re.findall(r"^- (\S+) `([^`]+)` (.+)$", sec.group(1) if sec else text, re.M)
         rank = lambda f: (next((i for i, k in enumerate(DOC_FIRST) if Path(f["path"]).stem.upper().startswith(k)), 99), f["path"])  # noqa: E731
         docs = {}
         if d.name in live or g("대시보드 주제") in live_topics:

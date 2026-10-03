@@ -1657,6 +1657,140 @@ def cmd_tidy(args, cfg):
 
 # ---------------------------------------------------------------- CLI
 
+def works_summary(topics_list: list[dict], repo: Path) -> dict:
+    """작업물(real-work)별 README 요약: 목표·지금 단계·최근 결과·결정·진행 기록(주제 기록에서).
+    README 표의 '대시보드 주제'가 우선이다. 표가 비었을 때만 주제의 work_id로 잇고, 여럿이면 가장 늦게 만든 주제.
+    시각은 KST로 통일하고 글의 비밀값은 가린다(real-work는 비공개지만 평문 저장소)."""
+    from build import redact_doc
+    kst = lambda v: to_dt(v).astimezone(KST).isoformat(timespec="seconds") if v else ""  # noqa: E731
+    red = lambda v: redact_doc(str(v or ""))  # noqa: E731
+    table: dict[str, str] = {}
+    for d in (repo / "work").glob("*/README.md"):
+        m = re.search(r"^\| 대시보드 주제 \| (T-\d{8}-[a-z0-9]{6}) \|", d.read_text(encoding="utf-8"), re.M)
+        if m:
+            table[d.parent.name] = m.group(1)
+    tmap = {t["id"]: t for t in topics_list}
+    by_work: dict[str, str] = {}
+    for t in sorted(topics_list, key=lambda x: to_dt(x.get("created_at"))):
+        if t.get("work_id"):
+            by_work[t["work_id"]] = t["id"]  # 표에 주제가 없으면 가장 늦게 만든 주제(뒤가 덮는다)
+    by_work.update(table)  # README 표의 주제가 우선
+    STATE = {"done": "완료", "parked": "보류", "dropped": "취소", "review_user": "아키텍트 결재 대기", "active": "진행중", "new": "준비중", "triage": "준비중", "backlog": "미처리"}
+    out = {}
+    for wid, tid in by_work.items():
+        t = tmap.get(tid)
+        if not t:
+            continue
+        gate = t.get("gate") if t.get("status") == "review_user" else None
+        step = (f"★{gate.get('label') or GATE_LABEL.get(gate.get('n'), '관문')} 대기(아키텍트 결재)" if gate else None) or STATE.get(t.get("status"), t.get("status"))
+        if t.get("status") == "active" and (t.get("step") or {}).get("label"):
+            step = f"진행중 · {(t.get('step') or {}).get('label')}"
+        fins = [n for n in t.get("notes") or [] if n.get("kind") == "status" and len(str(n.get("body") or "")) >= 40]  # 끝냄 요약(착수 등 짧은 상태 기록 제외)
+        last = fins[-1] if fins else None
+        hist = t.get("gate_history") or []
+        appr = next((h for h in reversed(hist) if h.get("n") == 7 and str(h.get("choice") or "").startswith("서버컴")), None)
+        tl = []
+        for n in t.get("notes") or []:
+            k = n.get("kind")
+            body = str(n.get("body") or "").strip().splitlines()
+            first = red(body[0][:160]) if body else ""
+            what = {"claim": "착수", "status": f"상태 기록: {first}", "handoff": f"인계: {first}", "request": f"요청: {first}", "reply": f"답: {first}",
+                    "resume": "아키텍트 다시 진행", "plan": "진행 베이스 작성"}.get(k)
+            if what and n.get("ts"):
+                tl.append({"ts": kst(n["ts"]), "by": n.get("by") or "-", "what": what})
+        dec = []
+        for h in hist:
+            if h.get("answered_at"):
+                note = red(h.get("note"))[:300]
+                gname = h.get("label") or GATE_LABEL.get(h.get("n")) or f"관문 {h.get('n')}"
+                tl.append({"ts": kst(h["answered_at"]), "by": "architect", "what": f"★{gname} 결정: {h.get('choice') or '메모'}" + (f" — {note}" if note else "")})
+                dec.append(f"{kst(h['answered_at'])} ★{gname} — {h.get('choice') or '메모'}" + (f" — {note}" if note else ""))
+        out[wid] = {"topic": t["id"], "title": t.get("title"), "kind": t.get("kind"), "step": step,
+                    "goal": red((t.get("plan") or {}).get("goal") or (t.get("body") or "")[:600]),
+                    "result": red(str(last.get("body"))[:2500]) if last else "", "result_by": last.get("by") if last else "", "result_at": kst(last.get("ts")) if last else "",
+                    "approval": f"★7 서버컴 반영 승인 ({kst(appr.get('answered_at'))})" if appr else None,
+                    "decisions": dec, "timeline": tl}
+    return out
+
+
+def cmd_works_readme(args, cfg):
+    """(허브) real-work 작업 폴더 README를 주제 기록으로 자동 갱신하고 readme-bot으로 올린다(아키텍트 2026-10-03 '빈 README').
+    작업자들이 쓰는 저장소(D:\\real-work)는 건드리지 않고 readme-bot 전용 사본(node-data/real-work-readme)에서
+    원격 최신으로 맞춘 뒤 다시 쓰고 올린다(rebase·충돌 없음). 10분에 한 번. 요약 JSON은 node-data 안 임시 파일에서 바로 지운다."""
+    import tempfile
+    import time
+    from node import collect_nodes, node_dir
+    if (cfg.get("pc") or {}).get("role") != "hub":
+        sys.exit("README 자동 갱신은 허브 PC에서만 실행합니다(README 작성자는 하나).")
+    repo = Path(cfg.get("work_repo") or r"D:\real-work")
+    nd = node_dir(cfg)
+    nd.mkdir(parents=True, exist_ok=True)
+    if not cfg.get("readme_auto") and not args.force:  # 모든 PC가 새 work.py를 받은 뒤 config.local.json에서 켠다(옛 work.py와 섞이면 충돌)
+        print("README 갱신 0건(꺼짐: readme_auto)"); return
+    stamp = nd / "readme-sync.json"
+    last = read_json(stamp, {}).get("at")
+    if last and not args.force and (datetime.now(KST) - to_dt(last)).total_seconds() < 600:
+        print("README 갱신 0건(10분 안에 이미 함)"); return
+    lock = nd / "readme-bot.lock"
+    try:
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        if time.time() - lock.stat().st_mtime < 1200:
+            print("README 갱신 0건(다른 갱신이 진행 중)"); return
+        lock.unlink(missing_ok=True)  # 20분 넘은 잠금은 죽은 것
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    os.close(fd)
+    result, tmp = "실패", None
+    env = dict(os.environ, PYTHONUTF8="1", GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never")  # 무인 실행: 인증 창을 띄우지 않는다
+    env.pop("REAL_OPS_PASSWORD", None)
+    run = lambda cmd, cwd=None, t=180: subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=t)  # noqa: E731
+    try:
+        # 전용 사본은 짧은 경로에(작업물 안 경로가 깊다 — Windows 260자). 기본은 작업물 저장소 옆 real-work-readme
+        clone = Path(cfg.get("readme_clone") or repo.parent / "real-work-readme")
+        if not (clone / ".git").is_dir():
+            url = cfg.get("work_repo_git") or run(["git", "-C", str(repo), "remote", "get-url", "origin"]).stdout.strip()
+            if not url:
+                result = "작업물 저장소 주소를 모름(work_repo_git 설정 또는 D:\\real-work의 origin)"; print(f"README 갱신 실패: {result}"); return
+            if clone.exists() and any(clone.iterdir()):
+                result = f"{clone}에 다른 파일이 있어 전용 사본을 만들지 않음"; print(f"README 갱신 실패: {result}"); sys.exit(1)
+            r = run(["git", "-c", "core.longpaths=true", "clone", "-q", "--no-checkout", url, str(clone)], t=300)
+            if r.returncode:
+                shutil.rmtree(clone, ignore_errors=True)  # 방금 만든 빈 사본만(위에서 비어 있음을 확인)
+                result = "전용 사본 만들기 실패: " + r.stderr.strip()[-200:]; print(f"README 갱신 실패: {result}"); sys.exit(1)
+            run(["git", "-C", str(clone), "config", "core.longpaths", "true"])
+            (clone / ".git" / "readme-bot-clone").write_text("readme-bot 전용 사본(topics.py works-readme). 손으로 작업하지 마세요.\n", encoding="utf-8")
+        if not (clone / ".git" / "readme-bot-clone").exists():
+            result = f"{clone}가 readme-bot 전용 사본이 아님"; print(f"README 갱신 실패: {result}"); sys.exit(1)
+        for c in (["fetch", "-q", "origin", "main"], ["reset", "-q", "--hard", "origin/main"]):
+            r = run(["git", "-C", str(clone), *c])
+            if r.returncode:
+                result = f"git {c[0]} 실패: " + r.stderr.strip()[-200:]; print(f"README 갱신 실패: {result}"); sys.exit(1)
+        pw = os.environ.get("REAL_OPS_PASSWORD") or (Path(args.password_file).read_text(encoding="utf-8").strip() if args.password_file else None)
+        nodes = collect_nodes(cfg, pw)
+        bad = [f"{n.get('pc')}: {n['error']}" for n in nodes if n.get("error")]
+        if bad:  # 다른 PC 기록을 못 읽으면 요약이 모자라다 → 이번 회차는 건너뜀
+            result = "다른 PC 기록을 못 읽음 — " + ", ".join(bad); print(f"README 갱신 0건({result})"); return
+        recs = [r for n in nodes for r in n.get("topic_records") or []]
+        known = {a for n in nodes for a in (n.get("agents") or {})} or None
+        data = works_summary(merged_topics(topics_dir(cfg), cfg, recs, known), clone)
+        if not data:
+            result = "요약할 작업물 없음"; print("README 갱신 0건(요약할 작업물 없음)"); return
+        fd, tmp = tempfile.mkstemp(suffix=".json", dir=nd)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False)
+        r = run([sys.executable, "work.py", "readme", "--data", tmp, "--publish"], cwd=clone, t=300)
+        result = (r.stdout.strip() or r.stderr.strip()[-300:] or f"종료 코드 {r.returncode}")
+        print(result if not r.returncode else f"README 갱신 실패: {result}")
+        if r.returncode:
+            sys.exit(1)
+    except subprocess.TimeoutExpired as e:
+        result = f"시간 초과: {' '.join(map(str, e.cmd))[:120]}"; print(f"README 갱신 실패: {result}"); sys.exit(1)
+    finally:
+        if tmp:
+            Path(tmp).unlink(missing_ok=True)
+        lock.unlink(missing_ok=True)
+        write_json(stamp, {"at": now_iso(), "result": result[:2000]})  # 실패해도 남긴다(매 순환 재실행 방지 — 10분 뒤 다시)
+
 def main():
     # 콘솔 문자표(cp949)에 없는 글자가 있어도 출력 때문에 멈추지 않게
     for s in (sys.stdout, sys.stderr):
@@ -1677,6 +1811,7 @@ def main():
     p = sub.add_parser("activate", help="미처리 주제를 착수 대상으로"); p.add_argument("id")
     sub.add_parser("import-proposals", help="각 PC 작업자가 올린 메모를 미처리 주제로 가져오기(허브)")
     sub.add_parser("spawn-followups", help="★결과 확인에서 '후속 구현'을 고른 주제의 새 구현 주제 만들기(허브)")
+    p = sub.add_parser("works-readme", help="real-work 작업 폴더 README를 주제 기록으로 자동 갱신(허브, 10분에 한 번)"); p.add_argument("--force", action="store_true")
     sub.add_parser("list")
     sub.add_parser("announce")
     p = sub.add_parser("tidy", help="자동 알림(DASH-*)·아키텍트 행동 사본(USR-*) 중 반영이 끝난 것을 수신함 done/으로 옮김")
@@ -1700,7 +1835,7 @@ def main():
     cfg = load_cfg()
     {"pull": cmd_pull, "add-blob": cmd_add_blob, "add": cmd_add, "list": cmd_list, "announce": cmd_announce,
      "triage": cmd_triage, "plan": cmd_plan, "note": cmd_note, "status": cmd_status, "comment": cmd_comment,
-     "dispatch": cmd_dispatch, "activate": cmd_activate, "import-proposals": cmd_import_proposals, "spawn-followups": cmd_spawn_followups, "tidy": cmd_tidy}[args.cmd](args, cfg)
+     "dispatch": cmd_dispatch, "activate": cmd_activate, "import-proposals": cmd_import_proposals, "spawn-followups": cmd_spawn_followups, "works-readme": cmd_works_readme, "tidy": cmd_tidy}[args.cmd](args, cfg)
 
 
 if __name__ == "__main__":

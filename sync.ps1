@@ -96,13 +96,22 @@ try {
   if ($out -notmatch '새 알림 0건') { Log "알림: $out" }
   $out = Py 'topics.py tidy'
   if ($out -notmatch '수신함 정리 0건') { Log $out }
+  # real-work 작업 폴더 README를 주제 기록으로 자동 갱신(README 작성자는 허브 readme-bot 하나, 10분에 한 번) — 실패해도 동기화는 계속
+  $out = Py 'topics.py works-readme'
+  if ($LASTEXITCODE) { Log "README 자동 갱신 실패: $out" } elseif ($out -match 'README 갱신 [1-9]|보류|못 읽음|실패') { Log "README 자동 갱신: $out" }
   Start-Runner
 
   # 작업물 저장소(real-work)를 받아 두어 주제 화면의 작업물 목록·상태가 최신이 되게 한다
   $wr = if ($cfg.work_repo) { $cfg.work_repo } else { 'D:\real-work' }
   # 실행기가 real-work git 작업 중이면(node-data/realwork.lock) 겹치지 않게 이번에는 건너뛴다
   $wlock = Join-Path $PSScriptRoot 'node-data/realwork.lock'
-  if ((Test-Path (Join-Path $wr '.git')) -and -not (Test-Path $wlock)) { git -C $wr pull -q --rebase --autostash origin main 2>&1 | Out-Null }
+  if ((Test-Path (Join-Path $wr '.git')) -and -not (Test-Path $wlock)) {
+    git -C $wr pull -q --rebase --autostash origin main 2>&1 | Out-Null
+    # 받기 충돌이면 멈춘 rebase를 되돌리고 알린다(충돌 표식이 대시보드 작업물 화면에 실리지 않게)
+    if ((Test-Path (Join-Path $wr '.git/rebase-merge')) -or (Test-Path (Join-Path $wr '.git/rebase-apply'))) { git -C $wr rebase --abort 2>&1 | Out-Null; Log '작업물 저장소 받기 충돌 — 받기를 되돌림(같은 파일을 다른 곳에서 고쳤는지 확인)' }
+    $um = @(git -C $wr diff --name-only --diff-filter=U 2>$null)
+    if ($um.Count) { Log "작업물 저장소 충돌 파일(정리 필요): $($um -join ', ')" }
+  }
   if (Quiet) { return }  # 게시 시간대 밖: 만들고 올리기는 쉰다(07시가 되면 모아서 한 번에 게시)
   $out = Py 'build.py --skip-unchanged'
   if ($LASTEXITCODE -eq 10) {

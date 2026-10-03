@@ -886,8 +886,14 @@ def ensure_work(job: dict, create: bool) -> str | None:
 def pull_work_repo():
     if WORK_PY.exists():
         with repo_lock():
-            subprocess.run(["git", "-C", str(WORK_PY.parent), "pull", "-q", "--rebase", "--autostash", "origin", "main"],
-                           capture_output=True, env=ai_env(), creationflags=NO_WINDOW)
+            try:
+                subprocess.run(["git", "-C", str(WORK_PY.parent), "pull", "-q", "--rebase", "--autostash", "origin", "main"],
+                               capture_output=True, env=dict(ai_env(), GIT_TERMINAL_PROMPT="0"), creationflags=NO_WINDOW, timeout=180)
+            except subprocess.TimeoutExpired:
+                return
+            gd = WORK_PY.parent / ".git"
+            if (gd / "rebase-merge").exists() or (gd / "rebase-apply").exists():  # 받기 충돌: 멈춘 rebase를 되돌린다(충돌 표식이 남지 않게)
+                subprocess.run(["git", "-C", str(WORK_PY.parent), "rebase", "--abort"], capture_output=True, creationflags=NO_WINDOW, timeout=60)
 
 
 class repo_lock:
