@@ -208,6 +208,27 @@ function bulkDelete() {
   mutate(list => { for (const id of ids) { const i = list.findIndex(x => x.id === id); if (i >= 0) list.splice(i, 1); } }, `일괄 삭제 (${saved.length}건)`);
   toast(`${saved.length}건 삭제했습니다`, '되돌리기', () => mutate(list => { for (const s of saved) if (!find(list, s.id)) list.push(clone(s)); }, `일괄 삭제 되돌리기 (${saved.length}건)`), 10000);
 }
+function bulkPatch(ids, patch, label) {
+  const now = new Date().toISOString(), [f, v] = Object.entries(patch)[0];
+  const todo = ids.filter(id => { const t = find(S.tasks, id); return t && (t[f] ?? '') !== v; });
+  if (!todo.length) return toast('바뀔 작업이 없습니다');
+  mutate(list => { for (const id of todo) { const t = find(list, id); if (t && (t[f] ?? '') !== v) applyPatch(t, patch, now); } }, `일괄 ${label} (${todo.length}건)`);
+  S.sel.clear(); renderRows(); renderBulk();
+  toast(`${todo.length}건 → ${label}`);
+}
+function renameArea(from, to) {
+  to = to.trim(); if (!to || to === from) return;
+  const ids = S.tasks.filter(t => (t.area || '분류 없음') === from).map(t => t.id);
+  if (S.area === from) S.area = to;
+  bulkPatch(ids, { area: to === '분류 없음' ? '' : to }, `분류 ${from} → ${to}`);
+}
+function dragIds(e) { try { return JSON.parse(e.dataTransfer.getData('application/x-real-ids') || '[]'); } catch { return []; } }
+function dropTarget(el, apply) {
+  el.addEventListener('dragover', e => { if ([...e.dataTransfer.types].includes('application/x-real-ids')) { e.preventDefault(); el.classList.add('drop'); } });
+  el.addEventListener('dragleave', () => el.classList.remove('drop'));
+  el.addEventListener('drop', e => { e.preventDefault(); el.classList.remove('drop'); const ids = dragIds(e); if (ids.length) apply(ids); });
+  return el;
+}
 function toggleSel(id, on) { if (on ?? !S.sel.has(id)) S.sel.add(id); else S.sel.delete(id); S.anchor = id; }
 function visibleIds() { return [...document.querySelectorAll('#rows .row')].map(r => r.dataset.id); }
 function stageDate(t, k) { return (t.stages || {})[k] || (k === 'todo' ? (t.start ? t.start + 'T00:00:00' : t.created) : null); }
@@ -298,10 +319,22 @@ function renderSide() {
     navBtn('오늘', todayN, S.view === 'today' && !S.day, pick({ view: 'today', status: null, area: null }), h('span', { class: 'ico' }, icon('sun', 15))),
     navBtn('이번 주 마감', weekN, S.view === 'week' && !S.day, pick({ view: 'week', status: null, area: null }), h('span', { class: 'ico' }, icon('week', 15))),
     h('div', { class: 'sec' }, '상태'),
-    ...STATUS.map(s => navBtn(s.name, cnt(s.k), S.view === 'all' && !S.day && S.status === s.k && !S.area, pick({ view: 'all', status: s.k, area: null }), ring(s.k))),
+    ...STATUS.map(s => dropTarget(navBtn(s.name, cnt(s.k), S.view === 'all' && !S.day && S.status === s.k && !S.area, pick({ view: 'all', status: s.k, area: null }), ring(s.k)), ids => bulkPatch(ids, { status: s.k }, s.name))),
     navBtn('전체', S.tasks.length, S.view === 'all' && !S.day && !S.status && !S.area, pick({ view: 'all', status: null, area: null }), h('span', { class: 'ico' }, icon('all', 15))),
     h('div', { class: 'sec' }, '분류'),
-    ...[...areas.entries()].sort((a, b) => b[1] - a[1]).map(([a, n]) => navBtn(a, n, S.view === 'all' && !S.day && S.area === a, pick({ view: 'all', status: null, area: a }), h('span', { class: 'ico' }, icon('tag', 14)))),
+    ...[...areas.entries()].sort((a, b) => b[1] - a[1]).map(([a, n]) => {
+      const b = navBtn(a, n, S.view === 'all' && !S.day && S.area === a, pick({ view: 'all', status: null, area: a }), h('span', { class: 'ico' }, icon('tag', 14)));
+      b.title = '더블클릭: 이름 바꾸기 · 작업을 끌어 놓으면 이 분류로';
+      b.addEventListener('dblclick', e => {
+        e.preventDefault();
+        const inp = h('input', { class: 'nav-edit', 'aria-label': '분류 이름' }); inp.value = a;
+        let done = false; const finish = ok => { if (done) return; done = true; if (ok) renameArea(a, inp.value); else renderSide(); };
+        inp.addEventListener('keydown', ev => { if (ev.key === 'Enter' && !ev.isComposing) finish(true); else if (ev.key === 'Escape') finish(false); ev.stopPropagation(); });
+        inp.addEventListener('blur', () => finish(true));
+        b.replaceWith(inp); inp.focus(); inp.select();
+      });
+      return dropTarget(b, ids => bulkPatch(ids, { area: a === '분류 없음' ? '' : a }, `분류 ${a}`));
+    }),
     h('div', { class: 'sec' }, '이번 주'),
     h('div', { class: 'mini' }, weekRange().map(d => {
       const k = ymd(d), due = S.tasks.filter(t => t.due === k && t.status !== 'done');
@@ -339,6 +372,13 @@ function rowEl(t) {
     h('span', { class: `note${last && last.by === 'claude' ? ' ai' : ''}`, title: last ? last.text : '' }, last ? '●' : ''),
     h('span', { class: `dt${due && t.status !== 'done' ? (due.diff < 0 ? ' late' : due.diff === 0 ? ' today' : '') : ''}`, title: due ? `마감 ${t.due}` : '' }, due ? due.txt : ''),
     h('span', { class: 'upd', title: '마지막 수정 ' + when(t.updated) }, shortDate(t.updated)));
+  el.draggable = true;
+  el.addEventListener('dragstart', e => {
+    const ids = S.sel.has(t.id) ? [...S.sel] : [t.id];
+    e.dataTransfer.setData('application/x-real-ids', JSON.stringify(ids)); e.dataTransfer.setData('text/plain', ids.length + '건'); e.dataTransfer.effectAllowed = 'move';
+    el.classList.add('dragging');
+  });
+  el.addEventListener('dragend', () => el.classList.remove('dragging'));
   return el;
 }
 function renderRows() {
@@ -472,6 +512,22 @@ function rangeSel(a, b) {
   for (const id of ids.slice(Math.min(i, j), Math.max(i, j) + 1)) S.sel.add(id);
   S.anchor = b;
 }
+function areaPicker() {
+  const areas = [...new Set(S.tasks.map(x => x.area).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'ko'));
+  const sel = h('select', { class: 'bulk-area', 'aria-label': '분류 지정' },
+    h('option', { value: '', disabled: true, selected: true }, '분류 지정…'),
+    ...areas.map(a => h('option', { value: a }, a)), h('option', { value: '__none' }, '분류 없음'), h('option', { value: '__new' }, '+ 새 분류'));
+  sel.onchange = () => {
+    const ids = [...S.sel];
+    if (sel.value === '__new') {
+      const inp = h('input', { class: 'bulk-new', placeholder: '새 분류 이름 후 Enter', 'aria-label': '새 분류 이름' });
+      inp.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.isComposing && inp.value.trim()) bulkPatch(ids, { area: inp.value.trim() }, `분류 ${inp.value.trim()}`); else if (e.key === 'Escape') renderBulk(); e.stopPropagation(); });
+      sel.replaceWith(inp); inp.focus(); return;
+    }
+    bulkPatch(ids, { area: sel.value === '__none' ? '' : sel.value }, sel.value === '__none' ? '분류 없음' : `분류 ${sel.value}`);
+  };
+  return sel;
+}
 function renderBulk() {
   const bar = $('#bulk'); if (!bar) return;
   for (const id of [...S.sel]) if (!find(S.tasks, id)) S.sel.delete(id);
@@ -485,6 +541,8 @@ function renderBulk() {
     h('span', { class: 'bulk-sep' }),
     h('span', { class: 'bulk-l' }, '진행도'),
     ...STATUS.map(s => h('button', { class: 'bulk-st', type: 'button', title: `${n}건을 ${s.name}(으)로`, onclick: () => bulkStatus(s.k) }, ring(s.k, '12px'), s.name)),
+    h('span', { class: 'bulk-sep' }),
+    areaPicker(),
     h('span', { class: 'bulk-sep' }),
     del,
     h('button', { class: 'btn', type: 'button', onclick: () => { S.sel.clear(); renderRows(); renderBulk(); } }, '선택 해제'));

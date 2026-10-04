@@ -244,3 +244,10 @@ textarea.f-detail:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var
 .bulk-l { font-size: 12px; color: var(--ink-3); }
 .bulk-st { display: inline-flex; align-items: center; gap: 5px; height: 30px; padding: 0 10px; border-radius: 8px; font-size: 12.5px; color: var(--ink-2); border: 1px solid var(--line); background: var(--raise); }
 .bulk-st:hover { color: var(--ink); border-color: var(--line-2); }
+
+/* 분류 지정·끌어 놓기 */
+.nav.drop { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); color: var(--ink); }
+.nav-edit { width: 100%; height: 32px; border-radius: 8px; border: 1px solid var(--accent); background: var(--raise); padding: 0 8px; outline: none; font-size: 13px; }
+.row.dragging { opacity: .45; }
+.bulk-area, .bulk-new { height: 30px; border-radius: 8px; border: 1px solid var(--line-2); background: var(--raise); padding: 0 8px; font-size: 12.5px; outline: none; }
+.bulk-new { width: 170px; border-color: var(--accent); }
