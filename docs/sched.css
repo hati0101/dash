@@ -274,3 +274,8 @@ body.resizing * { cursor: col-resize !important; }
 .u-bar i { display: block; height: 100%; background: var(--c); border-radius: 3px; }
 .u-p { font: 11px var(--mono); color: var(--ink-2); text-align: right; }
 .u-empty, .u-foot { font-size: 11px; color: var(--ink-4); }
+
+/* 디스코드 공개 */
+.pub-row { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--ink-2); min-height: 32px; padding: 0 8px; cursor: pointer; }
+.pub-cb { width: 15px; height: 15px; accent-color: #5865f2; margin: 0; }
+.pub-badge { margin-left: 8px; font-size: 10.5px; font-weight: 600; color: #8b93ff; border: 1px solid rgba(88,101,242,.5); border-radius: 5px; padding: 0 5px; vertical-align: 1px; }

@@ -1,4 +1,4 @@
-# 작업실 사용량 갱신(개발컴 전용). 예약 작업 'REAL-작업실-사용량'이 30분마다 실행한다.
+﻿# 작업실 사용량 갱신(개발컴 전용). 예약 작업 'REAL-작업실-사용량'이 15분마다 실행한다.
 # 비밀번호는 setup-auto.ps1이 저장한 .local/pw.dpapi(이 PC·이 사용자만 풀 수 있음)에서 읽는다.
 Set-Location $PSScriptRoot
 $log = Join-Path $PSScriptRoot '.local/usage.log'

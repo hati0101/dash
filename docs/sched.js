@@ -197,11 +197,12 @@ function createTask(f) {
   mutate(list => { if (!find(list, id)) list.push(clone(t)); }, `추가 "${t.title || '새 작업'}"`);
   return id;
 }
-const FIELD = { title: '제목', detail: '내용', start: '시작일', due: '마감일', priority: '중요도', area: '분류', status: '상태' };
+const FIELD = { title: '제목', detail: '내용', start: '시작일', due: '마감일', priority: '중요도', area: '분류', status: '상태', public: '디스코드 공개', pubTitle: '공개 제목' };
 function fmtVal(f, v) {
   if (f === 'status') return (SMAP[v] || {}).name || v || '없음';
   if (f === 'priority') return PRI[v] || v || '보통';
   if (f === 'start' || f === 'due') return v ? v.slice(5).replace('-', '/') : '없음';
+  if (f === 'public') return v ? '공개' : '비공개';
   return v || '없음';
 }
 function applyPatch(t, patch, now) {
@@ -240,9 +241,10 @@ function bulkDelete() {
 }
 function bulkPatch(ids, patch, label) {
   const now = new Date().toISOString(), [f, v] = Object.entries(patch)[0];
-  const todo = ids.filter(id => { const t = find(S.tasks, id); return t && (t[f] ?? '') !== v; });
+  const same = (a, b) => typeof b === 'boolean' ? !!a === b : (a ?? '') === b;
+  const todo = ids.filter(id => { const t = find(S.tasks, id); return t && !same(t[f], v); });
   if (!todo.length) return toast('바뀔 작업이 없습니다');
-  mutate(list => { for (const id of todo) { const t = find(list, id); if (t && (t[f] ?? '') !== v) applyPatch(t, patch, now); } }, `일괄 ${label} (${todo.length}건)`);
+  mutate(list => { for (const id of todo) { const t = find(list, id); if (t && !same(t[f], v)) applyPatch(t, patch, now); } }, `일괄 ${label} (${todo.length}건)`);
   S.sel.clear(); renderRows(); renderBulk();
   toast(`${todo.length}건 → ${label}`);
 }
@@ -394,7 +396,7 @@ function rowEl(t) {
     } },
     pick, st,
     h('span', { class: `flag${t.priority === 'low' ? ' low' : ''}`, title: t.priority ? PRI[t.priority] : '' }, t.priority === 'high' ? '▲' : t.priority === 'low' ? '▽' : ''),
-    h('span', { class: 'title' }, t.title || '(제목 없음)'),
+    h('span', { class: 'title' }, t.title || '(제목 없음)', t.public ? h('span', { class: 'pub-badge', title: '디스코드 공개' + (t.pubTitle ? ' · ' + t.pubTitle : '') }, '공개') : null),
     S.group !== 'area' && t.area ? h('span', { class: 'tag' }, t.area) : h('span'),
     h('span', { class: `note${last && last.by === 'claude' ? ' ai' : ''}`, title: last ? last.text : '' }, last ? '●' : ''),
     h('span', { class: 'dt' }),
@@ -481,6 +483,12 @@ function renderPane(fresh) {
         h('label', { for: 'f-start' }, '시작일'), inp('f-start', 'date', t.start, 'start', '시작일'),
         h('label', { for: 'f-pri' }, '중요도'), pri,
         h('label', { for: 'f-area' }, '분류'), area,
+        h('label', { for: 'f-pub' }, '디스코드'), (() => {
+          const cb = h('input', { type: 'checkbox', id: 'f-pub', class: 'pub-cb' }); cb.checked = !!t.public;
+          cb.addEventListener('change', () => patchTask(t.id, { public: cb.checked }, `"${t.title}" 디스코드 ${cb.checked ? '공개' : '비공개'}`));
+          return h('label', { class: 'pub-row', for: 'f-pub' }, cb, h('span', null, '진행 중일 때 개발 현황 채널에 공개'));
+        })(),
+        h('label', { for: 'f-pubtitle' }, '공개 제목'), (() => { const el = inp('f-pubtitle', 'text', t.pubTitle, 'pubTitle', '공개 제목', v => v.trim()); el.placeholder = '비우면 제목 그대로'; return el; })(),
         h('datalist', { id: 'areas' }, [...new Set(S.tasks.map(x => x.area).filter(Boolean))].map(v => h('option', { value: v })))),
       h('div', null, h('div', { class: 'blk-label' }, '내용'), detail),
       h('div', null, h('div', { class: 'blk-label' }, '진행 기록'), h('div', { class: 'timeline', id: 'log' })),
@@ -585,6 +593,9 @@ function renderBulk() {
     h('span', { class: 'bulk-sep' }),
     h('span', { class: 'bulk-l' }, '진행도'),
     ...STATUS.map(s => h('button', { class: 'bulk-st', type: 'button', title: `${n}건을 ${s.name}(으)로`, onclick: () => bulkStatus(s.k) }, ring(s.k, '12px'), s.name)),
+    h('span', { class: 'bulk-sep' }),
+    h('button', { class: 'bulk-st', type: 'button', onclick: () => bulkPatch([...S.sel], { public: true }, '디스코드 공개') }, '공개'),
+    h('button', { class: 'bulk-st', type: 'button', onclick: () => bulkPatch([...S.sel], { public: false }, '디스코드 비공개') }, '비공개'),
     h('span', { class: 'bulk-sep' }),
     areaPicker(),
     h('span', { class: 'bulk-sep' }),
