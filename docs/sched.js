@@ -363,6 +363,12 @@ function rowEl(t) {
     onclick: e => {
       if (e.ctrlKey || e.metaKey) { toggleSel(t.id); renderRows(); renderBulk(); return; }
       if (e.shiftKey && S.anchor) { rangeSel(S.anchor, t.id); renderRows(); renderBulk(); return; }
+      // 같은 줄을 0.4초 안에 두 번 누르면 더블클릭: 체크(선택) 토글
+      const now = Date.now();
+      if (S.lastClick && S.lastClick.id === t.id && now - S.lastClick.at < 400) {
+        S.lastClick = null; window.getSelection()?.removeAllRanges(); toggleSel(t.id); renderRows(); renderBulk(); return;
+      }
+      S.lastClick = { id: t.id, at: now };
       openTask(t.id);
     } },
     pick, st,
@@ -521,7 +527,7 @@ function renderOverview(pane) {
     h('div', null, h('div', { class: 'blk-label' }, '단축키'),
       h('div', { class: 'keys' }, h('span', { class: 'kbd' }, 'N'), '할 일 추가', h('span', { class: 'kbd' }, '/'), '검색',
         h('span', { class: 'kbd' }, '↑ ↓'), '목록 이동', h('span', { class: 'kbd' }, 'Enter'), '상세 열기',
-        h('span', { class: 'kbd' }, '1~5'), '상태: 대기·진행·확인·보류·완료', h('span', { class: 'kbd' }, 'Del'), '삭제(선택한 것 전부)', h('span', { class: 'kbd' }, 'X'), '선택', h('span', { class: 'kbd' }, 'Esc'), '닫기'))));
+        h('span', { class: 'kbd' }, '더블클릭'), '체크(선택)', h('span', { class: 'kbd' }, '1~5'), '상태: 대기·진행·확인·보류·완료', h('span', { class: 'kbd' }, 'Del'), '삭제(선택한 것 전부)', h('span', { class: 'kbd' }, 'X'), '선택', h('span', { class: 'kbd' }, 'Esc'), '닫기'))));
   attachResizer(pane);
 }
 function rangeSel(a, b) {
