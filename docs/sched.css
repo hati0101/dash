@@ -251,3 +251,7 @@ textarea.f-detail:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var
 .row.dragging { opacity: .45; }
 .bulk-area, .bulk-new { height: 30px; border-radius: 8px; border: 1px solid var(--line-2); background: var(--raise); padding: 0 8px; font-size: 12.5px; outline: none; }
 .bulk-new { width: 170px; border-color: var(--accent); }
+
+/* 로고: REAL 슬라임 */
+.mark-img { width: 34px; height: 34px; border-radius: 10px; flex: none; display: block; box-shadow: 0 4px 14px rgba(120,200,235,.25); }
+.mark-img.lg { width: 56px; height: 56px; border-radius: 15px; }

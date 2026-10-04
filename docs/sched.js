@@ -313,7 +313,7 @@ function renderSide() {
   const areas = new Map(); for (const t of S.tasks) { const a = t.area || '분류 없음'; areas.set(a, (areas.get(a) || 0) + 1); }
   const pick = patch => () => { Object.assign(S, { day: null }, patch); S.focus = null; render(); $('#rows').scrollTop = 0; };
   $('#side').replaceChildren(
-    h('div', { class: 'brand' }, h('div', { class: 'mark', 'aria-hidden': 'true' }, 'R'), h('div', null, h('b', null, 'REAL 작업실'), h('small', null, (() => { const d = new Date(); return `${d.getMonth() + 1}월 ${d.getDate()}일 ${DAYS[d.getDay()]}요일`; })()))),
+    h('div', { class: 'brand' }, h('img', { class: 'mark-img', src: 'brand-mark.png?v=s7', alt: '', width: 34, height: 34 }), h('div', null, h('b', null, 'REAL 작업실'), h('small', null, (() => { const d = new Date(); return `${d.getMonth() + 1}월 ${d.getDate()}일 ${DAYS[d.getDay()]}요일`; })()))),
     h('button', { class: 'new-btn', type: 'button', onclick: () => $('#addinput').focus() }, icon('plus', 16), '새 작업', h('span', { class: 'kbd' }, 'N')),
     h('div', { class: 'sec' }, '보기'),
     navBtn('오늘', todayN, S.view === 'today' && !S.day, pick({ view: 'today', status: null, area: null }), h('span', { class: 'ico' }, icon('sun', 15))),
