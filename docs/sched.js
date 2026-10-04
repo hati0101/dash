@@ -501,16 +501,17 @@ function renderPane(fresh) {
   if (fresh && !t.title) title.focus();
 }
 function attachResizer(pane) {
-  const grip = h('div', { class: 'resizer', role: 'separator', 'aria-orientation': 'vertical', 'aria-label': '상세 창 폭 조절', title: '끌어서 폭 조절 · 더블클릭: 기본 폭' });
+  const grip = h('div', { class: 'resizer', role: 'separator', 'aria-orientation': 'vertical', 'aria-label': '상세 창 폭 조절', title: '끌어서 폭 조절 · 더블클릭: 기본 폭(창의 약 절반)' });
   grip.addEventListener('pointerdown', e => {
     e.preventDefault(); grip.setPointerCapture(e.pointerId); document.body.classList.add('resizing');
     const move = ev => setPaneWidth(window.innerWidth - ev.clientX);
     const up = () => { grip.removeEventListener('pointermove', move); grip.removeEventListener('pointerup', up); document.body.classList.remove('resizing'); store.set('sched.paneW', S.paneW); };
     grip.addEventListener('pointermove', move); grip.addEventListener('pointerup', up);
   });
-  grip.addEventListener('dblclick', () => { setPaneWidth(400); store.set('sched.paneW', 400); });
+  grip.addEventListener('dblclick', () => { store.del('sched.paneW'); setPaneWidth(defaultPaneW()); });
   pane.prepend(grip);
 }
+function defaultPaneW() { return Math.round(window.innerWidth * 0.48); }  // 아키텍트 기준 화면(2000px에서 약 950px)
 function setPaneWidth(w) {
   const max = Math.max(320, Math.min(1100, window.innerWidth - 560));
   S.paneW = Math.round(Math.max(320, Math.min(max, w)));
@@ -625,8 +626,8 @@ function showTokenBox(reason) {
 async function boot() {
   const th = store.get('theme'); if (th) document.documentElement.dataset.theme = th;
   S.group = store.get('sched.group', 'area'); S.collapsed = store.get('sched.collapsed', {}) || {};
-  setPaneWidth(store.get('sched.paneW', 400));
-  window.addEventListener('resize', () => setPaneWidth(S.paneW));
+  setPaneWidth(store.get('sched.paneW', null) ?? defaultPaneW());
+  window.addEventListener('resize', () => setPaneWidth(store.get('sched.paneW', null) ?? defaultPaneW()));
   $('#lock-form').addEventListener('submit', unlock);
   if (!window.isSecureContext || !crypto.subtle) { $('#lock-msg').textContent = 'HTTPS에서만 열 수 있습니다.'; return; }
   try { S.env = (await fetchRemote()).env; } catch (e) { $('#lock-msg').textContent = e.message; return; }
