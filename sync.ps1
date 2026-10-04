@@ -60,6 +60,7 @@ try {
   function Sync-Once {
   if (Test-Path (Join-Path $PSScriptRoot '.local/pause')) { return }  # 반복 도중에 멈춤을 걸어도 바로 멈춘다
   $out = (git pull -q --rebase --autostash origin main 2>&1 | Out-String).Trim()
+  if (Test-Path (Join-Path $PSScriptRoot 'STOPPED')) { Log '정지(STOPPED) — 2026-10-04 주제 방식 폐기, 실행기·게시 중지'; return }
   if ($LASTEXITCODE) { Log "받기 실패: $out" }
 
   if ($role -eq 'node') {

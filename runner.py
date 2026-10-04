@@ -2573,6 +2573,9 @@ def main():
     global CFG, WORK_PY
     CFG = node.load_cfg()
     WORK_PY = Path(CFG.get("work_repo") or r"D:\real-work") / "work.py"
+    if Path(__file__).with_name("STOPPED").exists():  # 2026-10-04 아키텍트 지시: 주제 방식 폐기, 모든 PC 실행기 정지(저장소로 전파)
+        print("자동 실행기 정지(STOPPED)")
+        return
     if CFG.get("runner_enabled") is False:
         print("자동 실행기 꺼짐(config runner_enabled=false)")
         return
