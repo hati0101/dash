@@ -299,7 +299,7 @@ function visible() {
 }
 function sortRows(list) {
   const pr = { high: 0, normal: 1, low: 2 };
-  return list.sort((a, b) => (pr[a.priority] ?? 1) - (pr[b.priority] ?? 1) || (a.due || '9999').localeCompare(b.due || '9999') || (a.title || '').localeCompare(b.title || '', 'ko'));
+  return list.sort((a, b) => (pr[a.priority] ?? 1) - (pr[b.priority] ?? 1) || (b.updated || '').localeCompare(a.updated || '') || (a.title || '').localeCompare(b.title || '', 'ko'));
 }
 function groups(list) {
   if (S.group === 'none') return [{ key: '전체', items: sortRows(list) }];
@@ -328,7 +328,7 @@ function shell() {
   add.addEventListener('keydown', e => {
     if (e.key === 'Enter' && !e.isComposing && add.value.trim()) {
       const st = S.view === 'all' && S.status ? S.status : 'todo';
-      const id = createTask({ title: add.value.trim(), status: st, area: S.area && S.area !== '분류 없음' ? S.area : '', due: S.day || '' });
+      const id = createTask({ title: add.value.trim(), status: st, area: S.area && S.area !== '분류 없음' ? S.area : '' });
       add.value = ''; S.focus = id; renderRows();
     } else if (e.key === 'Escape') add.blur();
   });
@@ -338,15 +338,11 @@ function navBtn(label, count, current, onclick, lead) {
 }
 function renderSide() {
   const today = todayStr(), cnt = k => S.tasks.filter(t => (t.status || 'todo') === k).length;
-  const todayN = S.tasks.filter(t => t.status !== 'done' && (t.due === today || t.status === 'doing' || isLate(t))).length;
-  const w = weekRange().map(ymd), weekN = S.tasks.filter(t => t.status !== 'done' && t.due && t.due >= w[0] && t.due <= w[6]).length;
   const areas = new Map(); for (const t of S.tasks) { const a = t.area || '분류 없음'; areas.set(a, (areas.get(a) || 0) + 1); }
   const pick = patch => () => { Object.assign(S, { day: null }, patch); S.focus = null; render(); $('#rows').scrollTop = 0; };
   $('#side').replaceChildren(
     h('div', { class: 'brand' }, h('img', { class: 'mark-img', src: 'brand-mark.png?v=s7', alt: '', width: 34, height: 34 }), h('div', null, h('b', null, 'REAL 작업실'), h('small', null, (() => { const d = new Date(); return `${d.getMonth() + 1}월 ${d.getDate()}일 ${DAYS[d.getDay()]}요일`; })()))),
     h('button', { class: 'new-btn', type: 'button', onclick: () => $('#addinput').focus() }, icon('plus', 16), '새 작업', h('span', { class: 'kbd' }, 'N')),
-    h('div', { class: 'sec' }, '보기'),
-    navBtn('오늘', todayN, S.view === 'today' && !S.day, pick({ view: 'today', status: null, area: null }), h('span', { class: 'ico' }, icon('sun', 15))),
     h('div', { class: 'sec' }, '상태'),
     ...STATUS.map(s => dropTarget(navBtn(s.name, cnt(s.k), S.view === 'all' && !S.day && S.status === s.k && !S.area, pick({ view: 'all', status: s.k, area: null }), ring(s.k)), ids => bulkPatch(ids, { status: s.k }, s.name))),
     navBtn('전체', S.tasks.length, S.view === 'all' && !S.day && !S.status && !S.area, pick({ view: 'all', status: null, area: null }), h('span', { class: 'ico' }, icon('all', 15))),
@@ -366,12 +362,6 @@ function renderSide() {
     }),
     h('div', { class: 'sec' }, '사용량 · 개발컴'),
     h('div', { class: 'usage', id: 'usage' }),
-    h('div', { class: 'sec' }, '이번 주'),
-    h('div', { class: 'mini' }, weekRange().map(d => {
-      const k = ymd(d), due = S.tasks.filter(t => t.due === k && t.status !== 'done');
-      return h('button', { type: 'button', class: k === today ? 'today' : '', 'aria-pressed': S.day === k ? 'true' : 'false', title: `${d.getMonth() + 1}/${d.getDate()} 마감 ${due.length}건`,
-        onclick: () => { S.day = S.day === k ? null : k; S.focus = null; render(); } }, DAYS[d.getDay()], h('b', null, d.getDate()), h('i', { class: due.length ? (k < today ? 'late' : 'has') : '' }));
-    })),
     h('div', { class: 'side-foot' }, h('div', { class: `sync ${S.syncKind || ''}`, id: 'sync', title: S.syncText || '' }, h('span', null, S.syncText || '')), h('span', { class: 'grow' }),
       h('button', { class: 'ibtn', type: 'button', title: '저장 설정(GitHub 토큰)', 'aria-label': '저장 설정', onclick: () => { const b = $('#tokenbox'); if (b.hidden) showTokenBox(); else b.hidden = true; } }, icon('settings', 16)),
       h('button', { class: 'ibtn', type: 'button', title: '밝기 전환', 'aria-label': '밝기 전환', onclick: () => { const r = document.documentElement, n = r.dataset.theme === 'light' ? 'dark' : 'light'; r.dataset.theme = n; store.set('theme', n); } }, icon('theme', 16)),
@@ -407,7 +397,7 @@ function rowEl(t) {
     h('span', { class: 'title' }, t.title || '(제목 없음)'),
     S.group !== 'area' && t.area ? h('span', { class: 'tag' }, t.area) : h('span'),
     h('span', { class: `note${last && last.by === 'claude' ? ' ai' : ''}`, title: last ? last.text : '' }, last ? '●' : ''),
-    h('span', { class: `dt${due && t.status !== 'done' ? (due.diff < 0 ? ' late' : due.diff === 0 ? ' today' : '') : ''}`, title: due ? `마감 ${t.due}` : '' }, due ? due.txt : ''),
+    h('span', { class: 'dt' }),
     h('span', { class: 'upd', title: '마지막 수정 ' + when(t.updated) }, shortDate(t.updated)));
   el.draggable = true;
   el.addEventListener('dragstart', e => {
@@ -489,7 +479,6 @@ function renderPane(fresh) {
       h('div', { class: 'stages', id: 'stages', 'aria-label': '단계별 날짜' }),
       h('div', { class: 'props' },
         h('label', { for: 'f-start' }, '시작일'), inp('f-start', 'date', t.start, 'start', '시작일'),
-        h('label', { for: 'f-due' }, '마감일'), inp('f-due', 'date', t.due, 'due', '마감일'),
         h('label', { for: 'f-pri' }, '중요도'), pri,
         h('label', { for: 'f-area' }, '분류'), area,
         h('datalist', { id: 'areas' }, [...new Set(S.tasks.map(x => x.area).filter(Boolean))].map(v => h('option', { value: v })))),
@@ -544,14 +533,14 @@ function refreshLog(t) {
 }
 function renderOverview(pane) {
   const n = S.tasks.length || 1, cnt = k => S.tasks.filter(t => (t.status || 'todo') === k).length;
-  const late = S.tasks.filter(isLate).length, today = todayStr();
+  const today = todayStr();
   pane.replaceChildren(h('div', { class: 'overview' },
     h('div', null, h('h2', null, '한눈에 보기'), h('p', null, '목록에서 작업을 고르면 여기에 상세가 열립니다.')),
     h('div', { class: 'stat' },
       h('div', null, h('b', null, cnt('doing')), h('span', null, ring('doing', '10px'), '진행 중')),
       h('div', null, h('b', null, cnt('review')), h('span', null, ring('review', '10px'), '확인 대기')),
       h('div', null, h('b', null, cnt('todo')), h('span', null, ring('todo', '10px'), '대기')),
-      h('div', null, h('b', { css: late ? { color: 'var(--late)' } : {} }, late), h('span', null, '기한 지남'))),
+      h('div', null, h('b', null, cnt('hold')), h('span', null, ring('hold', '10px'), '보류'))),
     h('div', null, h('div', { class: 'blk-label' }, `상태 비율 · 전체 ${S.tasks.length}건`),
       h('div', { class: 'bar' }, STATUS.map(s => h('i', { css: { '--c': s.c, width: (cnt(s.k) / n * 100) + '%' }, title: `${s.name} ${cnt(s.k)}` })))),
     h('div', null, h('div', { class: 'blk-label' }, '오늘 시작한 작업'), h('p', null, `${S.tasks.filter(t => t.start === today).length}건`)),
