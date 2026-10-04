@@ -1,20 +1,20 @@
 'use strict';
-/* REAL 작업실 — 스케줄러. 데이터는 docs/sched.enc.json(대시보드 비밀번호로 암호화).
+/* REAL 작업실 — 목록형 스케줄러. 데이터는 docs/sched.enc.json(대시보드 비밀번호로 암호화).
    저장은 GitHub API로 그 파일을 바로 커밋한다(토큰: 이 기기에만 암호화 보관). 다른 기기 변경은 20초마다 확인. */
 const REPO = 'hati0101/dash', PATH = 'docs/sched.enc.json', BRANCH = 'main';
 const API = `https://api.github.com/repos/${REPO}/contents/${PATH}`;
 const STATUS = [
-  { k: 'todo', name: '대기', c: 'var(--todo)' },
-  { k: 'doing', name: '진행 중', c: 'var(--doing)' },
-  { k: 'review', name: '확인 대기', c: 'var(--review)' },
-  { k: 'hold', name: '보류', c: 'var(--hold)' },
-  { k: 'done', name: '완료', c: 'var(--done)' },
+  { k: 'todo', name: '대기', c: 'var(--todo)', ring: '' },
+  { k: 'doing', name: '진행 중', c: 'var(--doing)', ring: 'half' },
+  { k: 'review', name: '확인 대기', c: 'var(--review)', ring: 'half' },
+  { k: 'hold', name: '보류', c: 'var(--hold)', ring: 'pause' },
+  { k: 'done', name: '완료', c: 'var(--done)', ring: 'full' },
 ];
 const SMAP = Object.fromEntries(STATUS.map(s => [s.k, s]));
 const PRI = { high: '높음', normal: '보통', low: '낮음' };
 const DAYS = ['일', '월', '화', '수', '목', '금', '토'];
-const S = { env: null, key: null, sha: null, remote: [], tasks: [], queue: [], saving: false, syncText: '', syncErr: false,
-  view: 'list', status: 'all', q: '', day: null, area: null, weekOff: 0, open: null, quick: false, showDone: 12, showHold: 20, token: null };
+const S = { env: null, key: null, sha: null, remote: [], tasks: [], queue: [], saving: false, token: null,
+  view: 'all', status: 'todo', area: null, day: null, q: '', group: 'area', open: null, focus: null, collapsed: {} };
 
 // ---------- 유틸
 const $ = s => document.querySelector(s);
@@ -34,43 +34,48 @@ function h(tag, a, ...kids) {
   for (const c of kids.flat(Infinity)) if (c != null && c !== false) el.append(c instanceof Node ? c : document.createTextNode(String(c)));
   return el;
 }
-const ICONS = {
-  plus: '<path d="M12 5v14M5 12h14"/>',
-  theme: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l2 2m10 10 2 2M5 19l2-2M17 7l2-2"/>',
-  lock: '<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
-  close: '<path d="m6 6 12 12M18 6 6 18"/>',
-  settings: '<path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/>',
-  list: '<path d="M9 6h12M9 12h12M9 18h12M3 6h1M3 12h1M3 18h1"/>',
-  board: '<rect x="3" y="4" width="7" height="16" rx="2"/><rect x="14" y="4" width="7" height="11" rx="2"/>',
-};
-function icon(name) {
-  const el = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  for (const [k,v] of Object.entries({viewBox:'0 0 24 24',fill:'none',stroke:'currentColor','stroke-width':'1.8','stroke-linecap':'round','stroke-linejoin':'round','aria-hidden':'true'})) el.setAttribute(k,v);
-  el.innerHTML = ICONS[name] || ''; return el;
-}
 const pad = n => String(n).padStart(2, '0');
 const ymd = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 const todayStr = () => ymd(new Date());
 const clone = x => JSON.parse(JSON.stringify(x));
-function dueLabel(due) {
-  if (!due) return null;
-  const d = new Date(due + 'T00:00'); if (isNaN(d)) return null;
+const find = (list, id) => list.find(x => x.id === id);
+function dayLabel(v) {
+  if (!v) return null;
+  const d = new Date(v + 'T00:00'); if (isNaN(d)) return null;
   const diff = Math.round((d - new Date(todayStr() + 'T00:00')) / 864e5);
-  return { txt: diff === 0 ? '오늘' : diff === 1 ? '내일' : diff === -1 ? '어제' : `${d.getMonth() + 1}/${d.getDate()}(${DAYS[d.getDay()]})`, cls: diff < 0 ? 'late' : diff === 0 ? 'today' : '' };
+  return { txt: diff === 0 ? '오늘' : diff === 1 ? '내일' : diff === -1 ? '어제' : `${d.getMonth() + 1}/${d.getDate()}`, diff };
 }
 function when(iso) {
   if (!iso) return '';
   const d = new Date(iso); if (isNaN(d)) return '';
-  return ymd(d) === todayStr() ? `${pad(d.getHours())}:${pad(d.getMinutes())}` : `${d.getMonth() + 1}/${d.getDate()}`;
+  return ymd(d) === todayStr() ? `오늘 ${pad(d.getHours())}:${pad(d.getMinutes())}` : `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 function toast(text, label, action, ms = 6000) {
-  const btn = label ? h('button', { class: 'btn sm', type: 'button' }, label) : null;
+  const btn = label ? h('button', { class: 'btn', type: 'button' }, label) : null;
   const t = h('div', { class: 'toast', role: 'status' }, h('span', null, text), btn);
   if (btn) btn.onclick = () => { action(); t.remove(); };
   $('#toasts').append(t); setTimeout(() => t.remove(), ms);
 }
 const isLate = t => t.status !== 'done' && t.status !== 'hold' && t.due && t.due < todayStr();
 const newId = () => 'W-' + todayStr().replace(/-/g, '') + '-' + [...crypto.getRandomValues(new Uint8Array(3))].map(b => b.toString(16).padStart(2, '0')).join('');
+const ICONS = {
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  theme: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l2 2m10 10 2 2M5 19l2-2M17 7l2-2"/>',
+  lock: '<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
+  close: '<path d="m6 6 12 12M18 6 6 18"/>',
+  settings: '<path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/>',
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 3v1.5M12 19.5V21M3 12h1.5M19.5 12H21"/>',
+  week: '<rect x="4" y="5" width="16" height="15" rx="2"/><path d="M4 10h16M9 3v4M15 3v4"/>',
+  all: '<path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/>',
+  tag: '<path d="M3 12V4h8l10 10-8 8z"/><circle cx="7.5" cy="7.5" r="1.2"/>',
+  search: '<circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/>',
+};
+function icon(name, size) {
+  const el = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  for (const [k, v] of Object.entries({ viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.8', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true', width: size || 16, height: size || 16 })) el.setAttribute(k, v);
+  el.innerHTML = ICONS[name] || ''; return el;
+}
+const ring = (k, size) => h('span', { class: `ring ${(SMAP[k] || SMAP.todo).ring}`, css: { '--c': (SMAP[k] || SMAP.todo).c, ...(size ? { width: size, height: size } : {}) }, 'aria-hidden': 'true' });
 
 // ---------- 암호 (기존 작업실과 같은 형식·같은 비밀번호)
 const b64 = {
@@ -123,15 +128,11 @@ async function pull() {
   S.tasks = clone(S.remote); for (const op of S.queue) op.fn(S.tasks);
   return true;
 }
-function mutate(fn, msg) {
-  fn(S.tasks);
-  S.queue.push({ fn, msg });
-  render(); flush();
-}
+function mutate(fn, msg) { fn(S.tasks); S.queue.push({ fn, msg }); render(); flush(); }
 async function flush() {
   if (S.saving || !S.queue.length) return;
-  if (!S.token) { setSync('토큰이 없어 저장하지 못했습니다', true); return; }
-  S.saving = true; setSync('저장 중…');
+  if (!S.token) { setSync('토큰이 없어 저장하지 못했습니다', 'err'); showTokenBox(); return; }
+  S.saving = true; setSync('저장 중', 'busy');
   let tries = 0;
   while (S.queue.length && tries < 4) {
     const ops = S.queue.slice();
@@ -141,31 +142,26 @@ async function flush() {
       const r = await fetch(API, { method: 'PUT', headers: { Authorization: `Bearer ${S.token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: '작업실: ' + (ops.length === 1 ? ops[0].msg : ops[0].msg + ` 외 ${ops.length - 1}건`), content: btoa(JSON.stringify(env)), sha: S.sha || undefined, branch: BRANCH }) });
       if (r.status === 409 || r.status === 422) { tries++; await pull(); continue; }  // 다른 기기가 먼저 저장 — 최신본에 다시 적용
-      if (!r.ok) {
-        const why = r.status === 401 ? '토큰이 만료됐거나 틀렸습니다' : r.status === 403 || r.status === 404 ? '토큰에 이 저장소의 Contents 쓰기 권한이 없습니다' : 'GitHub ' + r.status;
-        throw new Error(why);
-      }
+      if (!r.ok) throw new Error(r.status === 401 ? '토큰이 만료됐거나 틀렸습니다' : r.status === 403 || r.status === 404 ? '토큰에 이 저장소의 Contents 쓰기 권한이 없습니다' : 'GitHub ' + r.status);
       const j = await r.json();
       S.sha = j.content.sha; S.remote = next; S.queue.splice(0, ops.length);
       S.tasks = clone(S.remote); for (const op of S.queue) op.fn(S.tasks);
       setSync('저장됨 ' + when(new Date().toISOString()));
     } catch (e) {
-      setSync('저장 실패: ' + e.message, true); S.saving = false;
+      setSync('저장 실패: ' + e.message, 'err'); S.saving = false;
       if (/권한|토큰/.test(e.message)) showTokenBox(e.message);
       return;
     }
   }
-  S.saving = false;
-  render();
+  S.saving = false; render();
   if (S.queue.length) setTimeout(flush, 1500);
 }
-function setSync(t, err = false) { S.syncText = t; S.syncErr = err; const el = $('#sync'); if (el) { el.textContent = t; el.className = 'sync' + (err ? ' err' : ''); } }
+function setSync(t, kind = '') { S.syncText = t; S.syncKind = kind; const el = $('#sync'); if (el) { el.className = 'sync ' + kind; el.replaceChildren(h('span', null, t)); el.title = t; } }
 
 // ---------- 작업 조작
-const find = (list, id) => list.find(x => x.id === id);
 function createTask(f) {
   const now = new Date().toISOString(), id = newId();
-  const t = { id, title: f.title || '', detail: f.detail || '', status: f.status || 'todo', start: f.start || todayStr(), due: f.due || '', priority: f.priority || 'normal', area: f.area || '', log: [], created: now, updated: now };
+  const t = { id, title: f.title || '', detail: '', status: f.status || 'todo', start: todayStr(), due: f.due || '', priority: 'normal', area: f.area || '', log: [], created: now, updated: now };
   mutate(list => { if (!find(list, id)) list.push(clone(t)); }, `추가 "${t.title || '새 작업'}"`);
   return id;
 }
@@ -176,11 +172,12 @@ function patchTask(id, patch, msg) {
 function setStatus(id, k) {
   const t = find(S.tasks, id); if (!t || t.status === k) return;
   patchTask(id, { status: k }, `"${t.title}" → ${SMAP[k].name}`);
+  toast(`"${t.title || '제목 없음'}" → ${SMAP[k].name}`);
 }
 function removeTask(id) {
   const t = find(S.tasks, id); if (!t) return;
   const saved = clone(t);
-  if (S.open === id) closeDrawer();
+  if (S.open === id) S.open = null;
   mutate(list => { const i = list.findIndex(x => x.id === id); if (i >= 0) list.splice(i, 1); }, `삭제 "${t.title}"`);
   toast(`"${t.title || '제목 없음'}" 삭제했습니다`, '되돌리기', () => mutate(list => { if (!find(list, id)) list.push(clone(saved)); }, `되돌리기 "${saved.title}"`), 8000);
 }
@@ -189,208 +186,224 @@ function addLog(id, text) {
   mutate(list => { const t = find(list, id); if (t) { t.log = [...(t.log || []), { at, by: 'me', text }]; t.updated = at; } }, '기록 추가');
 }
 
-// ---------- 화면
-function shell() {
-  const app = $('#app');
-  app.replaceChildren(
-    h('header', { class: 'top' },
-      h('div', { class: 'brand' }, h('div', { class: 'mark', 'aria-hidden': 'true' }, 'R'), h('h1', null, 'REAL 작업실')),
-      h('span', { class: 'today', id: 'today' }), h('span', { class: 'sync', id: 'sync' }, S.syncText),
-      h('span', { class: 'grow' }),
-      h('label', { class: 'search' }, h('input', { id: 'q', type: 'search', placeholder: '작업 검색', autocomplete: 'off', 'aria-label': '작업 검색' }), h('span', { class: 'kbd' }, '/')),
-      h('button', { class: 'btn icon-btn ghost', id: 'theme', type: 'button', 'aria-label': '밝기 전환', title: '밝기 전환' }, icon('theme')),
-      h('button', { class: 'btn icon-btn ghost', id: 'lockbtn', type: 'button', 'aria-label': '잠그기', title: '잠그기' }, icon('lock')),
-      h('button', {class:'btn icon-btn ghost', id:'settings', type:'button', 'aria-label':'저장 설정', title:'저장 설정'}, icon('settings')),
-      h('button', { class: 'btn primary', id: 'new', type: 'button' }, icon('plus'), '새 작업 ', h('span', { class: 'kbd' }, 'N'))),
-    h('div', { id: 'tokenbox', class: 'banner', hidden: true }),
-    h('div', { class: 'summary', id: 'summary' }),
-    h('details', {class:'schedule'}, h('summary', null, '주간 일정', h('span',null,'날짜로 작업 찾기')), h('div', { class: 'week', id: 'week' })),
-    h('div', { class: 'filterbar', id: 'filterbar', hidden: true }),
-    h('nav', {id:'viewbar', class:'viewbar', 'aria-label':'작업 보기'}),
-    h('main', { class: 'board', id: 'board', 'aria-label': '작업 보드' }));
-  $('#new').onclick = newTask;
-  $('#settings').onclick = () => { if ($('#tokenbox').hidden) showTokenBox(); else $('#tokenbox').hidden = true; };
-  $('#q').addEventListener('input', e => { S.q = e.target.value; renderBoard(); });
-  $('#theme').onclick = () => { const r = document.documentElement; const next = r.dataset.theme === 'light' ? 'dark' : 'light'; r.dataset.theme = next; store.set('theme', next); };
-  $('#lockbtn').onclick = lockNow;
-}
-function renderTop() {
-  const d = new Date();
-  $('#today').textContent = `${d.getMonth() + 1}월 ${d.getDate()}일 ${DAYS[d.getDay()]}요일`;
-  const cnt = k => S.tasks.filter(t => t.status === k).length;
-  const late = S.tasks.filter(isLate).length, dueToday = S.tasks.filter(t => t.status !== 'done' && t.due === todayStr()).length;
-  $('#summary').replaceChildren(
-    ...STATUS.filter(s => s.k !== 'done').map(s => h('span', { class: 'pill' }, h('i', { class: 'dot', css: { '--c': s.c } }), s.name, h('b', null, cnt(s.k)))),
-    h('span', { class: 'pill' }, h('i', { class: 'dot', css: { '--c': 'var(--accent)' } }), '오늘 마감', h('b', null, dueToday)),
-    ...(late ? [h('span', { class: 'pill warn' }, h('i', { class: 'dot', css: { '--c': 'var(--late)' } }), '기한 지남', h('b', null, late))] : []));
-}
-function weekDays() {
+// ---------- 보기·목록 계산
+function weekRange() {
   const base = new Date(); base.setHours(0, 0, 0, 0);
-  const mon = new Date(base); mon.setDate(base.getDate() - ((base.getDay() + 6) % 7) + S.weekOff * 7);
+  const mon = new Date(base); mon.setDate(base.getDate() - ((base.getDay() + 6) % 7));
   return [...Array(7)].map((_, i) => { const d = new Date(mon); d.setDate(mon.getDate() + i); return d; });
 }
-function renderWeek() {
-  const t = todayStr();
-  const cells = weekDays().map(d => {
-    const key = ymd(d), open = S.tasks.filter(x => x.due === key && x.status !== 'done');
-    const doneN = S.tasks.filter(x => x.due === key && x.status === 'done').length;
-    return h('button', { type: 'button', class: `day${key === t ? ' is-today' : ''}${S.day === key ? ' sel' : ''}`, 'aria-pressed': S.day === key ? 'true' : 'false',
-      onclick: () => { S.day = S.day === key ? null : key; render(); } },
-      h('span', { class: 'd' }, h('strong', null, d.getDate()), DAYS[d.getDay()] + (key === t ? ' · 오늘' : '')),
-      h('span', { class: 'bars' }, open.slice(0, 8).map(x => h('i', { css: { '--c': (SMAP[x.status] || SMAP.todo).c }, title: x.title }))),
-      h('span', { class: 'n' }, open.length ? `마감 ${open.length}건` : doneN ? `완료 ${doneN}건` : '—'));
-  });
-  $('#week').replaceChildren(
-    h('button', { class: 'nav', type: 'button', 'aria-label': '지난주', onclick: () => { S.weekOff--; render(); } }, '‹'), ...cells,
-    h('button', { class: 'nav', type: 'button', 'aria-label': '다음 주', onclick: () => { S.weekOff++; render(); } }, '›'));
-  const areas = [...new Set(S.tasks.map(x => x.area).filter(Boolean))].sort();
-  const bits = [];
-  if (S.weekOff) bits.push(h('button', { class: 'chip', type: 'button', onclick: () => { S.weekOff = 0; render(); } }, '이번 주로'));
-  if (S.day) bits.push(h('span', null, `${S.day.slice(5).replace('-', '/')} 마감만 보는 중`), h('button', { class: 'chip', type: 'button', onclick: () => { S.day = null; render(); } }, '전체 보기'));
-  if (areas.length) bits.push(h('span', null, '분류'), ...areas.map(a => h('button', { class: 'chip', type: 'button', 'aria-pressed': S.area === a ? 'true' : 'false', onclick: () => { S.area = S.area === a ? null : a; render(); } }, a)));
-  $('#filterbar').replaceChildren(...bits); $('#filterbar').hidden = !bits.length;
+function inView(t) {
+  const today = todayStr();
+  if (S.day) return t.due === S.day || t.start === S.day;
+  if (S.view === 'today') return t.status !== 'done' && (t.due === today || (t.status === 'doing') || isLate(t));
+  if (S.view === 'week') { const w = weekRange().map(ymd); return t.status !== 'done' && t.due && t.due >= w[0] && t.due <= w[6]; }
+  return true;
 }
 function visible() {
   const q = S.q.trim().toLowerCase();
-  return S.tasks.filter(t => (!S.day || t.due === S.day) && (!S.area || t.area === S.area)
+  return S.tasks.filter(t => inView(t) && (S.view !== 'all' || S.day || !S.status || (t.status || 'todo') === S.status) && (!S.area || (t.area || '분류 없음') === S.area)
     && (!q || [t.title, t.detail, t.area, ...(t.log || []).map(l => l.text)].join(' ').toLowerCase().includes(q)));
 }
-function sortTasks(list, k) {
+function sortRows(list) {
   const pr = { high: 0, normal: 1, low: 2 };
-  if (k === 'done' || k === 'hold') return list.sort((a, b) => (b.updated || '').localeCompare(a.updated || ''));
-  return list.sort((a, b) => (pr[a.priority] ?? 1) - (pr[b.priority] ?? 1) || (a.due || '9999').localeCompare(b.due || '9999') || (b.created || '').localeCompare(a.created || ''));
+  return list.sort((a, b) => (pr[a.priority] ?? 1) - (pr[b.priority] ?? 1) || (a.due || '9999').localeCompare(b.due || '9999') || (a.title || '').localeCompare(b.title || '', 'ko'));
 }
-function card(t) {
-  const due = dueLabel(t.due), last = (t.log || []).at(-1);
-  const el = h('button', { type: 'button', class: `task${S.open === t.id ? ' sel' : ''}`, draggable: 'true', onclick: () => openDrawer(t.id) },
-    h('span', { class: 't' }, t.priority === 'high' ? h('span', { class: 'pri', title: '중요도 높음' }, '●') : null, t.title || '(제목 없음)'),
-    (t.area || due || t.priority === 'low') ? h('span', { class: 'meta' }, t.area ? h('span', { class: 'tag' }, t.area) : null,
-      due ? h('span', { class: `due ${t.status === 'done' ? '' : due.cls}` }, due.txt) : null, t.priority === 'low' ? h('span', null, '낮음') : null) : null,
-    null);
-  if (last) el.title = (last.by === 'claude' ? '[AI] ' : '') + last.text;
-  el.addEventListener('dragstart', e => { e.dataTransfer.setData('text/plain', t.id); e.dataTransfer.effectAllowed = 'move'; el.classList.add('dragging'); });
-  el.addEventListener('dragend', () => el.classList.remove('dragging'));
-  return el;
-}
-function renderBoard() {
-  renderViewbar();
-  const vis = visible().filter(t => S.status === 'all' || (t.status || 'todo') === S.status);
-  $('#board').classList.toggle('list-view', S.view === 'list');
-  if (S.view === 'list') {
-    const rows = sortTasks(vis, S.status).map(t => {
-      const st = SMAP[t.status] || SMAP.todo, due = dueLabel(t.due);
-      return h('button', {type:'button',class:'task-row',onclick:()=>openDrawer(t.id)},
-        h('span',{class:'task-main'},h('strong',null,t.title || '(제목 없음)'),h('span',{class:'row-area'},t.area || '미분류')),
-        h('span',{class:'row-status'},h('i',{class:'dot',css:{'--c':st.c}}),st.name),
-        h('span',{class:'row-priority '+(t.priority || 'normal')},PRI[t.priority] || '보통'),
-        h('span',{class:'row-due '+(due?.cls || '')},due ? due.txt+' 마감' : '일정 없음'));
-    });
-    $('#board').replaceChildren(h('div',{class:'list-head'},h('span',null,`작업 ${vis.length}개`),h('span',null,'상태'),h('span',null,'중요도'),h('span',null,'마감일')),
-      ...(rows.length ? rows : [h('div',{class:'empty'},'표시할 작업이 없습니다. 검색어나 필터를 바꿔보세요.')]));
-    return;
-  }
-  $('#board').replaceChildren(...STATUS.map(s => {
-    let list = sortTasks(vis.filter(t => (t.status || 'todo') === s.k), s.k);
-    const total = list.length, cap = s.k === 'done' ? S.showDone : s.k === 'hold' ? S.showHold : Infinity;
-    list = list.slice(0, cap);
-    const body = h('div', { class: 'col-body' });
-    if (s.k === 'todo' && S.quick) {
-      const inp = h('input', { placeholder: '할 일을 적고 Enter', 'aria-label': '빠른 추가', autocomplete: 'off' });
-      inp.addEventListener('keydown', e => {
-        if (e.key === 'Escape') { S.quick = false; renderBoard(); }
-        else if (e.key === 'Enter' && !e.isComposing && inp.value.trim()) { const v = inp.value.trim(); inp.value = ''; createTask({ title: v, due: S.day || '' }); }
-      });
-      body.append(h('div', { class: 'quick' }, inp)); requestAnimationFrame(() => inp.focus());
-    }
-    body.append(...list.map(card));
-    if (!total && !(s.k === 'todo' && S.quick)) body.append(h('div', { class: 'empty' }, s.k === 'todo' ? '할 일이 없습니다. + 를 눌러 추가하세요.' : '없음'));
-    if (total > list.length) body.append(h('button', { class: 'more', type: 'button', onclick: () => { if (s.k === 'done') S.showDone += 30; else S.showHold += 30; renderBoard(); } }, `${total - list.length}건 더 보기`));
-    const c = h('section', { class: 'col', 'aria-label': s.name },
-      h('div', { class: 'col-head' }, h('i', { class: 'dot', css: { '--c': s.c } }), h('h2', null, s.name), h('span', { class: 'cnt' }, total),
-        s.k === 'todo' ? h('button', { class: 'add', type: 'button', 'aria-label': '빠른 추가', title: '빠른 추가', onclick: () => { S.quick = !S.quick; renderBoard(); } }, '+') : null),
-      body);
-    c.addEventListener('dragover', e => { e.preventDefault(); c.classList.add('over'); });
-    c.addEventListener('dragleave', e => { if (!c.contains(e.relatedTarget)) c.classList.remove('over'); });
-    c.addEventListener('drop', e => { e.preventDefault(); c.classList.remove('over'); setStatus(e.dataTransfer.getData('text/plain'), s.k); });
-    return c;
-  }));
+function groups(list) {
+  if (S.group === 'none') return [{ key: '전체', items: sortRows(list) }];
+  const key = S.group === 'status' ? t => (SMAP[t.status] || SMAP.todo).name : t => t.area || '분류 없음';
+  const m = new Map();
+  for (const t of list) { const k = key(t); if (!m.has(k)) m.set(k, []); m.get(k).push(t); }
+  const order = S.group === 'status' ? STATUS.map(s => s.name) : [...m.keys()].sort((a, b) => m.get(b).length - m.get(a).length);
+  return order.filter(k => m.has(k)).map(k => ({ key: k, items: sortRows(m.get(k)) }));
 }
 
-function renderViewbar() {
-  $('#viewbar').replaceChildren(
-    h('div',{class:'status-tabs'},... [{k:'all',name:'전체'},...STATUS].map(st=>h('button',{type:'button',class:'status-tab','aria-pressed':S.status===st.k?'true':'false',onclick:()=>{S.status=st.k;renderBoard();}},st.name,h('span',null,st.k==='all'?S.tasks.length:S.tasks.filter(t=>(t.status||'todo')===st.k).length)))),
-    h('div',{class:'view-switch'},...['list','board'].map(v=>h('button',{type:'button',class:'btn','aria-pressed':S.view===v?'true':'false',onclick:()=>{S.view=v;renderBoard();}},icon(v),v==='list'?'목록':'보드'))));
+// ---------- 화면
+function shell() {
+  $('#app').replaceChildren(
+    h('nav', { class: 'side', id: 'side', 'aria-label': '보기' }),
+    h('section', { class: 'list' },
+      h('div', { class: 'lhead' }, h('h1', { id: 'ltitle' }), h('span', { class: 'count', id: 'lcount' }), h('span', { class: 'grow' }),
+        h('label', { class: 'search' }, icon('search', 15), h('input', { id: 'q', type: 'search', placeholder: '제목·내용·기록 검색', autocomplete: 'off', 'aria-label': '검색' }), h('span', { class: 'kbd' }, '/')),
+        h('div', { class: 'seg', id: 'groupseg', role: 'group', 'aria-label': '묶기' })),
+      h('div', { id: 'tokenbox', class: 'banner', hidden: true }),
+      h('label', { class: 'addrow' }, h('span', { class: 'plus' }, icon('plus', 16)), h('input', { id: 'addinput', placeholder: '할 일 추가 — 적고 Enter (시작일은 오늘)', autocomplete: 'off', 'aria-label': '할 일 추가' }), h('span', { class: 'kbd' }, 'N')),
+      h('div', { class: 'rows', id: 'rows', role: 'list' })),
+    h('aside', { class: 'pane idle', id: 'pane', 'aria-label': '작업 상세' }));
+  $('#q').addEventListener('input', e => { S.q = e.target.value; renderRows(); });
+  const add = $('#addinput');
+  add.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.isComposing && add.value.trim()) {
+      const st = S.view === 'all' && S.status ? S.status : 'todo';
+      const id = createTask({ title: add.value.trim(), status: st, area: S.area && S.area !== '분류 없음' ? S.area : '', due: S.day || '' });
+      add.value = ''; S.focus = id; renderRows();
+    } else if (e.key === 'Escape') add.blur();
+  });
+}
+function navBtn(label, count, current, onclick, lead) {
+  return h('button', { class: 'nav', type: 'button', 'aria-current': current ? 'true' : 'false', onclick }, lead || null, h('span', null, label), count == null ? null : h('span', { class: 'c' }, count));
+}
+function renderSide() {
+  const today = todayStr(), cnt = k => S.tasks.filter(t => (t.status || 'todo') === k).length;
+  const todayN = S.tasks.filter(t => t.status !== 'done' && (t.due === today || t.status === 'doing' || isLate(t))).length;
+  const w = weekRange().map(ymd), weekN = S.tasks.filter(t => t.status !== 'done' && t.due && t.due >= w[0] && t.due <= w[6]).length;
+  const areas = new Map(); for (const t of S.tasks) { const a = t.area || '분류 없음'; areas.set(a, (areas.get(a) || 0) + 1); }
+  const pick = patch => () => { Object.assign(S, { day: null }, patch); S.focus = null; render(); $('#rows').scrollTop = 0; };
+  $('#side').replaceChildren(
+    h('div', { class: 'brand' }, h('div', { class: 'mark', 'aria-hidden': 'true' }, 'R'), h('div', null, h('b', null, 'REAL 작업실'), h('small', null, (() => { const d = new Date(); return `${d.getMonth() + 1}월 ${d.getDate()}일 ${DAYS[d.getDay()]}요일`; })()))),
+    h('button', { class: 'new-btn', type: 'button', onclick: () => $('#addinput').focus() }, icon('plus', 16), '새 작업', h('span', { class: 'kbd' }, 'N')),
+    h('div', { class: 'sec' }, '보기'),
+    navBtn('오늘', todayN, S.view === 'today' && !S.day, pick({ view: 'today', status: null, area: null }), h('span', { class: 'ico' }, icon('sun', 15))),
+    navBtn('이번 주 마감', weekN, S.view === 'week' && !S.day, pick({ view: 'week', status: null, area: null }), h('span', { class: 'ico' }, icon('week', 15))),
+    h('div', { class: 'sec' }, '상태'),
+    ...STATUS.map(s => navBtn(s.name, cnt(s.k), S.view === 'all' && !S.day && S.status === s.k && !S.area, pick({ view: 'all', status: s.k, area: null }), ring(s.k))),
+    navBtn('전체', S.tasks.length, S.view === 'all' && !S.day && !S.status && !S.area, pick({ view: 'all', status: null, area: null }), h('span', { class: 'ico' }, icon('all', 15))),
+    h('div', { class: 'sec' }, '분류'),
+    ...[...areas.entries()].sort((a, b) => b[1] - a[1]).map(([a, n]) => navBtn(a, n, S.view === 'all' && !S.day && S.area === a, pick({ view: 'all', status: null, area: a }), h('span', { class: 'ico' }, icon('tag', 14)))),
+    h('div', { class: 'sec' }, '이번 주'),
+    h('div', { class: 'mini' }, weekRange().map(d => {
+      const k = ymd(d), due = S.tasks.filter(t => t.due === k && t.status !== 'done');
+      return h('button', { type: 'button', class: k === today ? 'today' : '', 'aria-pressed': S.day === k ? 'true' : 'false', title: `${d.getMonth() + 1}/${d.getDate()} 마감 ${due.length}건`,
+        onclick: () => { S.day = S.day === k ? null : k; S.focus = null; render(); } }, DAYS[d.getDay()], h('b', null, d.getDate()), h('i', { class: due.length ? (k < today ? 'late' : 'has') : '' }));
+    })),
+    h('div', { class: 'side-foot' }, h('div', { class: `sync ${S.syncKind || ''}`, id: 'sync', title: S.syncText || '' }, h('span', null, S.syncText || '')), h('span', { class: 'grow' }),
+      h('button', { class: 'ibtn', type: 'button', title: '저장 설정(GitHub 토큰)', 'aria-label': '저장 설정', onclick: () => { const b = $('#tokenbox'); if (b.hidden) showTokenBox(); else b.hidden = true; } }, icon('settings', 16)),
+      h('button', { class: 'ibtn', type: 'button', title: '밝기 전환', 'aria-label': '밝기 전환', onclick: () => { const r = document.documentElement, n = r.dataset.theme === 'light' ? 'dark' : 'light'; r.dataset.theme = n; store.set('theme', n); } }, icon('theme', 16)),
+      h('button', { class: 'ibtn', type: 'button', title: '잠그기', 'aria-label': '잠그기', onclick: () => { store.del('key'); location.reload(); } }, icon('lock', 16))));
+}
+function viewTitle() {
+  if (S.day) { const d = new Date(S.day + 'T00:00'); return `${d.getMonth() + 1}월 ${d.getDate()}일 (${DAYS[d.getDay()]})`; }
+  if (S.view === 'today') return '오늘';
+  if (S.view === 'week') return '이번 주 마감';
+  if (S.area) return S.area;
+  return S.status ? SMAP[S.status].name : '전체';
+}
+function rowEl(t) {
+  const due = dayLabel(t.due), mine = (t.log || []).filter(l => !/스케줄러에 옮김|대기로 이동\(이전/.test(l.text)), last = mine.at(-1);
+  const st = h('button', { class: 'st-btn', type: 'button', title: `${SMAP[t.status]?.name || '대기'} — 눌러서 다음 상태`, 'aria-label': '상태 바꾸기',
+    onclick: e => { e.stopPropagation(); const order = ['todo', 'doing', 'review', 'done']; const i = order.indexOf(t.status); setStatus(t.id, order[(i + 1) % order.length] || 'doing'); } }, ring(t.status));
+  const el = h('div', { class: `row${S.open === t.id ? ' sel' : ''}${t.status === 'done' ? ' done' : ''}`, role: 'listitem', tabindex: '-1', 'data-id': t.id, onclick: () => openTask(t.id) },
+    st,
+    h('span', { class: `flag${t.priority === 'low' ? ' low' : ''}`, title: t.priority ? PRI[t.priority] : '' }, t.priority === 'high' ? '▲' : t.priority === 'low' ? '▽' : ''),
+    h('span', { class: 'title' }, t.title || '(제목 없음)'),
+    S.group !== 'area' && t.area ? h('span', { class: 'tag' }, t.area) : h('span'),
+    h('span', { class: `note${last && last.by === 'claude' ? ' ai' : ''}`, title: last ? last.text : '' }, last ? '●' : ''),
+    h('span', { class: `dt${due && t.status !== 'done' ? (due.diff < 0 ? ' late' : due.diff === 0 ? ' today' : '') : ''}`, title: due ? `마감 ${t.due}` : t.start ? `시작 ${t.start}` : '' }, due ? due.txt : ''));
+  return el;
+}
+function renderRows() {
+  const list = visible();
+  $('#ltitle').textContent = viewTitle();
+  $('#lcount').textContent = `${list.length}건`;
+  $('#groupseg').replaceChildren(...[['area', '분류별'], ['status', '상태별'], ['none', '묶지 않음']].map(([k, n]) =>
+    h('button', { type: 'button', 'aria-pressed': S.group === k ? 'true' : 'false', onclick: () => { S.group = k; store.set('sched.group', k); renderRows(); } }, n)));
+  const box = $('#rows'), keep = box.scrollTop;
+  if (!list.length) {
+    box.replaceChildren(h('div', { class: 'empty' }, h('b', null, S.q ? '검색 결과가 없습니다' : '여기는 비어 있습니다'), S.q ? '다른 낱말로 찾아보세요.' : '위의 입력칸에 할 일을 적고 Enter를 누르면 추가됩니다.'));
+    return;
+  }
+  const out = [];
+  for (const g of groups(list)) {
+    const closed = !!S.collapsed[S.group + ':' + g.key];
+    if (S.group !== 'none') out.push(h('button', { class: 'ghead', type: 'button', 'aria-expanded': closed ? 'false' : 'true',
+      onclick: () => { S.collapsed[S.group + ':' + g.key] = !closed; store.set('sched.collapsed', S.collapsed); renderRows(); } },
+      h('span', { class: 'chev', 'aria-hidden': 'true' }, '▾'), g.key, h('span', { class: 'c' }, g.items.length)));
+    if (!closed) out.push(...g.items.map(rowEl));
+  }
+  box.replaceChildren(...out);
+  box.scrollTop = keep;
 }
 
 // ---------- 상세 창
-let drawerEl = null, scrimEl = null;
-function closeDrawer() { document.body.classList.remove('detail-open'); S.open = null; drawerEl?.remove(); scrimEl?.remove(); drawerEl = scrimEl = null; renderBoard(); }
-function openDrawer(id) { S.open = id; renderBoard(); renderDrawer(true); }
-function renderDrawer(fresh) {
-  const t = find(S.tasks, S.open);
-  if (!t) { if (drawerEl) { closeDrawer(); toast('다른 곳에서 삭제된 작업입니다.'); } return; }
+function openTask(id) { S.open = id; S.focus = id; renderRows(); renderPane(true); }
+function closeTask() { S.open = null; renderRows(); renderPane(true); }
+function renderPane(fresh) {
+  const pane = $('#pane'); if (!pane) return;
+  const t = S.open && find(S.tasks, S.open);
+  document.querySelector('.scrim')?.remove();
+  if (!t) {
+    if (S.open) { S.open = null; toast('다른 곳에서 삭제된 작업입니다.'); }
+    pane.classList.add('idle');
+    return renderOverview(pane);
+  }
+  pane.classList.remove('idle');
+  if (matchMedia('(max-width: 1180px)').matches) document.body.append(h('div', { class: 'scrim', onclick: closeTask }));
   const a = document.activeElement;
-  if (!fresh && drawerEl && drawerEl.contains(a) && a.matches('input, textarea, select')) { refreshLog(t); refreshStatus(t); return; }
-  const keep = drawerEl?.querySelector('.dr-body')?.scrollTop || 0;
-  drawerEl?.remove(); scrimEl?.remove();
-  scrimEl = h('div', { class: 'scrim', onclick: closeDrawer });
-  const bind = (field, el, tf = v => v) => {
+  if (!fresh && pane.contains(a) && a.matches('input, textarea, select')) { refreshLog(t); refreshStatus(t); return; }
+  const keep = pane.querySelector('.p-body')?.scrollTop || 0;
+  const bind = (field, el, tf = v => v, label) => {
     let timer;
-    const go = () => { clearTimeout(timer); const v = tf(el.value), cur = find(S.tasks, t.id); if (cur && (cur[field] ?? '') !== v) patchTask(t.id, { [field]: v }, `"${cur.title}" ${field === 'title' ? '제목' : field === 'detail' ? '내용' : field === 'due' ? '마감일' : field === 'start' ? '시작일' : field === 'priority' ? '중요도' : '분류'} 수정`); };
+    const go = () => { clearTimeout(timer); const v = tf(el.value), cur = find(S.tasks, t.id); if (cur && (cur[field] ?? '') !== v) patchTask(t.id, { [field]: v }, `"${cur.title}" ${label} 수정`); };
     el.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(go, 900); });
     el.addEventListener('change', go); el.addEventListener('blur', go);
   };
   const title = h('textarea', { class: 'f-title', rows: 1, 'aria-label': '제목', placeholder: '작업 제목' }); title.value = t.title || '';
   const fit = () => { title.style.height = 'auto'; title.style.height = title.scrollHeight + 'px'; };
   title.addEventListener('input', fit); title.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); title.blur(); } });
-  bind('title', title, v => v.trim());
-  const start = h('input', { type: 'date', id: 'f-start' }); start.value = t.start || ''; bind('start', start);
-  const due = h('input', { type: 'date', id: 'f-due' }); due.value = t.due || ''; bind('due', due);
-  const pri = h('select', { id: 'f-pri' }, Object.entries(PRI).map(([k, v]) => h('option', { value: k }, v))); pri.value = t.priority || 'normal'; bind('priority', pri);
-  const area = h('input', { id: 'f-area', placeholder: '예: 서버, 라운지', list: 'areas', autocomplete: 'off' }); area.value = t.area || ''; bind('area', area, v => v.trim());
-  const areas = h('datalist', { id: 'areas' }, [...new Set(S.tasks.map(x => x.area).filter(Boolean))].map(v => h('option', { value: v })));
-  const detail = h('textarea', { class: 'f-detail', id: 'f-detail', placeholder: '무엇을, 어디까지 할지 적어 두세요.' }); detail.value = t.detail || ''; bind('detail', detail);
+  bind('title', title, v => v.trim(), '제목');
+  const inp = (id, type, v, field, label, tf) => { const el = h('input', { id, type, autocomplete: 'off' }); el.value = v || ''; bind(field, el, tf, label); return el; };
+  const pri = h('select', { id: 'f-pri' }, Object.entries(PRI).map(([k, v]) => h('option', { value: k }, v))); pri.value = t.priority || 'normal'; bind('priority', pri, v => v, '중요도');
+  const area = inp('f-area', 'text', t.area, 'area', '분류', v => v.trim()); area.setAttribute('list', 'areas'); area.placeholder = '분류 없음';
+  const detail = h('textarea', { class: 'f-detail', id: 'f-detail', placeholder: '무엇을, 어디까지 할지 적어 두세요.' }); detail.value = t.detail || ''; bind('detail', detail, v => v, '내용');
   const memo = h('textarea', { placeholder: '진행 상황이나 지시를 남깁니다', 'aria-label': '기록 남기기' });
   const addMemo = () => { const v = memo.value.trim(); if (!v) return; memo.value = ''; addLog(t.id, v); };
   memo.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); addMemo(); } });
-  drawerEl = h('aside', { class: 'drawer', role: 'dialog', 'aria-label': '작업 상세' },
-    h('div', { class: 'dr-head' }, h('span', { class: 'id' }, `${t.id} · 수정 ${when(t.updated)}`), h('span', { class: 'grow' }),
-      h('button', { class: 'btn icon-btn ghost', type: 'button', 'aria-label': '닫기', onclick: closeDrawer }, icon('close'))),
-    h('div', { class: 'dr-body' }, title, h('div', { class: 'statusrow', id: 'statusrow' }),
-      h('div', { class: 'fields' },
-        h('div', { class: 'field' }, h('label', { for: 'f-start' }, '시작일'), start),
-        h('div', { class: 'field' }, h('label', { for: 'f-due' }, '마감일'), due),
-        h('div', { class: 'field' }, h('label', { for: 'f-pri' }, '중요도'), pri),
-        h('div', { class: 'field' }, h('label', { for: 'f-area' }, '분류'), area, areas)),
-      h('div', { class: 'field' }, h('label', { for: 'f-detail' }, '내용'), detail),
-      h('div', null, h('div', { class: 'sec-label' }, '진행 기록'), h('div', { id: 'log' })),
-      h('div', { class: 'memo' }, memo, h('div', { class: 'row' }, h('span', null, 'Ctrl+Enter'), h('button', { class: 'btn sm', type: 'button', onclick: addMemo }, '기록 남기기')))),
-    h('div', { class: 'dr-foot' }, h('button', { class: 'btn danger ghost', type: 'button', onclick: () => removeTask(t.id) }, '삭제'), h('span', { class: 'grow' }), h('span', { class: 'sync' }, '자동 저장')));
-  document.body.append(scrimEl, drawerEl);
-  document.body.classList.add('detail-open');
-  drawerEl.querySelector('.dr-body').scrollTop = keep;
-  fit(); const fitDetail = () => { detail.style.height='auto'; detail.style.height=detail.scrollHeight+'px'; }; fitDetail(); detail.addEventListener('input',fitDetail); refreshLog(t); refreshStatus(t);
+  pane.replaceChildren(
+    h('div', { class: 'p-head' }, h('span', { class: 'id' }, t.id), h('span', { class: 'grow' }),
+      h('button', { class: 'ibtn', type: 'button', title: '닫기 (Esc)', 'aria-label': '닫기', onclick: closeTask }, icon('close', 16))),
+    h('div', { class: 'p-body' },
+      title,
+      h('div', { class: 'stseg', id: 'stseg', role: 'group', 'aria-label': '상태' }),
+      h('div', { class: 'props' },
+        h('label', { for: 'f-start' }, '시작일'), inp('f-start', 'date', t.start, 'start', '시작일'),
+        h('label', { for: 'f-due' }, '마감일'), inp('f-due', 'date', t.due, 'due', '마감일'),
+        h('label', { for: 'f-pri' }, '중요도'), pri,
+        h('label', { for: 'f-area' }, '분류'), area,
+        h('datalist', { id: 'areas' }, [...new Set(S.tasks.map(x => x.area).filter(Boolean))].map(v => h('option', { value: v })))),
+      h('div', null, h('div', { class: 'blk-label' }, '내용'), detail),
+      h('div', null, h('div', { class: 'blk-label' }, '진행 기록'), h('div', { class: 'timeline', id: 'log' })),
+      h('div', { class: 'memo' }, memo, h('div', { class: 'r' }, h('span', null, 'Ctrl+Enter'), h('button', { class: 'btn', type: 'button', onclick: addMemo }, '기록 남기기')))),
+    h('div', { class: 'p-foot' }, h('button', { class: 'btn danger', type: 'button', onclick: () => removeTask(t.id) }, '삭제'), h('span', { class: 'grow' }), h('span', null, '수정 ' + when(t.updated))));
+  pane.querySelector('.p-body').scrollTop = fresh ? 0 : keep;
+  fit(); const fitDetail = () => { detail.style.height = 'auto'; detail.style.height = Math.max(150, detail.scrollHeight + 2) + 'px'; }; fitDetail(); detail.addEventListener('input', fitDetail);
+  refreshLog(t); refreshStatus(t);
   if (fresh && !t.title) title.focus();
 }
 function refreshStatus(t) {
-  const row = $('#statusrow'); if (!row) return;
-  row.replaceChildren(...STATUS.map(s => h('button', { type: 'button', class: 'st', css: { '--c': s.c }, 'aria-pressed': (t.status || 'todo') === s.k ? 'true' : 'false', onclick: () => setStatus(t.id, s.k) }, h('i', { class: 'dot', css: { '--c': s.c } }), s.name)));
+  const row = $('#stseg'); if (!row) return;
+  row.replaceChildren(...STATUS.map(s => h('button', { type: 'button', css: { '--c': s.c }, 'aria-pressed': (t.status || 'todo') === s.k ? 'true' : 'false', onclick: () => setStatus(t.id, s.k) }, ring(s.k, '12px'), s.name)));
 }
 function refreshLog(t) {
   const box = $('#log'); if (!box) return;
   const log = [...(t.log || [])].reverse();
-  box.replaceChildren(...(log.length ? log.map(l => h('div', { class: 'entry' }, h('span', { class: 'when' }, when(l.at)),
-    h('div', { class: 'txt' }, h('span', { class: `who ${l.by === 'claude' ? 'claude' : 'me'}` }, l.by === 'claude' ? 'AI' : '나'), l.text)))
-    : [h('div', { class: 'empty' }, '아직 기록이 없습니다.')]));
+  box.replaceChildren(...(log.length ? log.map(l => h('div', { class: `ev${l.by === 'claude' ? ' ai' : ''}` },
+    h('div', { class: 'meta' }, h('b', null, l.by === 'claude' ? 'AI' : '나'), when(l.at)), h('div', { class: 'txt' }, l.text)))
+    : [h('div', { class: 'ev' }, h('div', { class: 'txt' }, '아직 기록이 없습니다.'))]));
 }
-function render() { if (!$('#board')) return; renderTop(); renderWeek(); renderBoard(); if (S.open) renderDrawer(false); }
-function newTask() { const id = createTask({ title: '', due: S.day || '' }); S.open = id; renderDrawer(true); }
+function renderOverview(pane) {
+  const n = S.tasks.length || 1, cnt = k => S.tasks.filter(t => (t.status || 'todo') === k).length;
+  const late = S.tasks.filter(isLate).length, today = todayStr();
+  pane.replaceChildren(h('div', { class: 'overview' },
+    h('div', null, h('h2', null, '한눈에 보기'), h('p', null, '목록에서 작업을 고르면 여기에 상세가 열립니다.')),
+    h('div', { class: 'stat' },
+      h('div', null, h('b', null, cnt('doing')), h('span', null, ring('doing', '10px'), '진행 중')),
+      h('div', null, h('b', null, cnt('review')), h('span', null, ring('review', '10px'), '확인 대기')),
+      h('div', null, h('b', null, cnt('todo')), h('span', null, ring('todo', '10px'), '대기')),
+      h('div', null, h('b', { css: late ? { color: 'var(--late)' } : {} }, late), h('span', null, '기한 지남'))),
+    h('div', null, h('div', { class: 'blk-label' }, `상태 비율 · 전체 ${S.tasks.length}건`),
+      h('div', { class: 'bar' }, STATUS.map(s => h('i', { css: { '--c': s.c, width: (cnt(s.k) / n * 100) + '%' }, title: `${s.name} ${cnt(s.k)}` })))),
+    h('div', null, h('div', { class: 'blk-label' }, '오늘 시작한 작업'), h('p', null, `${S.tasks.filter(t => t.start === today).length}건`)),
+    h('div', null, h('div', { class: 'blk-label' }, '단축키'),
+      h('div', { class: 'keys' }, h('span', { class: 'kbd' }, 'N'), '할 일 추가', h('span', { class: 'kbd' }, '/'), '검색',
+        h('span', { class: 'kbd' }, '↑ ↓'), '목록 이동', h('span', { class: 'kbd' }, 'Enter'), '상세 열기',
+        h('span', { class: 'kbd' }, '1~5'), '상태: 대기·진행·확인·보류·완료', h('span', { class: 'kbd' }, 'Esc'), '닫기'))));
+}
+function render() { if (!$('#rows')) return; renderSide(); renderRows(); renderPane(false); }
 
 // ---------- 토큰 안내 (저장하려면 Contents 쓰기 권한 토큰 필요)
 function showTokenBox(reason) {
   const box = $('#tokenbox'); if (!box) return;
   const inp = h('input', { type: 'password', placeholder: 'GitHub 토큰 붙여넣기 (github_pat_…)', autocomplete: 'off', 'aria-label': 'GitHub 토큰' });
-  const save = h('button', { class: 'btn sm', type: 'button' }, '저장');
+  const save = h('button', { class: 'btn', type: 'button' }, '저장');
   save.onclick = async () => {
     const v = inp.value.trim(); if (!v) return;
     const r = await fetch(`https://api.github.com/repos/${REPO}`, { headers: { Authorization: `Bearer ${v}`, Accept: 'application/vnd.github+json' } });
@@ -399,13 +412,14 @@ function showTokenBox(reason) {
     if (!j.permissions || !j.permissions.push) { toast('이 토큰은 저장소에 쓸 권한이 없습니다. Contents: Read and write를 주세요.'); return; }
     await tokenSet(v); S.token = v; box.hidden = true; toast('토큰을 저장했습니다'); flush();
   };
-  box.replaceChildren(h('span', null, (reason ? reason + ' — ' : '') + '변경을 저장하려면 이 저장소(hati0101/dash)에 Contents: Read and write 권한이 있는 GitHub 토큰이 필요합니다.'), inp, save);
+  box.replaceChildren(h('span', null, (reason ? reason + ' — ' : '') + '변경을 저장하려면 hati0101/dash 저장소에 Contents: Read and write 권한이 있는 GitHub 토큰이 필요합니다.'), inp, save);
   box.hidden = false;
 }
 
 // ---------- 잠금
 async function boot() {
   const th = store.get('theme'); if (th) document.documentElement.dataset.theme = th;
+  S.group = store.get('sched.group', 'area'); S.collapsed = store.get('sched.collapsed', {}) || {};
   $('#lock-form').addEventListener('submit', unlock);
   if (!window.isSecureContext || !crypto.subtle) { $('#lock-msg').textContent = 'HTTPS에서만 열 수 있습니다.'; return; }
   try { S.env = (await fetchRemote()).env; } catch (e) { $('#lock-msg').textContent = e.message; return; }
@@ -432,13 +446,11 @@ async function unlock(ev) {
     enter();
   } catch { msg.textContent = '비밀번호가 맞지 않습니다.'; btn.disabled = false; $('#pw').select(); }
 }
-function lockNow() { store.del('key'); location.reload(); }
 async function enter() {
   $('#lock').hidden = true; $('#app').hidden = false;
   S.token = await tokenGet();
   shell();
-  try { await pull(); setSync(S.token ? '최신' : '읽기 전용'); } catch (e) { setSync('불러오기 실패: ' + e.message, true); }
-  // 저장 연결은 상단 설정에서 열기
+  try { await pull(); S.syncText = S.token ? '최신 상태' : '읽기 전용'; } catch (e) { S.syncText = '불러오기 실패: ' + e.message; S.syncKind = 'err'; }
   render();
   setInterval(async () => {  // 다른 기기 변경 확인
     if (S.saving || S.queue.length || document.hidden) return;
@@ -446,13 +458,26 @@ async function enter() {
   }, 20000);
   document.addEventListener('visibilitychange', async () => { if (!document.hidden && !S.saving && !S.queue.length) { try { if (await pull()) render(); } catch { /* 무시 */ } } });
 }
+
+// ---------- 키보드
+function moveFocus(dir) {
+  const rows = [...document.querySelectorAll('#rows .row')]; if (!rows.length) return;
+  const cur = rows.findIndex(r => r.dataset.id === (S.open || S.focus));
+  const next = rows[Math.max(0, Math.min(rows.length - 1, cur < 0 ? 0 : cur + dir))];
+  openTask(next.dataset.id);
+  document.querySelector(`#rows .row[data-id="${next.dataset.id}"]`)?.scrollIntoView({ block: 'nearest' });
+}
 document.addEventListener('keydown', e => {
-  if (!$('#board')) return;
+  if (!$('#rows')) return;
   const typing = e.target.matches('input, textarea, select');
-  if (e.key === 'Escape') { if (typing) e.target.blur(); else if (S.open) closeDrawer(); return; }
+  if (e.key === 'Escape') { if (typing) e.target.blur(); else if (S.open) closeTask(); return; }
   if (typing || e.ctrlKey || e.metaKey || e.altKey) return;
   if (e.key === '/') { e.preventDefault(); $('#q').focus(); }
-  else if (e.code === 'KeyN') { e.preventDefault(); newTask(); }
+  else if (e.code === 'KeyN') { e.preventDefault(); $('#addinput').focus(); }
+  else if (e.key === 'ArrowDown' || e.key === 'j') { e.preventDefault(); moveFocus(1); }
+  else if (e.key === 'ArrowUp' || e.key === 'k') { e.preventDefault(); moveFocus(-1); }
+  else if (e.key === 'Enter' && S.focus) { e.preventDefault(); openTask(S.focus); }
+  else if (/^[1-5]$/.test(e.key) && S.open) { e.preventDefault(); setStatus(S.open, STATUS[+e.key - 1].k); }
 });
 window.addEventListener('beforeunload', e => { if (S.queue.length || S.saving) { e.preventDefault(); e.returnValue = ''; } });
 boot();
