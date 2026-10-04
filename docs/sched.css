@@ -115,7 +115,7 @@ button { cursor: pointer; background: none; border: 0; padding: 0; }
 .ghead .chev { width: 14px; color: var(--ink-3); transition: transform .15s var(--ease); display: inline-block; }
 .ghead[aria-expanded="false"] .chev { transform: rotate(-90deg); }
 .ghead .c { font: 12px var(--mono); color: var(--ink-4); font-weight: 400; }
-.row { display: grid; grid-template-columns: 22px 14px minmax(0, 1fr) auto auto auto; align-items: center; gap: 10px; min-height: 40px; padding: 0 10px; border-radius: 9px; cursor: pointer; position: relative; transition: background .1s; }
+.row { display: grid; grid-template-columns: 16px 22px 14px minmax(0, 1fr) auto auto auto 44px; align-items: center; gap: 10px; min-height: 40px; padding: 0 10px; border-radius: 9px; cursor: pointer; position: relative; transition: background .1s; }
 .row:hover { background: var(--hover); }
 .row.sel { background: var(--sel); }
 .row.sel::before { content: ""; position: absolute; left: 0; top: 9px; bottom: 9px; width: 3px; border-radius: 3px; background: var(--accent); }
@@ -213,3 +213,34 @@ textarea.f-detail:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var
 .nav .ico { justify-content: center; }
 .ibtn { justify-content: center; }
 .search svg { color: var(--ink-3); flex: none; }
+
+/* 수정 날짜·단계 진행·변경 기록 */
+.row .upd { font: 11px var(--mono); color: var(--ink-4); text-align: right; white-space: nowrap; }
+.stages { display: flex; flex-wrap: wrap; gap: 2px 4px; align-items: center; padding: 8px 10px; background: var(--raise); border: 1px solid var(--line); border-radius: 11px; }
+.stage { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--ink-4); white-space: nowrap; }
+.stage .arrow { color: var(--ink-4); margin: 0 2px; }
+.stage .sdot { width: 7px; height: 7px; border-radius: 50%; border: 1.5px solid var(--ink-4); }
+.stage.on { color: var(--ink-2); }
+.stage.on .sdot { background: var(--c); border-color: var(--c); }
+.stage.cur .sn { color: var(--ink); font-weight: 700; }
+.stage .sd { font: 11px var(--mono); color: var(--ink-3); }
+.ev.chg { padding: 1px 0 5px; }
+.ev.chg::before { width: 5px; height: 5px; left: -14px; top: 8px; background: var(--ink-4); }
+.chg-line { display: flex; gap: 8px; align-items: baseline; font-size: 12px; color: var(--ink-3); }
+.chg-t { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.chg-w { font: 11px var(--mono); color: var(--ink-4); white-space: nowrap; }
+@media (max-width: 760px) { .row { grid-template-columns: 16px 22px 12px minmax(0, 1fr) auto 40px; } }
+
+/* 다중 선택 */
+.pick { width: 15px; height: 15px; margin: 0; accent-color: var(--accent); cursor: pointer; opacity: .35; transition: opacity .12s; }
+.row:hover .pick, .row.picked .pick, .ghead-wrap:hover .pick, .pick:checked, .pick:indeterminate, .pick:focus-visible { opacity: 1; }
+.row.picked { background: var(--accent-soft); }
+.ghead-wrap { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 2px; padding-left: 10px; background: linear-gradient(var(--wash) 70%, transparent); }
+.ghead-wrap .ghead { position: static; background: none; padding-left: 4px; }
+.bulk { margin: 0 16px 14px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 10px; border-radius: 13px; background: var(--raise-2); border: 1px solid var(--accent); box-shadow: var(--shadow); animation: up .16s var(--ease); }
+.bulk-n { font-size: 13px; color: var(--ink-2); padding: 0 4px; }
+.bulk-n b { font: 700 14px var(--mono); color: var(--accent-ink); margin-right: 2px; }
+.bulk-sep { width: 1px; height: 20px; background: var(--line-2); margin: 0 4px; }
+.bulk-l { font-size: 12px; color: var(--ink-3); }
+.bulk-st { display: inline-flex; align-items: center; gap: 5px; height: 30px; padding: 0 10px; border-radius: 8px; font-size: 12.5px; color: var(--ink-2); border: 1px solid var(--line); background: var(--raise); }
+.bulk-st:hover { color: var(--ink); border-color: var(--line-2); }
