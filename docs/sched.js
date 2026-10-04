@@ -276,7 +276,7 @@ function setStatus(id, k) {
 function removeTask(id) {
   const t = find(S.tasks, id); if (!t) return;
   const saved = clone(t);
-  if (S.open === id) S.open = null;
+  if (S.open === id) closeTask();
   mutate(list => { const i = list.findIndex(x => x.id === id); if (i >= 0) list.splice(i, 1); }, `삭제 "${t.title}"`);
   toast(`"${t.title || '제목 없음'}" 삭제했습니다`, '되돌리기', () => mutate(list => { if (!find(list, id)) list.push(clone(saved)); }, `되돌리기 "${saved.title}"`), 8000);
 }
@@ -329,8 +329,7 @@ function shell() {
       h('div', { id: 'tokenbox', class: 'banner', hidden: true }),
       h('label', { class: 'addrow' }, h('span', { class: 'plus' }, icon('plus', 16)), h('input', { id: 'addinput', placeholder: '할 일 추가 — 적고 Enter (시작일은 오늘)', autocomplete: 'off', 'aria-label': '할 일 추가' }), h('span', { class: 'kbd' }, 'N')),
       h('div', { class: 'rows', id: 'rows', role: 'list' }),
-      h('div', { class: 'bulk', id: 'bulk', hidden: true, role: 'toolbar', 'aria-label': '선택한 작업' })),
-    h('aside', { class: 'pane idle', id: 'pane', 'aria-label': '작업 상세' }));
+      h('div', { class: 'bulk', id: 'bulk', hidden: true, role: 'toolbar', 'aria-label': '선택한 작업' })));
   $('#q').addEventListener('input', e => { S.q = e.target.value; renderRows(); });
   const add = $('#addinput');
   add.addEventListener('keydown', e => {
@@ -371,6 +370,7 @@ function renderSide() {
     h('div', { class: 'sec' }, '디스코드'),
     navBtn('발행 대상', S.tasks.filter(t => t.public && t.status === 'doing').length, S.view === 'pubdoing', pick({ view: 'pubdoing', status: null, area: null }), h('span', { class: 'ico disc' }, '●')),
     navBtn('공개 체크 전체', S.tasks.filter(t => t.public).length, S.view === 'pub', pick({ view: 'pub', status: null, area: null }), h('span', { class: 'ico disc' }, '○')),
+    h('button', { class: 'pub-btn', type: 'button', onclick: openPublishModal }, '디스코드 발행'),
     h('div', { class: 'sec' }, '사용량 · 개발컴'),
     h('div', { class: 'usage', id: 'usage' }),
     h('div', { class: 'side-foot' }, h('div', { class: `sync ${S.syncKind || ''}`, id: 'sync', title: S.syncText || '' }, h('span', null, S.syncText || '')), h('span', { class: 'grow' }),
@@ -393,17 +393,17 @@ function rowEl(t) {
     onclick: e => { e.stopPropagation(); const order = ['todo', 'doing', 'review', 'done']; const i = order.indexOf(t.status); setStatus(t.id, order[(i + 1) % order.length] || 'doing'); } }, ring(t.status));
   const pick = h('input', { type: 'checkbox', class: 'pick', 'aria-label': '선택', onclick: e => { e.stopPropagation(); if (e.shiftKey && S.anchor) rangeSel(S.anchor, t.id); else toggleSel(t.id, e.target.checked); renderRows(); renderBulk(); } });
   pick.checked = S.sel.has(t.id);
-  const el = h('div', { class: `row${S.open === t.id ? ' sel' : ''}${S.sel.has(t.id) ? ' picked' : ''}${t.status === 'done' ? ' done' : ''}`, role: 'listitem', tabindex: '-1', 'data-id': t.id,
+  const el = h('div', { class: `row${S.open === t.id || (!S.open && S.focus === t.id) ? ' sel' : ''}${S.sel.has(t.id) ? ' picked' : ''}${t.status === 'done' ? ' done' : ''}`, role: 'listitem', tabindex: '-1', 'data-id': t.id,
     onclick: e => {
       if (e.ctrlKey || e.metaKey) { toggleSel(t.id); renderRows(); renderBulk(); return; }
       if (e.shiftKey && S.anchor) { rangeSel(S.anchor, t.id); renderRows(); renderBulk(); return; }
       // 같은 줄을 0.4초 안에 두 번 누르면 더블클릭: 체크(선택) 토글
-      const now = Date.now();
-      if (S.lastClick && S.lastClick.id === t.id && now - S.lastClick.at < 400) {
-        S.lastClick = null; window.getSelection()?.removeAllRanges(); toggleSel(t.id); renderRows(); renderBulk(); return;
+      if (S.clickTimer && S.clickId === t.id) {
+        clearTimeout(S.clickTimer); S.clickTimer = null; window.getSelection()?.removeAllRanges(); toggleSel(t.id); renderRows(); renderBulk(); return;
       }
-      S.lastClick = { id: t.id, at: now };
-      openTask(t.id);
+      clearTimeout(S.clickTimer); S.clickId = t.id;
+      S.focus = t.id; renderRows();
+      S.clickTimer = setTimeout(() => { S.clickTimer = null; openTask(t.id); }, 260);
     } },
     pick, st,
     h('span', { class: `flag${t.priority === 'low' ? ' low' : ''}`, title: t.priority ? PRI[t.priority] : '' }, t.priority === 'high' ? '▲' : t.priority === 'low' ? '▽' : ''),
@@ -450,22 +450,15 @@ function renderRows() {
 }
 
 // ---------- 상세 창
-function openTask(id) { S.open = id; S.focus = id; renderRows(); renderPane(true); }
-function closeTask() { S.open = null; renderRows(); renderPane(true); }
-function renderPane(fresh) {
-  const pane = $('#pane'); if (!pane) return;
+function openTask(id) { S.open = id; S.focus = id; renderRows(); renderEdit(true); }
+function closeTask() { S.open = null; editEl?.remove(); editEl = null; renderRows(); }
+let editEl = null;
+function renderEdit(fresh) {
   const t = S.open && find(S.tasks, S.open);
-  document.querySelector('.scrim')?.remove();
-  if (!t) {
-    if (S.open) { S.open = null; toast('다른 곳에서 삭제된 작업입니다.'); }
-    pane.classList.add('idle');
-    return renderOverview(pane);
-  }
-  pane.classList.remove('idle');
-  if (matchMedia('(max-width: 1180px)').matches) document.body.append(h('div', { class: 'scrim', onclick: closeTask }));
+  if (!t) { if (S.open) { S.open = null; editEl?.remove(); editEl = null; toast('다른 곳에서 삭제된 작업입니다.'); } return; }
   const a = document.activeElement;
-  if (!fresh && pane.contains(a) && a.matches('input, textarea, select')) { refreshLog(t); refreshStatus(t); return; }
-  const keep = pane.querySelector('.p-body')?.scrollTop || 0;
+  if (!fresh && editEl && editEl.contains(a) && a.matches('input, textarea, select')) { refreshLog(t); refreshStatus(t); return; }
+  const keepL = editEl?.querySelector('.e-left')?.scrollTop || 0;
   const bind = (field, el, tf = v => v, label) => {
     let timer;
     const go = () => { clearTimeout(timer); const v = tf(el.value), cur = find(S.tasks, t.id); if (cur && (cur[field] ?? '') !== v) patchTask(t.id, { [field]: v }, `"${cur.title}" ${label} 수정`); };
@@ -480,54 +473,40 @@ function renderPane(fresh) {
   const pri = h('select', { id: 'f-pri' }, Object.entries(PRI).map(([k, v]) => h('option', { value: k }, v))); pri.value = t.priority || 'normal'; bind('priority', pri, v => v, '중요도');
   const area = inp('f-area', 'text', t.area, 'area', '분류', v => v.trim()); area.setAttribute('list', 'areas'); area.placeholder = '분류 없음';
   const detail = h('textarea', { class: 'f-detail', id: 'f-detail', placeholder: '무엇을, 어디까지 할지 적어 두세요.' }); detail.value = t.detail || ''; bind('detail', detail, v => v, '내용');
-  const memo = h('textarea', { placeholder: '진행 상황이나 지시를 남깁니다', 'aria-label': '기록 남기기' });
+  const memo = h('textarea', { placeholder: '진행 상황이나 지시를 남깁니다 (Ctrl+Enter)', 'aria-label': '기록 남기기' });
   const addMemo = () => { const v = memo.value.trim(); if (!v) return; memo.value = ''; addLog(t.id, v); };
   memo.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); addMemo(); } });
-  pane.replaceChildren(
-    h('div', { class: 'p-head' }, h('span', { class: 'id' }, t.id), h('span', { class: 'grow' }),
+  const card = h('div', { class: 'e-card', role: 'dialog', 'aria-modal': 'true', 'aria-label': '작업 수정' },
+    h('div', { class: 'p-head' }, h('span', { class: 'id' }, t.id), h('span', { class: 'grow' }), h('span', { class: 'e-upd' }, '수정 ' + when(t.updated)),
       h('button', { class: 'ibtn', type: 'button', title: '닫기 (Esc)', 'aria-label': '닫기', onclick: closeTask }, icon('close', 16))),
-    h('div', { class: 'p-body' },
-      title,
-      h('div', { class: 'stseg', id: 'stseg', role: 'group', 'aria-label': '상태' }),
-      h('div', { class: 'stages', id: 'stages', 'aria-label': '단계별 날짜' }),
-      h('div', { class: 'props' },
-        h('label', { for: 'f-start' }, '시작일'), inp('f-start', 'date', t.start, 'start', '시작일'),
-        h('label', { for: 'f-pri' }, '중요도'), pri,
-        h('label', { for: 'f-area' }, '분류'), area,
-        h('label', { for: 'f-pub' }, '디스코드'), (() => {
-          const cb = h('input', { type: 'checkbox', id: 'f-pub', class: 'pub-cb' }); cb.checked = !!t.public;
-          cb.addEventListener('change', () => patchTask(t.id, { public: cb.checked }, `"${t.title}" 디스코드 ${cb.checked ? '공개' : '비공개'}`));
-          return h('label', { class: 'pub-row', for: 'f-pub' }, cb, h('span', null, '진행 중일 때 개발 현황 채널에 공개'));
-        })(),
-        h('label', { for: 'f-pubtitle' }, '공개 제목'), (() => { const el = inp('f-pubtitle', 'text', t.pubTitle, 'pubTitle', '공개 제목', v => v.trim()); el.placeholder = '비우면 제목 그대로'; return el; })(),
-        h('datalist', { id: 'areas' }, [...new Set(S.tasks.map(x => x.area).filter(Boolean))].map(v => h('option', { value: v })))),
-      h('div', null, h('div', { class: 'blk-label' }, '내용'), detail),
-      h('div', null, h('div', { class: 'blk-label' }, '진행 기록'), h('div', { class: 'timeline', id: 'log' })),
-      h('div', { class: 'memo' }, memo, h('div', { class: 'r' }, h('span', null, 'Ctrl+Enter'), h('button', { class: 'btn', type: 'button', onclick: addMemo }, '기록 남기기')))),
-    h('div', { class: 'p-foot' }, h('button', { class: 'btn danger', type: 'button', onclick: () => removeTask(t.id) }, '삭제'), h('span', { class: 'grow' }), h('span', null, '수정 ' + when(t.updated))));
-  attachResizer(pane);
-  // 높이가 바뀌는 것(제목·내용 칸 맞춤, 기록·상태)을 먼저 끝낸 뒤 스크롤 위치를 되돌린다(위로 튀지 않게)
-  fit(); const fitDetail = () => { const y = pane.querySelector('.p-body').scrollTop; detail.style.height = 'auto'; detail.style.height = Math.min(Math.max(150, detail.scrollHeight + 2), Math.round(window.innerHeight * 0.4)) + 'px'; pane.querySelector('.p-body').scrollTop = y; }; fitDetail(); detail.addEventListener('input', fitDetail);
+    h('div', { class: 'e-cols' },
+      h('div', { class: 'e-left' },
+        title,
+        h('div', { class: 'stseg', id: 'stseg', role: 'group', 'aria-label': '상태' }),
+        h('div', { class: 'props' },
+          h('label', { for: 'f-start' }, '시작일'), inp('f-start', 'date', t.start, 'start', '시작일'),
+          h('label', { for: 'f-pri' }, '중요도'), pri,
+          h('label', { for: 'f-area' }, '분류'), area,
+          h('label', { for: 'f-pub' }, '디스코드'), (() => {
+            const cb = h('input', { type: 'checkbox', id: 'f-pub', class: 'pub-cb' }); cb.checked = !!t.public;
+            cb.addEventListener('change', () => patchTask(t.id, { public: cb.checked }, `"${t.title}" 디스코드 ${cb.checked ? '공개' : '비공개'}`));
+            return h('label', { class: 'pub-row', for: 'f-pub' }, cb, h('span', null, '진행 중일 때 개발 현황 채널에 공개'));
+          })(),
+          h('label', { for: 'f-pubtitle' }, '공개 제목'), (() => { const el = inp('f-pubtitle', 'text', t.pubTitle, 'pubTitle', '공개 제목', v => v.trim()); el.placeholder = '비우면 제목 그대로'; return el; })(),
+          h('datalist', { id: 'areas' }, [...new Set(S.tasks.map(x => x.area).filter(Boolean))].map(v => h('option', { value: v })))),
+        h('div', null, h('div', { class: 'blk-label' }, '내용'), detail),
+        h('div', { class: 'memo' }, h('div', { class: 'blk-label' }, '메모 남기기'), memo, h('div', { class: 'r' }, h('span', null, 'Ctrl+Enter'), h('button', { class: 'btn', type: 'button', onclick: addMemo }, '기록 남기기')))),
+      h('div', { class: 'e-right' },
+        h('div', { class: 'blk-label' }, '진행 단계'), h('div', { class: 'stages', id: 'stages', 'aria-label': '단계별 날짜' }),
+        h('div', { class: 'blk-label' }, '히스토리'), h('div', { class: 'timeline', id: 'log' }))),
+    h('div', { class: 'p-foot' }, h('button', { class: 'btn danger', type: 'button', onclick: () => { const id = t.id; closeTask(); removeTask(id); } }, '삭제'), h('span', { class: 'grow' }), h('span', null, 'Esc 닫기 · 자동 저장')));
+  editEl?.remove();
+  editEl = h('div', { class: 'm-scrim e-scrim', onmousedown: e => { if (e.target === editEl) closeTask(); } }, card);
+  document.body.append(editEl);
+  fit(); const fitDetail = () => { const box = editEl.querySelector('.e-left'), y = box.scrollTop; detail.style.height = 'auto'; detail.style.height = Math.min(Math.max(160, detail.scrollHeight + 2), Math.round(window.innerHeight * 0.45)) + 'px'; box.scrollTop = y; }; fitDetail(); detail.addEventListener('input', fitDetail);
   refreshLog(t); refreshStatus(t);
-  pane.querySelector('.p-body').scrollTop = fresh ? 0 : keep;
+  editEl.querySelector('.e-left').scrollTop = fresh ? 0 : keepL;
   if (fresh && !t.title) title.focus();
-}
-function attachResizer(pane) {
-  const grip = h('div', { class: 'resizer', role: 'separator', 'aria-orientation': 'vertical', 'aria-label': '상세 창 폭 조절', title: '끌어서 폭 조절 · 더블클릭: 기본 폭(창의 약 절반)' });
-  grip.addEventListener('pointerdown', e => {
-    e.preventDefault(); grip.setPointerCapture(e.pointerId); document.body.classList.add('resizing');
-    const move = ev => setPaneWidth(window.innerWidth - ev.clientX);
-    const up = () => { grip.removeEventListener('pointermove', move); grip.removeEventListener('pointerup', up); document.body.classList.remove('resizing'); store.set('sched.paneW', S.paneW); };
-    grip.addEventListener('pointermove', move); grip.addEventListener('pointerup', up);
-  });
-  grip.addEventListener('dblclick', () => { store.del('sched.paneW'); setPaneWidth(defaultPaneW()); });
-  pane.prepend(grip);
-}
-function defaultPaneW() { return Math.round(window.innerWidth * 0.48); }  // 아키텍트 기준 화면(2000px에서 약 950px)
-function setPaneWidth(w) {
-  const max = Math.max(320, Math.min(1100, window.innerWidth - 560));
-  S.paneW = Math.round(Math.max(320, Math.min(max, w)));
-  document.documentElement.style.setProperty('--pane-w', S.paneW + 'px');
 }
 function refreshStages(t) {
   const box = $('#stages'); if (!box) return;
@@ -551,25 +530,6 @@ function refreshLog(t) {
     : h('div', { class: `ev${l.by === 'claude' ? ' ai' : ''}` },
     h('div', { class: 'meta' }, h('b', null, l.by === 'claude' ? 'AI' : '나'), when(l.at)), h('div', { class: 'txt' }, l.text)))
     : [h('div', { class: 'ev' }, h('div', { class: 'txt' }, '아직 기록이 없습니다.'))]));
-}
-function renderOverview(pane) {
-  const n = S.tasks.length || 1, cnt = k => S.tasks.filter(t => (t.status || 'todo') === k).length;
-  const today = todayStr();
-  pane.replaceChildren(h('div', { class: 'overview' },
-    h('div', null, h('h2', null, '한눈에 보기'), h('p', null, '목록에서 작업을 고르면 여기에 상세가 열립니다.')),
-    h('div', { class: 'stat' },
-      h('div', null, h('b', null, cnt('doing')), h('span', null, ring('doing', '10px'), '진행 중')),
-      h('div', null, h('b', null, cnt('review')), h('span', null, ring('review', '10px'), '확인 대기')),
-      h('div', null, h('b', null, cnt('todo')), h('span', null, ring('todo', '10px'), '대기')),
-      h('div', null, h('b', null, cnt('hold')), h('span', null, ring('hold', '10px'), '보류'))),
-    h('div', null, h('div', { class: 'blk-label' }, `상태 비율 · 전체 ${S.tasks.length}건`),
-      h('div', { class: 'bar' }, STATUS.map(s => h('i', { css: { '--c': s.c, width: (cnt(s.k) / n * 100) + '%' }, title: `${s.name} ${cnt(s.k)}` })))),
-    h('div', null, h('div', { class: 'blk-label' }, '오늘 시작한 작업'), h('p', null, `${S.tasks.filter(t => t.start === today).length}건`)),
-    h('div', null, h('div', { class: 'blk-label' }, '단축키'),
-      h('div', { class: 'keys' }, h('span', { class: 'kbd' }, 'N'), '할 일 추가', h('span', { class: 'kbd' }, '/'), '검색',
-        h('span', { class: 'kbd' }, '↑ ↓'), '목록 이동', h('span', { class: 'kbd' }, 'Enter'), '상세 열기',
-        h('span', { class: 'kbd' }, '더블클릭'), '체크(선택)', h('span', { class: 'kbd' }, '1~5'), '상태: 대기·진행·확인·보류·완료', h('span', { class: 'kbd' }, 'Del'), '삭제(선택한 것 전부)', h('span', { class: 'kbd' }, 'X'), '선택', h('span', { class: 'kbd' }, 'Esc'), '닫기'))));
-  attachResizer(pane);
 }
 function rangeSel(a, b) {
   const ids = visibleIds(), i = ids.indexOf(a), j = ids.indexOf(b);
@@ -614,6 +574,44 @@ function renderBulk() {
     h('span', { class: 'bulk-sep' }),
     del,
     h('button', { class: 'btn', type: 'button', onclick: () => { S.sel.clear(); renderRows(); renderBulk(); } }, '선택 해제'));
+}
+function discordText() {
+  const now = new Date(), rows = S.tasks.filter(t => t.public && t.status === 'doing');
+  const head = `REAL 개발 현황 (${now.getMonth() + 1}월 ${now.getDate()}일 ${pad(now.getHours())}:${pad(now.getMinutes())} 갱신)\n`;
+  if (!rows.length) return { text: head + '\n지금 공개 중인 개발 항목이 없습니다.', count: 0 };
+  const g = new Map(); for (const t of rows) { const a = t.area || '기타'; if (!g.has(a)) g.set(a, []); g.get(a).push((t.pubTitle || t.title || '').trim()); }
+  const body = []; let shown = 0;
+  for (const [a, items] of [...g.entries()].sort((x, y) => y[1].length - x[1].length)) {
+    const block = `\n[${a}]\n` + items.sort((x, y) => x.localeCompare(y, 'ko')).map(x => `- ${x}`).join('\n');
+    if ((head + body.join('\n') + block).length > 1900) break;
+    body.push(block); shown += items.length;
+  }
+  return { text: head + body.join('\n') + (rows.length > shown ? `\n\n외 ${rows.length - shown}건 진행 중` : ''), count: rows.length };
+}
+async function requestPublish(text, count) {
+  if (!S.token) { showTokenBox('발행하려면 저장 토큰이 필요합니다'); return false; }
+  const url = `https://api.github.com/repos/${REPO}/contents/docs/discord-publish.json`, H = { Authorization: `Bearer ${S.token}`, Accept: 'application/vnd.github+json' };
+  let sha;
+  try { const r = await fetch(url + `?ref=${BRANCH}&t=${Date.now()}`, { headers: H, cache: 'no-store' }); if (r.ok) sha = (await r.json()).sha; } catch { /* 처음이면 없음 */ }
+  const req = { v: 1, id: newId().replace('W-', 'P-'), requested_at: new Date().toISOString(), count, content: text };
+  const bytes = new TextEncoder().encode(JSON.stringify(req, null, 2) + '\n');
+  const r = await fetch(url, { method: 'PUT', headers: { ...H, 'Content-Type': 'application/json' }, body: JSON.stringify({ message: `디스코드 발행 요청 (${count}건)`, content: b64.enc(bytes), sha, branch: BRANCH }) });
+  if (!r.ok) { toast(`발행 요청 실패 (GitHub ${r.status})`); return false; }
+  return true;
+}
+function openPublishModal() {
+  if (modalEl) return;
+  const { text, count } = discordText();
+  const pre = h('pre', { class: 'pub-pre' }, text);
+  const go = h('button', { class: 'btn primary', type: 'button' }, '발행');
+  go.onclick = async () => { go.disabled = true; go.textContent = '보내는 중…'; if (await requestPublish(text, count)) { closeNewModal(); toast(`발행 요청을 보냈습니다 (${count}건) · 서버컴 봇이 디스코드에 반영합니다`); } else { go.disabled = false; go.textContent = '발행'; } };
+  const card = h('div', { class: 'm-card', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'p-h' },
+    h('div', { class: 'm-head' }, h('h2', { id: 'p-h' }, '디스코드 발행'), h('span', { class: 'grow' }), h('button', { class: 'ibtn', type: 'button', 'aria-label': '닫기', onclick: closeNewModal }, icon('close', 16))),
+    h('div', { class: 'm-body' }, h('div', { class: 'm-l' }, `개발 현황 채널의 메시지 하나를 이 글로 바꿉니다 · 진행 중 + 공개 ${count}건`), pre),
+    h('div', { class: 'm-foot' }, h('span', { class: 'grow' }), h('button', { class: 'btn', type: 'button', onclick: closeNewModal }, '취소'), go));
+  modalEl = h('div', { class: 'm-scrim', onmousedown: e => { if (e.target === modalEl) closeNewModal(); } }, card);
+  modalEl.addEventListener('keydown', e => { e.stopPropagation(); if (e.key === 'Escape') closeNewModal(); });
+  document.body.append(modalEl); go.focus();
 }
 let modalEl = null;
 function closeNewModal() { modalEl?.remove(); modalEl = null; }
@@ -671,7 +669,7 @@ function openNewModal() {
   document.body.append(modalEl);
   title.focus();
 }
-function render() { if (!$('#rows')) return; renderSide(); renderUsage(); renderRows(); renderBulk(); renderPane(false); }
+function render() { if (!$('#rows')) return; renderSide(); renderUsage(); renderRows(); renderBulk(); if (S.open) renderEdit(false); }
 
 // ---------- 토큰 안내 (저장하려면 Contents 쓰기 권한 토큰 필요)
 function showTokenBox(reason) {
@@ -694,8 +692,6 @@ function showTokenBox(reason) {
 async function boot() {
   const th = store.get('theme'); if (th) document.documentElement.dataset.theme = th;
   S.group = store.get('sched.group', 'area'); S.collapsed = store.get('sched.collapsed', {}) || {};
-  setPaneWidth(store.get('sched.paneW', null) ?? defaultPaneW());
-  window.addEventListener('resize', () => setPaneWidth(store.get('sched.paneW', null) ?? defaultPaneW()));
   $('#lock-form').addEventListener('submit', unlock);
   if (!window.isSecureContext || !crypto.subtle) { $('#lock-msg').textContent = 'HTTPS에서만 열 수 있습니다.'; return; }
   try { S.env = (await fetchRemote()).env; } catch (e) { $('#lock-msg').textContent = e.message; return; }
@@ -742,22 +738,24 @@ function moveFocus(dir) {
   const rows = [...document.querySelectorAll('#rows .row')]; if (!rows.length) return;
   const cur = rows.findIndex(r => r.dataset.id === (S.open || S.focus));
   const next = rows[Math.max(0, Math.min(rows.length - 1, cur < 0 ? 0 : cur + dir))];
-  openTask(next.dataset.id);
+  if (S.open) openTask(next.dataset.id); else { S.focus = next.dataset.id; renderRows(); }
   document.querySelector(`#rows .row[data-id="${next.dataset.id}"]`)?.scrollIntoView({ block: 'nearest' });
 }
 document.addEventListener('keydown', e => {
   if (!$('#rows')) return;
   const typing = !!(e.target.matches && e.target.matches('input, textarea, select'));
-  if (e.key === 'Escape') { if (typing) e.target.blur(); else if (S.sel.size) { S.sel.clear(); renderRows(); renderBulk(); } else if (S.open) closeTask(); return; }
+  if (e.key === 'Escape') { if (typing) e.target.blur(); else if (S.open) closeTask(); else if (S.sel.size) { S.sel.clear(); renderRows(); renderBulk(); } return; }
   if (!typing && (e.ctrlKey || e.metaKey) && e.code === 'KeyA') { e.preventDefault(); for (const id of visibleIds()) S.sel.add(id); renderRows(); renderBulk(); return; }
   if (typing || e.ctrlKey || e.metaKey || e.altKey) return;
   if (e.key === 'Delete') {
     e.preventDefault();
     if (S.sel.size) { bulkDelete(); return; }
-    if (S.open) {
-      const ids = visibleIds(), i = ids.indexOf(S.open), next = ids[i + 1] || ids[i - 1];
-      removeTask(S.open);
-      if (next && find(S.tasks, next)) openTask(next);
+    const cur = S.open || S.focus;
+    if (cur) {
+      const ids = visibleIds(), i = ids.indexOf(cur), next = ids[i + 1] || ids[i - 1];
+      if (S.open) closeTask();
+      removeTask(cur);
+      if (next && find(S.tasks, next)) { S.focus = next; renderRows(); }
     }
     return;
   }
@@ -767,7 +765,7 @@ document.addEventListener('keydown', e => {
   else if (e.key === 'ArrowDown' || e.key === 'j') { e.preventDefault(); moveFocus(1); }
   else if (e.key === 'ArrowUp' || e.key === 'k') { e.preventDefault(); moveFocus(-1); }
   else if (e.key === 'Enter' && S.focus) { e.preventDefault(); openTask(S.focus); }
-  else if (/^[1-5]$/.test(e.key) && S.open) { e.preventDefault(); setStatus(S.open, STATUS[+e.key - 1].k); }
+  else if (/^[1-5]$/.test(e.key) && (S.open || S.focus)) { e.preventDefault(); setStatus(S.open || S.focus, STATUS[+e.key - 1].k); }
 });
 window.addEventListener('beforeunload', e => { if (S.queue.length || S.saving) { e.preventDefault(); e.returnValue = ''; } });
 boot();
