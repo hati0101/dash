@@ -347,7 +347,6 @@ function renderSide() {
     h('button', { class: 'new-btn', type: 'button', onclick: () => $('#addinput').focus() }, icon('plus', 16), '새 작업', h('span', { class: 'kbd' }, 'N')),
     h('div', { class: 'sec' }, '보기'),
     navBtn('오늘', todayN, S.view === 'today' && !S.day, pick({ view: 'today', status: null, area: null }), h('span', { class: 'ico' }, icon('sun', 15))),
-    navBtn('이번 주 마감', weekN, S.view === 'week' && !S.day, pick({ view: 'week', status: null, area: null }), h('span', { class: 'ico' }, icon('week', 15))),
     h('div', { class: 'sec' }, '상태'),
     ...STATUS.map(s => dropTarget(navBtn(s.name, cnt(s.k), S.view === 'all' && !S.day && S.status === s.k && !S.area, pick({ view: 'all', status: s.k, area: null }), ring(s.k)), ids => bulkPatch(ids, { status: s.k }, s.name))),
     navBtn('전체', S.tasks.length, S.view === 'all' && !S.day && !S.status && !S.area, pick({ view: 'all', status: null, area: null }), h('span', { class: 'ico' }, icon('all', 15))),
