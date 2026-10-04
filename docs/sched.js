@@ -466,7 +466,7 @@ function renderRows() {
   if (S.view === 'trash') {
     $('#groupseg').replaceChildren(list.length ? armBtn('휴지통 비우기', `${list.length}건 영구 삭제 — 한 번 더`, 'btn danger', () => purgeTasks(S.trash.map(x => x.id))) : '');
     const box = $('#rows'), keep = box.scrollTop;
-    box.replaceChildren(...(list.length ? list.map(trashRow) : [h('div', { class: 'empty' }, h('b', null, '휴지통이 비어 있습니다'), '지운 작업은 여기로 옵니다. 복원하거나 영구 삭제할 수 있습니다.')]));
+    box.replaceChildren(...(list.length ? [h('div', { class: 'cols' }, ...list.map(trashRow))] : [h('div', { class: 'empty' }, h('b', null, '휴지통이 비어 있습니다'), '지운 작업은 여기로 옵니다. 복원하거나 영구 삭제할 수 있습니다.')]));
     box.scrollTop = keep;
     return;
   }
@@ -488,7 +488,7 @@ function renderRows() {
         onclick: () => { S.collapsed[S.group + ':' + g.key] = !closed; store.set('sched.collapsed', S.collapsed); renderRows(); } },
         h('span', { class: 'chev', 'aria-hidden': 'true' }, '▾'), g.key, h('span', { class: 'c' }, g.items.length))));
     }
-    if (!closed) out.push(...g.items.map(rowEl));
+    if (!closed) out.push(h('div', { class: 'cols' }, ...g.items.map(rowEl)));
   }
   box.replaceChildren(...out);
   box.scrollTop = keep;

@@ -356,3 +356,7 @@ body.resizing * { cursor: col-resize !important; }
 .usage { gap: 6px; }
 .u-acc { gap: 2px; }
 .side-foot { padding-top: 8px; }
+
+/* 넓은 화면에서 목록 2열(왼쪽 칸 위→아래, 다음 오른쪽 칸) */
+.cols { columns: 2 560px; column-gap: 28px; }
+.cols > .row { break-inside: avoid; }
