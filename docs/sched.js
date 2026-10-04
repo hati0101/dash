@@ -392,10 +392,9 @@ function renderSide() {
       });
       return dropTarget(b, ids => bulkPatch(ids, { area: a === '분류 없음' ? '' : a }, `분류 ${a}`));
     }),
-    h('div', { class: 'sec' }, '디스코드'),
+    h('div', { class: 'sec sec-row' }, h('span', null, '디스코드'), h('button', { class: 'pub-btn', type: 'button', title: '진행 중 + 공개 작업을 개발 현황 채널에 발행', onclick: openPublishModal }, '발행')),
     navBtn('발행 대상', S.tasks.filter(t => t.public && t.status === 'doing').length, S.view === 'pubdoing', pick({ view: 'pubdoing', status: null, area: null }), h('span', { class: 'ico disc' }, '●')),
     navBtn('공개 체크 전체', S.tasks.filter(t => t.public).length, S.view === 'pub', pick({ view: 'pub', status: null, area: null }), h('span', { class: 'ico disc' }, '○')),
-    h('button', { class: 'pub-btn', type: 'button', onclick: openPublishModal }, '디스코드 발행'),
     h('div', { class: 'sec' }, '사용량 · 개발컴'),
     h('div', { class: 'usage', id: 'usage' }),
     h('div', { class: 'side-foot' }, h('div', { class: `sync ${S.syncKind || ''}`, id: 'sync', title: S.syncText || '' }, h('span', null, S.syncText || '')), h('span', { class: 'grow' }),
