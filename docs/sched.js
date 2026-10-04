@@ -211,10 +211,14 @@ function applyPatch(t, patch, now) {
       const old = t[f] ?? '';
       if (old === v) continue;
       const text = f === 'title' || f === 'detail' ? `${FIELD[f]} 수정` : `${FIELD[f] || f}: ${fmtVal(f, old)} → ${fmtVal(f, v)}`;
-      const last = log.at(-1);
-      // 제목·내용은 10분 안의 연속 수정을 한 줄로 묶는다(입력할 때마다 기록이 쌓이지 않게)
-      if ((f === 'title' || f === 'detail') && last && last.kind === 'change' && last.field === f && Date.parse(now) - Date.parse(last.at) < 600000) log[log.length - 1] = { ...last, at: now };
-      else log.push({ at: now, by: 'me', kind: 'change', field: f, text });
+      const last = log.at(-1), norm = x => typeof v === 'boolean' ? !!x : (x ?? '');
+      const merge = f !== 'status' && last && last.kind === 'change' && last.field === f && Date.parse(now) - Date.parse(last.at) < 600000;
+      if (merge && (f === 'title' || f === 'detail')) log[log.length - 1] = { ...last, at: now };
+      else if (merge) {
+        const orig = 'from' in last ? last.from : old;
+        if (norm(orig) === norm(v)) log.pop();  // 원래 값으로 돌아옴: 기록할 변화 없음
+        else log[log.length - 1] = { ...last, at: now, from: orig, text: `${FIELD[f] || f}: ${fmtVal(f, orig)} → ${fmtVal(f, v)}` };
+      } else log.push({ at: now, by: 'me', kind: 'change', field: f, from: old, text });
       if (f === 'status') t.stages = { ...(t.stages || {}), [v]: now };
     }
     Object.assign(t, clone(patch), { updated: now, log });
@@ -290,6 +294,8 @@ function weekRange() {
 function inView(t) {
   const today = todayStr();
   if (S.day) return t.due === S.day || t.start === S.day;
+  if (S.view === 'pubdoing') return !!t.public && t.status === 'doing';
+  if (S.view === 'pub') return !!t.public;
   if (S.view === 'today') return t.status !== 'done' && (t.due === today || (t.status === 'doing') || isLate(t));
   if (S.view === 'week') { const w = weekRange().map(ymd); return t.status !== 'done' && t.due && t.due >= w[0] && t.due <= w[6]; }
   return true;
@@ -301,7 +307,7 @@ function visible() {
 }
 function sortRows(list) {
   const pr = { high: 0, normal: 1, low: 2 };
-  return list.sort((a, b) => (pr[a.priority] ?? 1) - (pr[b.priority] ?? 1) || (b.updated || '').localeCompare(a.updated || '') || (a.title || '').localeCompare(b.title || '', 'ko'));
+  return list.sort((a, b) => (pr[a.priority] ?? 1) - (pr[b.priority] ?? 1) || (a.title || '').localeCompare(b.title || '', 'ko') || (a.created || '').localeCompare(b.created || ''));
 }
 function groups(list) {
   if (S.group === 'none') return [{ key: '전체', items: sortRows(list) }];
@@ -362,6 +368,9 @@ function renderSide() {
       });
       return dropTarget(b, ids => bulkPatch(ids, { area: a === '분류 없음' ? '' : a }, `분류 ${a}`));
     }),
+    h('div', { class: 'sec' }, '디스코드'),
+    navBtn('발행 대상', S.tasks.filter(t => t.public && t.status === 'doing').length, S.view === 'pubdoing', pick({ view: 'pubdoing', status: null, area: null }), h('span', { class: 'ico disc' }, '●')),
+    navBtn('공개 체크 전체', S.tasks.filter(t => t.public).length, S.view === 'pub', pick({ view: 'pub', status: null, area: null }), h('span', { class: 'ico disc' }, '○')),
     h('div', { class: 'sec' }, '사용량 · 개발컴'),
     h('div', { class: 'usage', id: 'usage' }),
     h('div', { class: 'side-foot' }, h('div', { class: `sync ${S.syncKind || ''}`, id: 'sync', title: S.syncText || '' }, h('span', null, S.syncText || '')), h('span', { class: 'grow' }),
@@ -371,6 +380,8 @@ function renderSide() {
 }
 function viewTitle() {
   if (S.day) { const d = new Date(S.day + 'T00:00'); return `${d.getMonth() + 1}월 ${d.getDate()}일 (${DAYS[d.getDay()]})`; }
+  if (S.view === 'pubdoing') return '디스코드 발행 대상';
+  if (S.view === 'pub') return '디스코드 공개 체크';
   if (S.view === 'today') return '오늘';
   if (S.view === 'week') return '이번 주 마감';
   if (S.area) return S.area;
@@ -495,9 +506,10 @@ function renderPane(fresh) {
       h('div', { class: 'memo' }, memo, h('div', { class: 'r' }, h('span', null, 'Ctrl+Enter'), h('button', { class: 'btn', type: 'button', onclick: addMemo }, '기록 남기기')))),
     h('div', { class: 'p-foot' }, h('button', { class: 'btn danger', type: 'button', onclick: () => removeTask(t.id) }, '삭제'), h('span', { class: 'grow' }), h('span', null, '수정 ' + when(t.updated))));
   attachResizer(pane);
-  pane.querySelector('.p-body').scrollTop = fresh ? 0 : keep;
-  fit(); const fitDetail = () => { detail.style.height = 'auto'; detail.style.height = Math.max(150, detail.scrollHeight + 2) + 'px'; }; fitDetail(); detail.addEventListener('input', fitDetail);
+  // 높이가 바뀌는 것(제목·내용 칸 맞춤, 기록·상태)을 먼저 끝낸 뒤 스크롤 위치를 되돌린다(위로 튀지 않게)
+  fit(); const fitDetail = () => { const y = pane.querySelector('.p-body').scrollTop; detail.style.height = 'auto'; detail.style.height = Math.min(Math.max(150, detail.scrollHeight + 2), Math.round(window.innerHeight * 0.4)) + 'px'; pane.querySelector('.p-body').scrollTop = y; }; fitDetail(); detail.addEventListener('input', fitDetail);
   refreshLog(t); refreshStatus(t);
+  pane.querySelector('.p-body').scrollTop = fresh ? 0 : keep;
   if (fresh && !t.title) title.focus();
 }
 function attachResizer(pane) {

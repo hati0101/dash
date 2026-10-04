@@ -279,3 +279,14 @@ body.resizing * { cursor: col-resize !important; }
 .pub-row { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--ink-2); min-height: 32px; padding: 0 8px; cursor: pointer; }
 .pub-cb { width: 15px; height: 15px; accent-color: #5865f2; margin: 0; }
 .pub-badge { margin-left: 8px; font-size: 10.5px; font-weight: 600; color: #8b93ff; border: 1px solid rgba(88,101,242,.5); border-radius: 5px; padding: 0 5px; vertical-align: 1px; }
+
+/* 디스코드 체크칸: 상세 창 입력칸 스타일이 먹지 않게 */
+.props .pub-row { justify-content: flex-start; width: auto; color: var(--ink-2); font-size: 12.5px; }
+.props .pub-row input.pub-cb { width: 16px; height: 16px; min-width: 16px; padding: 0; margin: 0; border: 0; background: none; flex: none; cursor: pointer; }
+.props .pub-row input.pub-cb:hover { background: none; }
+
+/* 진행 기록 전용 스크롤 */
+.timeline { max-height: clamp(140px, 34vh, 460px); overflow-y: auto; overscroll-behavior: contain; padding-right: 6px; }
+.timeline::before { bottom: auto; height: 100%; }
+
+.nav .ico.disc { color: #8b93ff; font-size: 10px; }
