@@ -335,3 +335,11 @@ body.resizing * { cursor: col-resize !important; }
 .e-right .stages { margin-bottom: 10px; }
 @media (max-width: 860px) { .e-cols { grid-template-columns: 1fr; overflow-y: auto; } .e-right { border-left: 0; border-top: 1px solid var(--line); } .e-right .timeline { max-height: 50vh; } .e-card { height: 94vh; } }
 .copy-btn { height: 30px; padding: 0 12px; font-size: 12.5px; }
+
+/* 휴지통 */
+.row.trash-row { grid-template-columns: 16px 22px minmax(0, 1fr) auto auto auto; }
+.row.trash-row .title { color: var(--ink-3); }
+.row .del-at { font: 11px var(--mono); color: var(--ink-4); white-space: nowrap; }
+.trash-act { display: flex; gap: 6px; }
+.trash-act .btn, #groupseg .btn { height: 28px; padding: 0 10px; font-size: 12px; }
+.area-cell { display: flex; flex-direction: column; gap: 6px; min-width: 0; }

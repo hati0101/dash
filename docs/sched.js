@@ -13,7 +13,7 @@ const STATUS = [
 const SMAP = Object.fromEntries(STATUS.map(s => [s.k, s]));
 const PRI = { high: '높음', normal: '보통', low: '낮음' };
 const DAYS = ['일', '월', '화', '수', '목', '금', '토'];
-const S = { env: null, key: null, sha: null, remote: [], tasks: [], queue: [], saving: false, token: null,
+const S = { env: null, key: null, sha: null, remote: [], all: [], tasks: [], trash: [], queue: [], saving: false, token: null,
   view: 'all', status: 'todo', area: null, day: null, q: '', group: 'area', open: null, focus: null, collapsed: {}, sel: new Set(), anchor: null };
 
 // ---------- 유틸
@@ -71,6 +71,7 @@ const ICONS = {
   all: '<path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/>',
   tag: '<path d="M3 12V4h8l10 10-8 8z"/><circle cx="7.5" cy="7.5" r="1.2"/>',
   search: '<circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/>',
+  trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
 };
 function icon(name, size) {
   const el = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -157,10 +158,12 @@ async function pull() {
   if (sha && sha === S.sha) return false;
   const data = await openEnv(env, S.key);
   S.sha = sha; S.remote = data.tasks || [];
-  S.tasks = clone(S.remote); for (const op of S.queue) op.fn(S.tasks);
+  S.all = clone(S.remote); for (const op of S.queue) op.fn(S.all); derive();
   return true;
 }
-function mutate(fn, msg) { fn(S.tasks); S.queue.push({ fn, msg }); render(); flush(); }
+// 삭제는 deleted 표시만(휴지통). 화면의 S.tasks는 살아 있는 것, S.trash는 휴지통.
+function derive() { S.tasks = S.all.filter(t => !t.deleted); S.trash = S.all.filter(t => t.deleted).sort((a, b) => b.deleted.localeCompare(a.deleted)); }
+function mutate(fn, msg) { fn(S.all); derive(); S.queue.push({ fn, msg }); render(); flush(); }
 async function flush() {
   if (S.saving || !S.queue.length) return;
   if (!S.token) { setSync('토큰이 없어 저장하지 못했습니다', 'err'); showTokenBox(); return; }
@@ -177,7 +180,7 @@ async function flush() {
       if (!r.ok) throw new Error(r.status === 401 ? '토큰이 만료됐거나 틀렸습니다' : r.status === 403 || r.status === 404 ? '토큰에 이 저장소의 Contents 쓰기 권한이 없습니다' : 'GitHub ' + r.status);
       const j = await r.json();
       S.sha = j.content.sha; S.remote = next; S.queue.splice(0, ops.length);
-      S.tasks = clone(S.remote); for (const op of S.queue) op.fn(S.tasks);
+      S.all = clone(S.remote); for (const op of S.queue) op.fn(S.all); derive();
       setSync('저장됨 ' + when(new Date().toISOString()));
     } catch (e) {
       setSync('저장 실패: ' + e.message, 'err'); S.saving = false;
@@ -240,8 +243,28 @@ function bulkDelete() {
   if (!saved.length) return;
   if (ids.includes(S.open)) S.open = null;
   S.sel.clear();
-  mutate(list => { for (const id of ids) { const i = list.findIndex(x => x.id === id); if (i >= 0) list.splice(i, 1); } }, `일괄 삭제 (${saved.length}건)`);
-  toast(`${saved.length}건 삭제했습니다`, '되돌리기', () => mutate(list => { for (const s of saved) if (!find(list, s.id)) list.push(clone(s)); }, `일괄 삭제 되돌리기 (${saved.length}건)`), 10000);
+  const at = new Date().toISOString(), done = saved.map(s => s.id);
+  mutate(list => { for (const id of done) { const x = find(list, id); if (x) x.deleted = at; } }, `휴지통 (${done.length}건)`);
+  toast(`${done.length}건 휴지통으로 옮겼습니다`, '되돌리기', () => restoreTasks(done), 10000);
+}
+function restoreTasks(ids) {
+  ids = ids.filter(id => find(S.trash, id)); if (!ids.length) return;
+  mutate(list => { for (const id of ids) { const x = find(list, id); if (x) delete x.deleted; } }, `휴지통에서 복원 (${ids.length}건)`);
+  for (const id of ids) S.sel.delete(id);
+  renderRows(); renderBulk(); toast(`${ids.length}건 복원했습니다`);
+}
+function purgeTasks(ids) {
+  ids = ids.filter(id => find(S.trash, id)); if (!ids.length) return;
+  mutate(list => { for (const id of ids) { const i = list.findIndex(x => x.id === id && x.deleted); if (i >= 0) list.splice(i, 1); } }, `영구 삭제 (${ids.length}건)`);
+  for (const id of ids) S.sel.delete(id);
+  renderRows(); renderBulk(); toast(`${ids.length}건 영구 삭제했습니다`);
+}
+// 두 번 눌러야 실행되는 버튼(실수 방지)
+function armBtn(label, armedLabel, cls, run) {
+  let armed = false, timer;
+  const b = h('button', { class: cls, type: 'button' }, label);
+  b.onclick = e => { e.stopPropagation(); if (!armed) { armed = true; b.textContent = armedLabel; timer = setTimeout(() => { armed = false; b.textContent = label; }, 3000); return; } clearTimeout(timer); run(); };
+  return b;
 }
 function bulkPatch(ids, patch, label) {
   const now = new Date().toISOString(), [f, v] = Object.entries(patch)[0];
@@ -275,10 +298,10 @@ function setStatus(id, k) {
 }
 function removeTask(id) {
   const t = find(S.tasks, id); if (!t) return;
-  const saved = clone(t);
   if (S.open === id) closeTask();
-  mutate(list => { const i = list.findIndex(x => x.id === id); if (i >= 0) list.splice(i, 1); }, `삭제 "${t.title}"`);
-  toast(`"${t.title || '제목 없음'}" 삭제했습니다`, '되돌리기', () => mutate(list => { if (!find(list, id)) list.push(clone(saved)); }, `되돌리기 "${saved.title}"`), 8000);
+  const at = new Date().toISOString();
+  mutate(list => { const x = find(list, id); if (x) x.deleted = at; }, `휴지통 "${t.title}"`);
+  toast(`"${t.title || '제목 없음'}" 휴지통으로 옮겼습니다`, '되돌리기', () => restoreTasks([id]), 8000);
 }
 function addLog(id, text) {
   const at = new Date().toISOString();
@@ -302,6 +325,7 @@ function inView(t) {
 }
 function visible() {
   const q = S.q.trim().toLowerCase();
+  if (S.view === 'trash') return S.trash.filter(t => !q || [t.title, t.detail, t.area].join(' ').toLowerCase().includes(q));
   return S.tasks.filter(t => inView(t) && (S.view !== 'all' || S.day || !S.status || (t.status || 'todo') === S.status) && (!S.area || (t.area || '분류 없음') === S.area)
     && (!q || [t.title, t.detail, t.area, ...(t.log || []).map(l => l.text)].join(' ').toLowerCase().includes(q)));
 }
@@ -353,6 +377,7 @@ function renderSide() {
     h('div', { class: 'sec' }, '상태'),
     ...STATUS.map(s => dropTarget(navBtn(s.name, cnt(s.k), S.view === 'all' && !S.day && S.status === s.k && !S.area, pick({ view: 'all', status: s.k, area: null }), ring(s.k)), ids => bulkPatch(ids, { status: s.k }, s.name))),
     navBtn('전체', S.tasks.length, S.view === 'all' && !S.day && !S.status && !S.area, pick({ view: 'all', status: null, area: null }), h('span', { class: 'ico' }, icon('all', 15))),
+    navBtn('휴지통', S.trash.length, S.view === 'trash', pick({ view: 'trash', status: null, area: null }), h('span', { class: 'ico' }, icon('trash', 15))),
     h('div', { class: 'sec' }, '분류'),
     ...[...areas.entries()].sort((a, b) => b[1] - a[1]).map(([a, n]) => {
       const b = navBtn(a, n, S.view === 'all' && !S.day && S.area === a, pick({ view: 'all', status: null, area: a }), h('span', { class: 'ico' }, icon('tag', 14)));
@@ -380,6 +405,7 @@ function renderSide() {
 }
 function viewTitle() {
   if (S.day) { const d = new Date(S.day + 'T00:00'); return `${d.getMonth() + 1}월 ${d.getDate()}일 (${DAYS[d.getDay()]})`; }
+  if (S.view === 'trash') return '휴지통';
   if (S.view === 'pubdoing') return '디스코드 발행 대상';
   if (S.view === 'pub') return '디스코드 공개 체크';
   if (S.view === 'today') return '오늘';
@@ -421,10 +447,30 @@ function rowEl(t) {
   el.addEventListener('dragend', () => el.classList.remove('dragging'));
   return el;
 }
+function trashRow(t) {
+  const pick = h('input', { type: 'checkbox', class: 'pick', 'aria-label': '선택', onclick: e => { e.stopPropagation(); toggleSel(t.id, e.target.checked); renderRows(); renderBulk(); } });
+  pick.checked = S.sel.has(t.id);
+  return h('div', { class: `row trash-row${S.focus === t.id ? ' sel' : ''}${S.sel.has(t.id) ? ' picked' : ''}`, role: 'listitem', tabindex: '-1', 'data-id': t.id,
+    onclick: e => { if (e.shiftKey && S.anchor) rangeSel(S.anchor, t.id); else toggleSel(t.id); S.focus = t.id; renderRows(); renderBulk(); } },
+    pick, h('span', { class: 'st-btn', 'aria-hidden': 'true' }, ring(t.status)),
+    h('span', { class: 'title' }, t.title || '(제목 없음)'),
+    t.area ? h('span', { class: 'tag' }, t.area) : h('span'),
+    h('span', { class: 'del-at', title: '삭제 ' + when(t.deleted) }, '삭제 ' + shortDate(t.deleted)),
+    h('span', { class: 'trash-act' },
+      h('button', { class: 'btn', type: 'button', onclick: e => { e.stopPropagation(); restoreTasks([t.id]); } }, '복원'),
+      armBtn('영구 삭제', '한 번 더', 'btn danger', () => purgeTasks([t.id]))));
+}
 function renderRows() {
   const list = visible();
   $('#ltitle').textContent = viewTitle();
   $('#lcount').textContent = `${list.length}건`;
+  if (S.view === 'trash') {
+    $('#groupseg').replaceChildren(list.length ? armBtn('휴지통 비우기', `${list.length}건 영구 삭제 — 한 번 더`, 'btn danger', () => purgeTasks(S.trash.map(x => x.id))) : '');
+    const box = $('#rows'), keep = box.scrollTop;
+    box.replaceChildren(...(list.length ? list.map(trashRow) : [h('div', { class: 'empty' }, h('b', null, '휴지통이 비어 있습니다'), '지운 작업은 여기로 옵니다. 복원하거나 영구 삭제할 수 있습니다.')]));
+    box.scrollTop = keep;
+    return;
+  }
   $('#groupseg').replaceChildren(...[['area', '분류별'], ['status', '상태별'], ['none', '묶지 않음']].map(([k, n]) =>
     h('button', { type: 'button', 'aria-pressed': S.group === k ? 'true' : 'false', onclick: () => { S.group = k; store.set('sched.group', k); renderRows(); } }, n)));
   const box = $('#rows'), keep = box.scrollTop;
@@ -490,7 +536,14 @@ function renderEdit(fresh) {
   bind('title', title, v => v.trim(), '제목');
   const inp = (id, type, v, field, label, tf) => { const el = h('input', { id, type, autocomplete: 'off' }); el.value = v || ''; bind(field, el, tf, label); return el; };
   const pri = h('select', { id: 'f-pri' }, Object.entries(PRI).map(([k, v]) => h('option', { value: k }, v))); pri.value = t.priority || 'normal'; bind('priority', pri, v => v, '중요도');
-  const area = inp('f-area', 'text', t.area, 'area', '분류', v => v.trim()); area.setAttribute('list', 'areas'); area.placeholder = '분류 없음';
+  const areas = [...new Set(S.tasks.map(x => x.area).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'ko'));
+  const area = h('select', { id: 'f-area' }, h('option', { value: '' }, '분류 없음'), ...areas.map(a => h('option', { value: a }, a)), h('option', { value: '__new' }, '+ 새 분류'));
+  area.value = t.area || '';
+  const newArea = h('input', { id: 'f-newarea', placeholder: '새 분류 이름 (Enter)', autocomplete: 'off', hidden: true, 'aria-label': '새 분류 이름' });
+  const setArea = v => { const cur = find(S.tasks, t.id); if (cur && (cur.area || '') !== v) patchTask(t.id, { area: v }, `"${cur.title}" 분류 수정`); };
+  area.addEventListener('change', () => { if (area.value === '__new') { newArea.hidden = false; newArea.focus(); } else { newArea.hidden = true; setArea(area.value); } });
+  newArea.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); const v = newArea.value.trim(); newArea.value = ''; newArea.blur(); if (v) setArea(v); } else if (e.key === 'Escape') { e.stopPropagation(); newArea.value = ''; newArea.hidden = true; area.value = t.area || ''; } });
+  newArea.addEventListener('blur', () => { const v = newArea.value.trim(); if (v) setArea(v); });
   const detail = h('textarea', { class: 'f-detail', id: 'f-detail', placeholder: '무엇을, 어디까지 할지 적어 두세요.' }); detail.value = t.detail || ''; bind('detail', detail, v => v, '내용');
   const memo = h('textarea', { placeholder: '진행 상황이나 지시를 남깁니다 (Ctrl+Enter)', 'aria-label': '기록 남기기' });
   const addMemo = () => { const v = memo.value.trim(); if (!v) return; memo.value = ''; addLog(t.id, v); };
@@ -506,14 +559,14 @@ function renderEdit(fresh) {
         h('div', { class: 'props' },
           h('label', { for: 'f-start' }, '시작일'), inp('f-start', 'date', t.start, 'start', '시작일'),
           h('label', { for: 'f-pri' }, '중요도'), pri,
-          h('label', { for: 'f-area' }, '분류'), area,
+          h('label', { for: 'f-area' }, '분류'), h('div', { class: 'area-cell' }, area, newArea),
           h('label', { for: 'f-pub' }, '디스코드'), (() => {
             const cb = h('input', { type: 'checkbox', id: 'f-pub', class: 'pub-cb' }); cb.checked = !!t.public;
             cb.addEventListener('change', () => patchTask(t.id, { public: cb.checked }, `"${t.title}" 디스코드 ${cb.checked ? '공개' : '비공개'}`));
             return h('label', { class: 'pub-row', for: 'f-pub' }, cb, h('span', null, '진행 중일 때 개발 현황 채널에 공개'));
           })(),
           h('label', { for: 'f-pubtitle' }, '공개 제목'), (() => { const el = inp('f-pubtitle', 'text', t.pubTitle, 'pubTitle', '공개 제목', v => v.trim()); el.placeholder = '비우면 제목 그대로'; return el; })(),
-          h('datalist', { id: 'areas' }, [...new Set(S.tasks.map(x => x.area).filter(Boolean))].map(v => h('option', { value: v })))),
+          ),
         h('div', null, h('div', { class: 'blk-label' }, '내용'), detail),
         h('div', { class: 'memo' }, h('div', { class: 'blk-label' }, '메모 남기기'), memo, h('div', { class: 'r' }, h('span', null, 'Ctrl+Enter'), h('button', { class: 'btn', type: 'button', onclick: addMemo }, '기록 남기기')))),
       h('div', { class: 'e-right' },
@@ -575,9 +628,17 @@ function areaPicker() {
 }
 function renderBulk() {
   const bar = $('#bulk'); if (!bar) return;
-  for (const id of [...S.sel]) if (!find(S.tasks, id)) S.sel.delete(id);
+  const pool = S.view === 'trash' ? S.trash : S.tasks;
+  for (const id of [...S.sel]) if (!find(pool, id)) S.sel.delete(id);
   const n = S.sel.size;
   bar.hidden = !n; if (!n) return;
+  if (S.view === 'trash') {
+    bar.replaceChildren(h('span', { class: 'bulk-n' }, h('b', null, n), '개 선택'), h('span', { class: 'bulk-sep' }),
+      h('button', { class: 'bulk-st', type: 'button', onclick: () => restoreTasks([...S.sel]) }, `복원 ${n}건`),
+      armBtn(`영구 삭제 ${n}건`, '한 번 더 누르면 영구 삭제', 'btn danger', () => purgeTasks([...S.sel])),
+      h('button', { class: 'btn', type: 'button', onclick: () => { S.sel.clear(); renderRows(); renderBulk(); } }, '선택 해제'));
+    return;
+  }
   let armed = false;
   const del = h('button', { class: 'btn danger', type: 'button' }, `삭제 ${n}건`);
   del.onclick = () => { if (!armed) { armed = true; del.textContent = '한 번 더 누르면 삭제'; setTimeout(() => { armed = false; del.textContent = `삭제 ${n}건`; }, 3000); return; } bulkDelete(); };
@@ -767,6 +828,12 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape') { if (typing) e.target.blur(); else if (S.open) closeTask(); else if (S.sel.size) { S.sel.clear(); renderRows(); renderBulk(); } return; }
   if (!typing && (e.ctrlKey || e.metaKey) && e.code === 'KeyA') { e.preventDefault(); for (const id of visibleIds()) S.sel.add(id); renderRows(); renderBulk(); return; }
   if (typing || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (S.view === 'trash') {
+    const ids = S.sel.size ? [...S.sel] : S.focus ? [S.focus] : [];
+    if (e.key === 'Delete') { e.preventDefault(); if (ids.length && confirm(`${ids.length}건을 영구 삭제할까요? 되돌릴 수 없습니다.`)) purgeTasks(ids); return; }
+    if (e.code === 'KeyR') { restoreTasks(ids); return; }
+    if (e.key === 'Enter' || e.code === 'KeyC' || /^[1-5]$/.test(e.key)) return;
+  }
   if (e.key === 'Delete') {
     e.preventDefault();
     if (S.sel.size) { bulkDelete(); return; }
