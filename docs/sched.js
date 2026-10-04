@@ -453,6 +453,25 @@ function renderRows() {
 function openTask(id) { S.open = id; S.focus = id; renderRows(); renderEdit(true); }
 function closeTask() { S.open = null; editEl?.remove(); editEl = null; renderRows(); }
 let editEl = null;
+function taskText(t) {
+  const memos = (t.log || []).filter(l => l.kind !== 'change' && (l.text || '').trim());
+  const out = [`[작업] ${t.title || '(제목 없음)'}`,
+    `ID: ${t.id} · 상태: ${SMAP[t.status || 'todo'].name} · 분류: ${t.area || '없음'} · 중요도: ${PRI[t.priority || 'normal']} · 시작일: ${t.start || '-'}`];
+  if ((t.detail || '').trim()) out.push('', '[내용]', t.detail.trim());
+  if (memos.length) out.push('', '[메모]', ...memos.map(l => `- ${shortDate(l.at)} ${l.by === 'claude' ? 'AI' : '나'}: ${l.text.trim()}`));
+  return out.join('\n');
+}
+async function copyTask(id) {
+  const t = find(S.tasks, id); if (!t) return;
+  const text = taskText(t);
+  try { await navigator.clipboard.writeText(text); }
+  catch {
+    const ta = h('textarea', { 'aria-hidden': 'true' }); ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.append(ta); ta.select(); const ok = document.execCommand('copy'); ta.remove();
+    if (!ok) return toast('복사하지 못했습니다');
+  }
+  toast('작업 내용을 복사했습니다');
+}
 function renderEdit(fresh) {
   const t = S.open && find(S.tasks, S.open);
   if (!t) { if (S.open) { S.open = null; editEl?.remove(); editEl = null; toast('다른 곳에서 삭제된 작업입니다.'); } return; }
@@ -478,6 +497,7 @@ function renderEdit(fresh) {
   memo.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); addMemo(); } });
   const card = h('div', { class: 'e-card', role: 'dialog', 'aria-modal': 'true', 'aria-label': '작업 수정' },
     h('div', { class: 'p-head' }, h('span', { class: 'id' }, t.id), h('span', { class: 'grow' }), h('span', { class: 'e-upd' }, '수정 ' + when(t.updated)),
+      h('button', { class: 'btn copy-btn', type: 'button', title: '제목·내용·메모를 한 번에 복사 (C)', onclick: () => copyTask(t.id) }, '전체 복사'),
       h('button', { class: 'ibtn', type: 'button', title: '닫기 (Esc)', 'aria-label': '닫기', onclick: closeTask }, icon('close', 16))),
     h('div', { class: 'e-cols' },
       h('div', { class: 'e-left' },
@@ -759,6 +779,7 @@ document.addEventListener('keydown', e => {
     }
     return;
   }
+  if (e.code === 'KeyC') { const id = S.open || S.focus; if (id) { e.preventDefault(); copyTask(id); } return; }
   if (e.code === 'KeyX') { const id = S.open || S.focus; if (id) { toggleSel(id); renderRows(); renderBulk(); } return; }
   if (e.key === '/') { e.preventDefault(); $('#q').focus(); }
   else if (e.code === 'KeyN') { e.preventDefault(); openNewModal(); }

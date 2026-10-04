@@ -334,3 +334,4 @@ body.resizing * { cursor: col-resize !important; }
 .e-right .timeline { flex: 1 1 auto; max-height: none; min-height: 0; }
 .e-right .stages { margin-bottom: 10px; }
 @media (max-width: 860px) { .e-cols { grid-template-columns: 1fr; overflow-y: auto; } .e-right { border-left: 0; border-top: 1px solid var(--line); } .e-right .timeline { max-height: 50vh; } .e-card { height: 94vh; } }
+.copy-btn { height: 30px; padding: 0 12px; font-size: 12.5px; }
