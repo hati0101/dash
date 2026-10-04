@@ -460,10 +460,27 @@ function renderPane(fresh) {
       h('div', null, h('div', { class: 'blk-label' }, '진행 기록'), h('div', { class: 'timeline', id: 'log' })),
       h('div', { class: 'memo' }, memo, h('div', { class: 'r' }, h('span', null, 'Ctrl+Enter'), h('button', { class: 'btn', type: 'button', onclick: addMemo }, '기록 남기기')))),
     h('div', { class: 'p-foot' }, h('button', { class: 'btn danger', type: 'button', onclick: () => removeTask(t.id) }, '삭제'), h('span', { class: 'grow' }), h('span', null, '수정 ' + when(t.updated))));
+  attachResizer(pane);
   pane.querySelector('.p-body').scrollTop = fresh ? 0 : keep;
   fit(); const fitDetail = () => { detail.style.height = 'auto'; detail.style.height = Math.max(150, detail.scrollHeight + 2) + 'px'; }; fitDetail(); detail.addEventListener('input', fitDetail);
   refreshLog(t); refreshStatus(t);
   if (fresh && !t.title) title.focus();
+}
+function attachResizer(pane) {
+  const grip = h('div', { class: 'resizer', role: 'separator', 'aria-orientation': 'vertical', 'aria-label': '상세 창 폭 조절', title: '끌어서 폭 조절 · 더블클릭: 기본 폭' });
+  grip.addEventListener('pointerdown', e => {
+    e.preventDefault(); grip.setPointerCapture(e.pointerId); document.body.classList.add('resizing');
+    const move = ev => setPaneWidth(window.innerWidth - ev.clientX);
+    const up = () => { grip.removeEventListener('pointermove', move); grip.removeEventListener('pointerup', up); document.body.classList.remove('resizing'); store.set('sched.paneW', S.paneW); };
+    grip.addEventListener('pointermove', move); grip.addEventListener('pointerup', up);
+  });
+  grip.addEventListener('dblclick', () => { setPaneWidth(400); store.set('sched.paneW', 400); });
+  pane.prepend(grip);
+}
+function setPaneWidth(w) {
+  const max = Math.max(320, Math.min(1100, window.innerWidth - 560));
+  S.paneW = Math.round(Math.max(320, Math.min(max, w)));
+  document.documentElement.style.setProperty('--pane-w', S.paneW + 'px');
 }
 function refreshStages(t) {
   const box = $('#stages'); if (!box) return;
@@ -504,7 +521,8 @@ function renderOverview(pane) {
     h('div', null, h('div', { class: 'blk-label' }, '단축키'),
       h('div', { class: 'keys' }, h('span', { class: 'kbd' }, 'N'), '할 일 추가', h('span', { class: 'kbd' }, '/'), '검색',
         h('span', { class: 'kbd' }, '↑ ↓'), '목록 이동', h('span', { class: 'kbd' }, 'Enter'), '상세 열기',
-        h('span', { class: 'kbd' }, '1~5'), '상태: 대기·진행·확인·보류·완료', h('span', { class: 'kbd' }, 'Esc'), '닫기'))));
+        h('span', { class: 'kbd' }, '1~5'), '상태: 대기·진행·확인·보류·완료', h('span', { class: 'kbd' }, 'Del'), '삭제(선택한 것 전부)', h('span', { class: 'kbd' }, 'X'), '선택', h('span', { class: 'kbd' }, 'Esc'), '닫기'))));
+  attachResizer(pane);
 }
 function rangeSel(a, b) {
   const ids = visibleIds(), i = ids.indexOf(a), j = ids.indexOf(b);
@@ -570,6 +588,8 @@ function showTokenBox(reason) {
 async function boot() {
   const th = store.get('theme'); if (th) document.documentElement.dataset.theme = th;
   S.group = store.get('sched.group', 'area'); S.collapsed = store.get('sched.collapsed', {}) || {};
+  setPaneWidth(store.get('sched.paneW', 400));
+  window.addEventListener('resize', () => setPaneWidth(S.paneW));
   $('#lock-form').addEventListener('submit', unlock);
   if (!window.isSecureContext || !crypto.subtle) { $('#lock-msg').textContent = 'HTTPS에서만 열 수 있습니다.'; return; }
   try { S.env = (await fetchRemote()).env; } catch (e) { $('#lock-msg').textContent = e.message; return; }
@@ -619,10 +639,20 @@ function moveFocus(dir) {
 }
 document.addEventListener('keydown', e => {
   if (!$('#rows')) return;
-  const typing = e.target.matches('input, textarea, select');
+  const typing = !!(e.target.matches && e.target.matches('input, textarea, select'));
   if (e.key === 'Escape') { if (typing) e.target.blur(); else if (S.sel.size) { S.sel.clear(); renderRows(); renderBulk(); } else if (S.open) closeTask(); return; }
   if (!typing && (e.ctrlKey || e.metaKey) && e.code === 'KeyA') { e.preventDefault(); for (const id of visibleIds()) S.sel.add(id); renderRows(); renderBulk(); return; }
   if (typing || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.key === 'Delete') {
+    e.preventDefault();
+    if (S.sel.size) { bulkDelete(); return; }
+    if (S.open) {
+      const ids = visibleIds(), i = ids.indexOf(S.open), next = ids[i + 1] || ids[i - 1];
+      removeTask(S.open);
+      if (next && find(S.tasks, next)) openTask(next);
+    }
+    return;
+  }
   if (e.code === 'KeyX') { const id = S.open || S.focus; if (id) { toggleSel(id); renderRows(); renderBulk(); } return; }
   if (e.key === '/') { e.preventDefault(); $('#q').focus(); }
   else if (e.code === 'KeyN') { e.preventDefault(); $('#addinput').focus(); }

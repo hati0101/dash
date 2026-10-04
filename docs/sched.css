@@ -46,10 +46,10 @@ button { cursor: pointer; background: none; border: 0; padding: 0; }
 .mark { width: 32px; height: 32px; border-radius: 10px; background: linear-gradient(135deg, var(--brand-1), var(--brand-2)); display: grid; place-items: center; color: #fff; font-weight: 800; font-size: 15px; flex: none; box-shadow: 0 4px 14px rgba(226,83,31,.35); }
 
 /* 3단 구조 */
-.app { height: 100%; display: grid; grid-template-columns: 236px minmax(0, 1fr) 400px; }
+.app { height: 100%; display: grid; grid-template-columns: 236px minmax(0, 1fr) var(--pane-w, 400px); }
 .side { background: var(--side); border-right: 1px solid var(--line); display: flex; flex-direction: column; gap: 4px; padding: 16px 12px; overflow-y: auto; backdrop-filter: blur(8px); }
 .list { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-.pane { background: var(--pane); border-left: 1px solid var(--line); min-width: 0; display: flex; flex-direction: column; min-height: 0; backdrop-filter: blur(8px); }
+.pane { background: var(--pane); border-left: 1px solid var(--line); min-width: 0; display: flex; flex-direction: column; min-height: 0; backdrop-filter: blur(8px); position: relative; }
 
 /* 사이드바 */
 .brand { display: flex; align-items: center; gap: 10px; padding: 2px 6px 12px; }
@@ -194,7 +194,7 @@ textarea.f-detail:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var
 .scrim { position: fixed; inset: 0; background: var(--scrim); z-index: 19; }
 
 /* 좁은 화면: 사이드바는 위 가로줄, 상세는 덮는 창 */
-@media (max-width: 1180px) { .app { grid-template-columns: 220px minmax(0, 1fr); } .pane { position: fixed; top: 0; right: 0; bottom: 0; width: min(440px, 100%); z-index: 20; box-shadow: var(--shadow); background: var(--bg); } .pane.idle { display: none; } }
+@media (max-width: 1180px) { .app { grid-template-columns: 220px minmax(0, 1fr); } .pane { position: fixed; top: 0; right: 0; bottom: 0; width: min(var(--pane-w, 440px), 100%); z-index: 20; box-shadow: var(--shadow); background: var(--bg); } .pane.idle { display: none; } }
 @media (max-width: 760px) {
   .app { display: flex; flex-direction: column; height: auto; min-height: 100%; }
   .side { flex-direction: row; flex-wrap: wrap; overflow: visible; border-right: 0; border-bottom: 1px solid var(--line); padding: 12px 16px; }
@@ -255,3 +255,10 @@ textarea.f-detail:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var
 /* 로고: REAL 슬라임 */
 .mark-img { width: 34px; height: 34px; border-radius: 10px; flex: none; display: block; box-shadow: 0 4px 14px rgba(120,200,235,.25); }
 .mark-img.lg { width: 56px; height: 56px; border-radius: 15px; }
+
+/* 상세 창 폭 조절 손잡이 */
+.resizer { position: absolute; left: -4px; top: 0; bottom: 0; width: 8px; cursor: col-resize; z-index: 6; touch-action: none; }
+.resizer::after { content: ""; position: absolute; left: 3px; top: 0; bottom: 0; width: 2px; background: transparent; transition: background .12s; }
+.resizer:hover::after, body.resizing .resizer::after { background: var(--accent); }
+body.resizing { cursor: col-resize; user-select: none; }
+body.resizing * { cursor: col-resize !important; }
