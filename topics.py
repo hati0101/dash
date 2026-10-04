@@ -835,7 +835,7 @@ def finish_counts(by: str, stage: str, live: bool, t: dict, known, ts, after=Non
         if stage == 'test':
             reset = not returned or any(e.get('op') == 'test-reset' and command.linked(e, returned) for e in events)
             fresh = reset if returned else all(to_dt(x.get('updated_at')) > to_dt(after) for x in state.get('tests', []))
-            return by == stage_owner(stage,t,known) and fresh and testflow.finished(state.get('tests', []))
+            return by in (LEAD, stage_owner(stage,t,known)) and fresh and testflow.finished(state.get('tests', []))
         if stage == 'pack': return by == stage_owner(stage,t,known)
     if to_dt(ts) < RULES_V2_FROM:
         return True  # 옛 기록은 그때 판정 그대로
@@ -1475,6 +1475,7 @@ def whose_turn(t: dict) -> str | None:
         item = testflow.current((t.get("command") or {}).get("tests", []))
         if item:
             return LEAD if item["state"] in ("blocked", "passed") else item["assignee"]
+        return LEAD  # 시험이 모두 수락되면 사령탑이 결과를 요약하고 관문을 연다.
     if t.get("stage") == "queue":
         return None  # 배포 대기열: 아키텍트가 묶음을 만들 때까지 아무도 깨우지 않는다
     if t.get("stage_owner") and t.get("stage") in ("test", "pack", "prep", "deploy"):

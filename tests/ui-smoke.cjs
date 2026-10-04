@@ -45,6 +45,26 @@ const navNames=page=>page.locator('.side > .nav-btn').evaluateAll(els=>els.map(e
  try{
   await page.goto(`http://127.0.0.1:${port}/`);
   await page.evaluate(data=>{S.data=data;S.view='progress';enterApp();clearInterval(S.timer);},fixture);
+  const regression = await page.evaluate(() => {
+    const t = S.data.topics[0], savedActions = S.data.user_actions, savedDecisions = S.data.decisions_needed;
+    t.command.rejected = [{id:'old', agent:'dev-astra', ts:new Date().toISOString(), reason:'작업 상태가 바뀌었습니다.'}];
+    S.data.user_actions = [{id:'command-conflict-old',kind:'conflict',task_id:t.id,title:'과거 기록'}];
+    S.data.decisions_needed = [...savedDecisions, {id:'CONSULT-fixture',kind:'consultation',task_id:t.id,_author:'server-astra',question:'[진척 없음 · 자문 요청] 원인을 조사할까요?',options:['원인 조사·해결안 제시','방향 변경','보류']}];
+    const items = mineItems(), box = commandBox(t);
+    const result = {oldAction:items.some(i=>i.key==='a:command-conflict-old'),
+      consultation:items.some(i=>i.ref?.id==='CONSULT-fixture' && i.type==='decision'),
+      history:box.textContent.includes('작업 상태가 바뀌었습니다.'),
+      wrongButton:box.textContent.includes('착수 치움')};
+    delete t.command.rejected;S.data.user_actions=savedActions;S.data.decisions_needed=savedDecisions;
+    return result;
+  });
+  assert.deepEqual(regression,{oldAction:false,consultation:true,history:true,wrongButton:false});
+  done.push('과거 거절은 기록에 보존·잘못된 담당 버튼 제거·자문 선택지 표시');
+  if (process.env.UI_FOCUS_FLOW === '1') {
+    assert.deepEqual(errors,[]);
+    console.log(JSON.stringify({pass:true,checks:done,errors}));
+    return;
+  }
   assert.equal(await page.locator('.flow-lane').count(),11);
   await page.getByRole('button',{name:'자동 시험 2건 보기',exact:true}).click();
   assert.equal(await page.locator('.flow-lane').count(),1);

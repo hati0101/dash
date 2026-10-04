@@ -685,6 +685,33 @@ def gate_decisions(topics: list[dict], curated: dict, known: set) -> list[dict]:
 
 GATE_NAME = {4: "실게임 시험", 5: "배포본 결정", 7: "운영 반영 승인", 9: "완료 확정", 40: "결과 확인"}
 
+def consultation_decisions(topics: list[dict], agents: list[dict], curated: dict) -> list[dict]:
+    """실행기의 진척 없음 기록을 답할 수 있는 자문으로 표시한다. ID는 대기 회차 동안 고정한다."""
+    import hashlib
+    answered = {x.get('id') for x in curated.get('decisions_answered', [])}
+    asking = {x.get('task_id') for x in curated.get('decisions_needed', [])
+              if x.get('id') not in answered and x.get('kind') != 'consultation'}
+    by_id = {t['id']: t for t in topics}
+    out = []
+    for agent in agents:
+        for idle in (agent.get('queue') or {}).get('idle', []):
+            t = by_id.get(idle.get('topic'))
+            if not t or t.get('status') != 'active' or t.get('turn') != agent['id'] or t.get('live_session') or t.get('deploy_session') or t['id'] in asking:
+                continue
+            key = '|'.join((t['id'], agent['id'], idle.get('since') or 'legacy'))
+            detail = next((n.get('body') for n in reversed(t.get('notes', [])) if n.get('by') == agent['id'] and n.get('body')), '')
+            out.append({'id': 'CONSULT-' + hashlib.sha256(key.encode()).hexdigest()[:20], 'kind': 'consultation',
+                        'owner': 'user', 'task_id': t['id'], '_author': agent['id'], 'since': idle.get('since'),
+                        'question': f"[진척 없음 · 자문 요청] {t.get('title') or t['id']}\n\n"
+                                    f"현재 상황: {idle.get('runs', 3)}회 연속 진척이 없어 같은 시도를 중단했습니다.\n"
+                                    f"마지막 결과: {idle.get('last') or '결과 요약 없음'}\n"
+                                    f"담당자 기록: {str(detail)[:900]}\n\n"
+                                    "결정할 것: 막힌 원인을 조사해 해결안을 받으시겠습니까, 방향을 바꾸시겠습니까?\n"
+                                    "권장: 원인 조사·해결안 제시를 선택하세요. 방향 변경은 메모에 지시를 적어 주세요. 운영 변경 승인을 대신하지 않습니다.",
+                        'options': ['원인 조사·해결안 제시', '방향 변경(메모에 지시)', '보류']})
+    return out
+
+
 def live_actions(topics: list[dict], held: set) -> list[dict]:
     """실게임 시험에서 나온 수정은 아키텍트가 정한 흐름대로 개발컴 Claude 대화에서 한다 → '할 일'로만 알린다(결정 아님).
     대화 세션이 잡고(hold) 있으면 알리지 않는다."""
@@ -814,17 +841,13 @@ def build_payload(cfg: dict, pw: str | None = None) -> dict:
         command.route_deputy(topic, deputy)
     curated['user_actions'] += command.availability_actions(authority_data, topics)
     curated["decisions_needed"] += gate_decisions(topics, curated, {a["id"] for a in agents})
+    curated["decisions_needed"] += consultation_decisions(topics, agents, curated)
     from topics import to_dt as _to_dt
     _now = datetime.now(timezone(timedelta(hours=9)))
     held = {h.get("topic") for h in (holds or []) if isinstance(h, dict) and h.get("until") and _to_dt(h["until"]) > _now}
     legacy = [t for t in topics if not t.get("archived")]
     curated["user_actions"] += live_actions(legacy, held) + offline_actions(legacy, agents, (cfg.get("pc") or {}).get("id"))
-    for topic in legacy:
-        for rejected in (topic.get('command') or {}).get('rejected', []):
-            curated['user_actions'].append({'id': 'command-conflict-' + str(rejected.get('id')),
-                'title': '작업 기록 충돌 확인: ' + topic.get('title', topic['id']),
-                'detail': str(rejected.get('agent')) + ' · ' + rejected.get('reason', ''),
-                'kind': 'conflict', 'task_id': topic['id'], 'since': rejected.get('ts')})
+    # 과거 제출 거절은 주제 기록에 보존한다. 담당자 재지정으로 해결할 중복 착수가 아니다.
     archived_ids = {t["id"] for t in topics if t.get("archived")}
     curated["decisions_needed"] = [q for q in curated.get("decisions_needed", []) if q.get("task_id") not in archived_ids]
     curated["user_actions"] = [q for q in curated.get("user_actions", []) if q.get("task_id") not in archived_ids]

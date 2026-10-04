@@ -39,7 +39,7 @@ import node  # noqa: E402
 
 KST = timezone(timedelta(hours=9))
 MAX_PER_RUN = 3
-IDLE_ALERT_RUNS = 3  # 같은 주제가 진척 없이 이만큼 연달아 돌면 아키텍트에게 알림(결정이 아니라 알림, 아키텍트 결정 2026-10-03)
+IDLE_ALERT_RUNS = 3  # 진척 없는 반복은 자문 요청으로 전환한다(2026-10-04).
 AI_TIMEOUT = 20 * 60
 ACTIVE = ("new", "triage", "ready", "active")
 STATUSES = ("triage", "ready", "active", "done", "parked")
@@ -257,7 +257,7 @@ def find_jobs(data: dict, state: dict, only: str | None = None) -> list[dict]:
     from topics import to_dt
     open_asks: dict[str, set] = {}  # 작업자별로 아키텍트 답을 기다리는 AI 질문이 걸린 주제
     for q in data.get("decisions_needed", []):
-        if q.get("_author") and q["id"] not in answers and q.get("kind") not in ("gate", "stall"):
+        if q.get("_author") and q["id"] not in answers and q.get("kind") not in ("gate", "stall", "consultation"):
             open_asks.setdefault(q["_author"], set()).add(q.get("task_id"))
 
     def limited(st: dict) -> bool:
@@ -286,6 +286,8 @@ def find_jobs(data: dict, state: dict, only: str | None = None) -> list[dict]:
             st["last_sig"], st["last_parts"] = sig, parts  # 계산 방식이 바뀐 첫 실행: 이미 처리한 주제를 한꺼번에 다시 깨우지 않는다
             continue
         reason = wake_reason(parts, st.get("last_parts"))
+        if consultation_wait(st, parts):
+            continue  # 시간 경과·AI 메모만으로 같은 시도를 반복하지 않는다.
         if limited(st):
             # 감속 중이어도 새 입력(아키텍트·대화, 내 요청에 온 답, 단계·모드 변화)이 오면 바로 깨운다 — 아키텍트가 '헛도는 중'을 보고
             # 개입한 답이 2시간 늦게 가지 않게(2026-10-03 포크 모의 검사 s16·s36). 실행기 자신의 '이어서'(cont)와 다른 AI 작업자의
@@ -331,7 +333,7 @@ def find_jobs(data: dict, state: dict, only: str | None = None) -> list[dict]:
     for q in data.get("decisions_needed", []):
         if q.get("_author") in agents and (not only or q["_author"] == only) and q["id"] in answers and q["id"] not in used:
             t = next((x for x in data.get("topics", []) if x["id"] == q.get("task_id")), None)
-            if str(q.get("question") or "").startswith(PARK_ASK) and str(answers[q["id"]].get("choice") or "").startswith("보류"):
+            if (str(q.get("question") or "").startswith(PARK_ASK) or q.get("kind") == "consultation") and str(answers[q["id"]].get("choice") or "").startswith("보류"):
                 # 아키텍트가 보류를 골랐다 → AI를 깨우지 않고 실행기가 보류로 기록하는 작업(run_job에서 처리)
                 jobs.append({"kind": "park", "agent": q["_author"], "topic": t, "ask": q, "answer": answers[q["id"]], "sig": f"park-{q['id']}"})
                 continue
@@ -1218,6 +1220,8 @@ def build_prompt(job: dict, data: dict, workspace: Path | None, st: dict) -> str
     if job["kind"] == "answer":
         ans = (f"\n## 아키텍트의 답 (이번에 깨운 이유)\n질문: {job['ask'].get('question')}\n답: {job['answer'].get('choice') or ''} {job['answer'].get('note') or ''}\n"
                "이 답에 따라 바로 다음 행동을 한다. 답이 승인이면 승인된 범위를 끝까지 한다. 같은 내용을 다시 묻지 않는다.\n")
+        if job['ask'].get('kind') == 'consultation':
+            ans += "진척 없음 자문 답이다. 원인 조사 선택이면 반복 대기 대신 막힌 원인·가능한 해결안·권장안을 제시한다. 운영 변경이나 시험 통과 승인으로 해석하지 않는다.\n"
     rules = "\n".join(f"  - {f}" for f in rule_files(job["agent"])) or "  - (없음 — 로컬 AGENTS.md/CLAUDE.md)"
     job["notices"] = [n for n in data.get("notices", []) if node.notice_for(n, job["agent"])][:3]
     notices = "\n\n".join(f"[{n.get('id')}] {n.get('title')}\n{(n.get('body') or '')[:2500]}" for n in job["notices"]) or "(없음)"
@@ -2279,6 +2283,7 @@ def stage_doer(t: dict) -> str | None:
         check=testflow.current((t.get('command') or {}).get('tests',[]))
         if check:
             return 'server-astra' if t.get('test_reset_needed') or check['state'] in ('blocked','passed') else check['assignee']
+        return 'server-astra'
     if t.get("stage") in ("test", "pack", "prep", "deploy") and t.get("stage_owner"):
         return t["stage_owner"]
     if t.get("command_mode") and t.get("stage", "work") == "work":
@@ -2349,8 +2354,9 @@ def run_job(j: dict, data: dict, state: dict) -> bool:
                 return False
     for k in ("skip_reason", "skip_count", "skip_since"):  # 실제로 깨우면 건너뜀 기록은 지운다
         st.pop(k, None)
-    if j["kind"] == "answer" and (j.get("ask") or {}).get("kind") == "stall":
-        st["idle_runs"] = 0  # 아키텍트가 '다시 시도'를 골랐다: 변화 없음 횟수를 처음부터
+    if (j["kind"] == "answer" and (j.get("ask") or {}).get("kind") in ("stall", "consultation")) or j.get("decision"):
+        st["idle_runs"] = 0
+        st.pop("idle_since", None)
     started = now()
     tag = f"{started:%Y%m%d-%H%M%S}-{agent_id}-{t.get('id') or 'answer'}"
     log(f"깨움 {agent_id} ← {t.get('id')} {t.get('title')} · 이유: {j.get('reason')} · {j.get('mode')}")
@@ -2478,6 +2484,13 @@ def run_job(j: dict, data: dict, state: dict) -> bool:
     return True
 
 
+def consultation_wait(st: dict, parts: dict) -> bool:
+    if (st.get("idle_runs") or 0) < IDLE_ALERT_RUNS:
+        return False
+    last = st.get("last_parts") or {}
+    return not last or all(parts.get(k) == last.get(k) for k in ("stage", "mode", "talk", "replies"))
+
+
 def queue_summary(aid: str, data: dict, state: dict) -> dict:
     """이 작업자 차례인 주제가 지금 왜 돌거나 안 도는지 센다(대시보드 작업자 카드에 '쉬는 중' 대신 보여 준다)."""
     runnable, order = set(), []
@@ -2487,7 +2500,7 @@ def queue_summary(aid: str, data: dict, state: dict) -> dict:
         order += [i for i in ids if i not in order]
     answered = {a["id"] for a in data.get("decisions_answered", [])}
     asking = {q.get("task_id") for q in data.get("decisions_needed", []) if q.get("_author") == aid and q["id"] not in answered
-              and q.get("kind") not in ("gate", "stall")}  # AI가 직접 올린 질문만 '답 대기'로 센다
+              and q.get("kind") not in ("gate", "stall", "consultation")}  # 자문 요청은 같은 대기 기록으로 유지한다.
     holds, stamp, today = node.active_holds(CFG), now().isoformat(timespec="seconds"), f"{now():%Y%m%d}"
     out = {"total": 0, "runnable": 0, "waiting_answer": 0, "waiting_change": 0, "retry": 0, "env": 0, "held": 0, "stalled": 0}
     items, stalled, idle, env = {}, [], [], []  # 주제별 판정(대시보드 '다음' 문구가 실행기 판정과 같게) · 멈춘 주제 · 헛도는 주제
@@ -2503,6 +2516,8 @@ def queue_summary(aid: str, data: dict, state: dict) -> dict:
             stalled.append({"topic": t["id"], "reason": st.get("skip_reason"), "since": st.get("skip_since")})
         elif t["id"] in runnable:
             code = "runnable"
+        elif (st.get("idle_runs") or 0) >= IDLE_ALERT_RUNS:
+            code = "waiting_answer"
         elif st.get("env_block") and (st.get("retry_after") or "") > stamp:
             code = "env"  # 같은 실행 실패가 이어져 이 안건만 간격을 둠(다른 주제는 계속 처리)
             env.append({"topic": t["id"], "since": st["env_block"].get("since") or "", "fails": st["env_block"].get("fails"),
@@ -2515,8 +2530,8 @@ def queue_summary(aid: str, data: dict, state: dict) -> dict:
             code = "waiting_change"  # 이미 처리함 — 변화가 없으면 30분(반복 시 2시간) 뒤 실행기가 다시 깨운다(find_jobs)
         items[t["id"]] = code
         out[code] = out.get(code, 0) + 1
-        if (st.get("idle_runs") or 0) >= IDLE_ALERT_RUNS and code != "held" and t["id"] not in asking:
-            # 헛도는 중: 진척 없이 3번 넘게 돌았다 — 멈추지는 않고 간격을 두고 계속 깨운다는 것을 알린다
+        if (st.get("idle_runs") or 0) >= IDLE_ALERT_RUNS and code == "waiting_answer" and t["id"] not in asking:
+            # 자문 답이나 실제 단계 변화가 있을 때 이 안건만 재개한다.
             idle.append({"topic": t["id"], "runs": st["idle_runs"], "since": st.get("idle_since") or "",  # 번호 고정(실행 때마다 바뀌지 않게)
                          "last": ((st.get("last_result") or {}).get("summary") or "")[:200], "next": st.get("retry_after"),
                          "every": 30 if st["idle_runs"] <= 4 else 120})

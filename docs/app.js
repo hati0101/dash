@@ -1056,7 +1056,7 @@ function myQueue() {
   const done = k => S.acks.has(k) || S.serverAcks?.has(k);
   const decisions = (data.decisions_needed || []).filter(q => !d.answers[q.id]);
   const tests = (data.meta.command_epoch ? [] : d.tasks).filter(t => t.stage !== 'done' && (t.stage === 'user_test' || t.waiting_on === 'user') && !done(`mine-test:${t.id}:${t.updated_at}`));
-  const actions = (data.user_actions || []).filter(a => !done(`ua:${a.id}`) && (!data.meta.command_epoch || a.kind === 'health' || d.topics.some(t => !t.archived && t.id === a.task_id)));
+  const actions = (data.user_actions || []).filter(a => !a.id?.startsWith('command-conflict-') && !done(`ua:${a.id}`) && (!data.meta.command_epoch || a.kind === 'health' || d.topics.some(t => !t.archived && t.id === a.task_id)));
   const questions = [];
   for (const t of d.topics) {
     const lastUser = Math.max(0, ...commentsFor({ kind: 'topic', id: t.id }).filter(c => c.by === 'user').map(c => toMs(c.ts) || 0));
@@ -1243,7 +1243,7 @@ function stuckRows(kind) {
   const rows = [];
   for (const a of S.data?.agents || []) for (const s of (a.queue || {})[kind === 'env' ? 'env_blocked' : 'idle'] || []) {
     const t = topicById(s.topic);
-    if (t) rows.push({ a, s, t });
+    if (t && t.status === 'active' && t.turn === a.id && !t.live_session && !t.deploy_session) rows.push({ a, s, t });
   }
   return rows;
 }
@@ -1253,13 +1253,17 @@ function showStuck(kind) {
   const env = kind === 'env';
   drawer(env ? `환경 차단 ${rows.length}건` : `진척 없음 ${rows.length}건`,
     h('p', { class: 'muted' }, env ? '같은 실행 실패가 이어져 이 안건만 간격을 두고 다시 시도합니다. 다른 주제는 계속 처리합니다.'
-      : '같은 주제를 여러 번 실행했지만 바뀐 것이 없습니다. 멈추지 않고 간격을 두고 다시 깨웁니다.'),
+      : '같은 시도는 멈췄습니다. 자문 요청에서 방향을 정하면 해당 안건을 이어갑니다.'),
     rows.map(({ a, s, t }) => h('div', { class: 'card', style: { 'margin-top': '8px' } },
       h('div', { class: 'row' }, h('b', { class: 'grow clamp-1' }, t.title), h('button', { class: 'btn sm', onclick: () => openTopic(t) }, '주제 열기')),
       h('p', { class: 'muted' }, `담당 ${person(a.id).full} · ` + (env ? `실행 실패 ${s.fails || 3}회 연속${s.since ? ` · ${fmtRel(s.since)}부터` : ''}` : `${s.runs}회 연속 진척 없음${s.since ? ` · ${fmtRel(s.since)}부터` : ''}`)),
       env ? h('p', null, `막힌 이유: ${s.error || '원인 미상'}`) : (s.last ? h('p', null, `마지막 결과: ${s.last}`) : null),
       h('p', { class: 'muted' }, '재개 조건: ' + (env ? `다음 시도 ${s.next ? fmtAbs(s.next) : '곧'} · 새 입력(아키텍트 답·메모, 다른 작업자 기록)이 오면 바로 · 성공하면 풀림`
-        : `${s.every >= 120 ? '2시간' : '30분'}마다 다시 깨움 · 새 입력(아키텍트 답·메모, 다른 작업자 기록)이 오면 바로`)))));
+        : '자문 답·새 지시 또는 실제 작업 단계 변화')),
+      !env ? h('button', { class: 'btn', onclick: () => {
+        const q = (S.data.decisions_needed || []).find(q => q.kind === 'consultation' && q.task_id === t.id);
+        if (q) openDecisionNeeded(q); else { toast('자문 요청 동기화 중입니다. 주제에 방향을 남길 수도 있습니다.'); openTopic(t); }
+      } }, '자문 요청 보기') : null)));
 }
 // ★4 시험 묶음(보고서 6번): 여러 ★4 주제를 대화 한 번에 반영·빌드·시험한다
 // 빌드 성공 기록이 있을 때만 '빌드 있음'(파일 SHA256만 적힌 요약이나 '아직 빌드 안 함'은 반영·빌드 필요)
@@ -1310,7 +1314,7 @@ function mineDetail(it, redraw) {
   if (it.type === 'decision') return { eyebrow: '결정·승인 요청', ...decisionParts(it.ref, redraw) };
   if (it.type === 'question') return { eyebrow: 'AI 질문', ...questionParts(it.topic, it.ref, redraw) };
   if (it.type === 'test') return { eyebrow: '실게임·확인 대기', ...testParts(it.ref, it.topic, redraw) };
-  if (it.type === 'action' && it.ref.kind === 'conflict') return { eyebrow: '할 일 · 중복 착수', ...conflictParts(it.topic, redraw) };
+  if (it.type === 'action' && it.ref.kind === 'conflict' && (it.topic?.conflict || []).length) return { eyebrow: '할 일 · 중복 착수', ...conflictParts(it.topic, redraw) };
   if (it.type === 'action') return { eyebrow: '할 일', ...actionParts(it.ref, it.topic, redraw) };
   return { eyebrow: '착수 고르기 · 미처리 주제', ...backlogParts(it.ref, redraw) };
 }
@@ -2660,9 +2664,9 @@ function topicPhase(t) {
   return { cls: 'progress', icon: 'play', label: `${t.step ? '2/9 ' : ''}진행 중 · ${name(who)}`, detail: partial.slice(3) || null, next: `${name(who)} — ${QUEUE_NEXT[qc] || '다음 동기화 때 이어서'}` };
 }
 // 실행기가 올린 주제별 판정(작업자 기록 queue.items). '다음' 문구를 실행기 실제 판정과 같게 한다
-const QUEUE_NEXT = { runnable: '다음 동기화 때 이어서', retry: '간격을 두고 다시 깨움(실패 뒤 10~30분 · 진척 없으면 30분~2시간)',
+const QUEUE_NEXT = { runnable: '다음 동기화 때 이어서', retry: '실행 실패 뒤 간격을 두고 재시도',
   env: '환경 차단 — 같은 실행 실패가 이어져 이 안건만 1시간 간격(새 입력이 오면 바로), 다른 주제는 계속',
-  waiting_answer: '아키텍트 답을 기다림', waiting_change: '이 단계는 처리함 — 변화가 없으면 30분(반복 시 2시간) 뒤 자동으로 다시 깨움', held: '대화 세션이 처리 중' };
+  waiting_answer: '아키텍트 답을 기다림', waiting_change: '변화 확인 대기 · 연속 3회 진척이 없으면 자문 요청', held: '대화 세션이 처리 중' };
 function queueOf(t) { return ((S.data.agents || []).find(a => a.id === t.turn) || {}).queue || null; }
 function queueCode(t) { const q = queueOf(t); return q && q.items ? q.items[t.id] || null : null; }
 function stallOf(t) { const q = queueOf(t); return q && (q.stalled || []).find(x => x.topic === t.id) || null; }
@@ -3371,7 +3375,10 @@ function commandBox(t) {
       x.feedback ? h('p', null, (x.accepted_acting_for ? '개발컴 대행 검수: ' : 'Astra 검토: ') + x.feedback) : null,
       x.result ? [h('p', null, x.result.summary), h('details', null, h('summary', null, `검증 근거 ${(x.result.evidence || []).length}개`),
         (x.result.evidence || []).map(e => h('p', { class: 'mono' }, e.path + ' · SHA256 ' + e.sha256)))] : null)),
-    t.command?.rejected?.length ? h('p', { class: 'hint' }, '낡거나 중복된 응답은 적용하지 않았습니다. 전체 기록에서 확인할 수 있습니다.') : null);
+    t.command?.rejected?.length ? h('details', { class: 'command-task' },
+      h('summary', null, `적용하지 않은 과거 응답 ${t.command.rejected.length}건`),
+      h('p', { class: 'hint' }, '당시 작업 상태와 맞지 않아 적용하지 않은 기록입니다. 담당자를 다시 선택할 필요는 없습니다.'),
+      t.command.rejected.map(x => h('p', null, `${fmtAbs(x.ts)} · ${person(x.agent).full} · ${x.reason}`))) : null);
 }
 // 진행 9단계 + 보관·완료. 세 번째 값은 짧은 툴팁(화면 본문에는 쓰지 않는다)
 const FLOW_STAGES = [
