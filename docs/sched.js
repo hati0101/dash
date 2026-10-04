@@ -14,7 +14,7 @@ const SMAP = Object.fromEntries(STATUS.map(s => [s.k, s]));
 const PRI = { high: '높음', normal: '보통', low: '낮음' };
 const DAYS = ['일', '월', '화', '수', '목', '금', '토'];
 const S = { env: null, key: null, sha: null, remote: [], tasks: [], queue: [], saving: false, syncText: '', syncErr: false,
-  q: '', day: null, area: null, weekOff: 0, open: null, quick: false, showDone: 12, showHold: 20, token: null };
+  view: 'list', status: 'all', q: '', day: null, area: null, weekOff: 0, open: null, quick: false, showDone: 12, showHold: 20, token: null };
 
 // ---------- 유틸
 const $ = s => document.querySelector(s);
@@ -33,6 +33,20 @@ function h(tag, a, ...kids) {
   }
   for (const c of kids.flat(Infinity)) if (c != null && c !== false) el.append(c instanceof Node ? c : document.createTextNode(String(c)));
   return el;
+}
+const ICONS = {
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  theme: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l2 2m10 10 2 2M5 19l2-2M17 7l2-2"/>',
+  lock: '<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
+  close: '<path d="m6 6 12 12M18 6 6 18"/>',
+  settings: '<path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/>',
+  list: '<path d="M9 6h12M9 12h12M9 18h12M3 6h1M3 12h1M3 18h1"/>',
+  board: '<rect x="3" y="4" width="7" height="16" rx="2"/><rect x="14" y="4" width="7" height="11" rx="2"/>',
+};
+function icon(name) {
+  const el = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  for (const [k,v] of Object.entries({viewBox:'0 0 24 24',fill:'none',stroke:'currentColor','stroke-width':'1.8','stroke-linecap':'round','stroke-linejoin':'round','aria-hidden':'true'})) el.setAttribute(k,v);
+  el.innerHTML = ICONS[name] || ''; return el;
 }
 const pad = n => String(n).padStart(2, '0');
 const ymd = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -184,15 +198,18 @@ function shell() {
       h('span', { class: 'today', id: 'today' }), h('span', { class: 'sync', id: 'sync' }, S.syncText),
       h('span', { class: 'grow' }),
       h('label', { class: 'search' }, h('input', { id: 'q', type: 'search', placeholder: '작업 검색', autocomplete: 'off', 'aria-label': '작업 검색' }), h('span', { class: 'kbd' }, '/')),
-      h('button', { class: 'btn icon-btn ghost', id: 'theme', type: 'button', 'aria-label': '밝기 전환', title: '밝기 전환' }, '◐'),
-      h('button', { class: 'btn icon-btn ghost', id: 'lockbtn', type: 'button', 'aria-label': '잠그기', title: '잠그기' }, '⏻'),
-      h('button', { class: 'btn primary', id: 'new', type: 'button' }, '+ 새 작업 ', h('span', { class: 'kbd' }, 'N'))),
+      h('button', { class: 'btn icon-btn ghost', id: 'theme', type: 'button', 'aria-label': '밝기 전환', title: '밝기 전환' }, icon('theme')),
+      h('button', { class: 'btn icon-btn ghost', id: 'lockbtn', type: 'button', 'aria-label': '잠그기', title: '잠그기' }, icon('lock')),
+      h('button', {class:'btn icon-btn ghost', id:'settings', type:'button', 'aria-label':'저장 설정', title:'저장 설정'}, icon('settings')),
+      h('button', { class: 'btn primary', id: 'new', type: 'button' }, icon('plus'), '새 작업 ', h('span', { class: 'kbd' }, 'N'))),
     h('div', { id: 'tokenbox', class: 'banner', hidden: true }),
     h('div', { class: 'summary', id: 'summary' }),
-    h('section', { 'aria-label': '이번 주 일정' }, h('div', { class: 'week', id: 'week' })),
+    h('details', {class:'schedule'}, h('summary', null, '주간 일정', h('span',null,'날짜로 작업 찾기')), h('div', { class: 'week', id: 'week' })),
     h('div', { class: 'filterbar', id: 'filterbar', hidden: true }),
+    h('nav', {id:'viewbar', class:'viewbar', 'aria-label':'작업 보기'}),
     h('main', { class: 'board', id: 'board', 'aria-label': '작업 보드' }));
   $('#new').onclick = newTask;
+  $('#settings').onclick = () => { if ($('#tokenbox').hidden) showTokenBox(); else $('#tokenbox').hidden = true; };
   $('#q').addEventListener('input', e => { S.q = e.target.value; renderBoard(); });
   $('#theme').onclick = () => { const r = document.documentElement; const next = r.dataset.theme === 'light' ? 'dark' : 'light'; r.dataset.theme = next; store.set('theme', next); };
   $('#lockbtn').onclick = lockNow;
@@ -205,7 +222,7 @@ function renderTop() {
   $('#summary').replaceChildren(
     ...STATUS.filter(s => s.k !== 'done').map(s => h('span', { class: 'pill' }, h('i', { class: 'dot', css: { '--c': s.c } }), s.name, h('b', null, cnt(s.k)))),
     h('span', { class: 'pill' }, h('i', { class: 'dot', css: { '--c': 'var(--accent)' } }), '오늘 마감', h('b', null, dueToday)),
-    late ? h('span', { class: 'pill warn' }, h('i', { class: 'dot', css: { '--c': 'var(--late)' } }), '기한 지남', h('b', null, late)) : null);
+    ...(late ? [h('span', { class: 'pill warn' }, h('i', { class: 'dot', css: { '--c': 'var(--late)' } }), '기한 지남', h('b', null, late))] : []));
 }
 function weekDays() {
   const base = new Date(); base.setHours(0, 0, 0, 0);
@@ -256,7 +273,22 @@ function card(t) {
   return el;
 }
 function renderBoard() {
-  const vis = visible();
+  renderViewbar();
+  const vis = visible().filter(t => S.status === 'all' || (t.status || 'todo') === S.status);
+  $('#board').classList.toggle('list-view', S.view === 'list');
+  if (S.view === 'list') {
+    const rows = sortTasks(vis, S.status).map(t => {
+      const st = SMAP[t.status] || SMAP.todo, due = dueLabel(t.due);
+      return h('button', {type:'button',class:'task-row',onclick:()=>openDrawer(t.id)},
+        h('span',{class:'task-main'},h('strong',null,t.title || '(제목 없음)'),h('span',{class:'row-area'},t.area || '미분류')),
+        h('span',{class:'row-status'},h('i',{class:'dot',css:{'--c':st.c}}),st.name),
+        h('span',{class:'row-priority '+(t.priority || 'normal')},PRI[t.priority] || '보통'),
+        h('span',{class:'row-due '+(due?.cls || '')},due ? due.txt+' 마감' : '일정 없음'));
+    });
+    $('#board').replaceChildren(h('div',{class:'list-head'},h('span',null,`작업 ${vis.length}개`),h('span',null,'상태'),h('span',null,'중요도'),h('span',null,'마감일')),
+      ...(rows.length ? rows : [h('div',{class:'empty'},'표시할 작업이 없습니다. 검색어나 필터를 바꿔보세요.')]));
+    return;
+  }
   $('#board').replaceChildren(...STATUS.map(s => {
     let list = sortTasks(vis.filter(t => (t.status || 'todo') === s.k), s.k);
     const total = list.length, cap = s.k === 'done' ? S.showDone : s.k === 'hold' ? S.showHold : Infinity;
@@ -284,9 +316,15 @@ function renderBoard() {
   }));
 }
 
+function renderViewbar() {
+  $('#viewbar').replaceChildren(
+    h('div',{class:'status-tabs'},... [{k:'all',name:'전체'},...STATUS].map(st=>h('button',{type:'button',class:'status-tab','aria-pressed':S.status===st.k?'true':'false',onclick:()=>{S.status=st.k;renderBoard();}},st.name,h('span',null,st.k==='all'?S.tasks.length:S.tasks.filter(t=>(t.status||'todo')===st.k).length)))),
+    h('div',{class:'view-switch'},...['list','board'].map(v=>h('button',{type:'button',class:'btn','aria-pressed':S.view===v?'true':'false',onclick:()=>{S.view=v;renderBoard();}},icon(v),v==='list'?'목록':'보드'))));
+}
+
 // ---------- 상세 창
 let drawerEl = null, scrimEl = null;
-function closeDrawer() { S.open = null; drawerEl?.remove(); scrimEl?.remove(); drawerEl = scrimEl = null; renderBoard(); }
+function closeDrawer() { document.body.classList.remove('detail-open'); S.open = null; drawerEl?.remove(); scrimEl?.remove(); drawerEl = scrimEl = null; renderBoard(); }
 function openDrawer(id) { S.open = id; renderBoard(); renderDrawer(true); }
 function renderDrawer(fresh) {
   const t = find(S.tasks, S.open);
@@ -317,7 +355,7 @@ function renderDrawer(fresh) {
   memo.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); addMemo(); } });
   drawerEl = h('aside', { class: 'drawer', role: 'dialog', 'aria-label': '작업 상세' },
     h('div', { class: 'dr-head' }, h('span', { class: 'id' }, `${t.id} · 수정 ${when(t.updated)}`), h('span', { class: 'grow' }),
-      h('button', { class: 'btn icon-btn ghost', type: 'button', 'aria-label': '닫기', onclick: closeDrawer }, '✕')),
+      h('button', { class: 'btn icon-btn ghost', type: 'button', 'aria-label': '닫기', onclick: closeDrawer }, icon('close'))),
     h('div', { class: 'dr-body' }, title, h('div', { class: 'statusrow', id: 'statusrow' }),
       h('div', { class: 'fields' },
         h('div', { class: 'field' }, h('label', { for: 'f-start' }, '시작일'), start),
@@ -329,8 +367,9 @@ function renderDrawer(fresh) {
       h('div', { class: 'memo' }, memo, h('div', { class: 'row' }, h('span', null, 'Ctrl+Enter'), h('button', { class: 'btn sm', type: 'button', onclick: addMemo }, '기록 남기기')))),
     h('div', { class: 'dr-foot' }, h('button', { class: 'btn danger ghost', type: 'button', onclick: () => removeTask(t.id) }, '삭제'), h('span', { class: 'grow' }), h('span', { class: 'sync' }, '자동 저장')));
   document.body.append(scrimEl, drawerEl);
+  document.body.classList.add('detail-open');
   drawerEl.querySelector('.dr-body').scrollTop = keep;
-  fit(); refreshLog(t); refreshStatus(t);
+  fit(); const fitDetail = () => { detail.style.height='auto'; detail.style.height=detail.scrollHeight+'px'; }; fitDetail(); detail.addEventListener('input',fitDetail); refreshLog(t); refreshStatus(t);
   if (fresh && !t.title) title.focus();
 }
 function refreshStatus(t) {
@@ -399,7 +438,7 @@ async function enter() {
   S.token = await tokenGet();
   shell();
   try { await pull(); setSync(S.token ? '최신' : '읽기 전용'); } catch (e) { setSync('불러오기 실패: ' + e.message, true); }
-  if (!S.token) showTokenBox();
+  // 저장 연결은 상단 설정에서 열기
   render();
   setInterval(async () => {  // 다른 기기 변경 확인
     if (S.saving || S.queue.length || document.hidden) return;

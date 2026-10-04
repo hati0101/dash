@@ -1,6 +1,6 @@
 // 앱 설치(PWA)용 서비스 워커. 항상 네트워크를 먼저 쓰고, 오프라인일 때만 저장해 둔 화면 껍데기를 보여준다.
 // 암호화된 데이터(data.enc.json)와 GitHub API 요청은 저장하지 않는다.
-const CACHE = 'real-ops-shell-v3';
+const CACHE = 'real-ops-shell-v4';
 const SHELL = ['./', './index.html', './favicon.ico', './icon-192.png', './manifest.webmanifest'];
 
 self.addEventListener('install', e => {
