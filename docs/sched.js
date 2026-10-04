@@ -122,6 +122,36 @@ async function fetchRemote() {
   if (!r.ok) throw new Error('데이터 파일을 받지 못했습니다 (' + r.status + ')');
   return { sha: null, env: await r.json() };
 }
+async function pullUsage() {
+  try {
+    let env;
+    if (S.token) {
+      const r = await fetch(`https://api.github.com/repos/${REPO}/contents/docs/usage.enc.json?ref=${BRANCH}&t=${Date.now()}`, { headers: { Authorization: `Bearer ${S.token}`, Accept: 'application/vnd.github+json' }, cache: 'no-store' });
+      if (!r.ok) return;
+      env = JSON.parse(atob((await r.json()).content.replace(/\s/g, '')));
+    } else {
+      const r = await fetch('usage.enc.json?t=' + Date.now(), { cache: 'no-store' }); if (!r.ok) return; env = await r.json();
+    }
+    S.usage = await openEnv(env, S.key);
+    if ($('#usage')) renderUsage();
+  } catch { /* 사용량은 없어도 된다 */ }
+}
+function ago(iso) { const m = Math.round((Date.now() - Date.parse(iso)) / 60000); return isNaN(m) ? '' : m < 1 ? '방금' : m < 60 ? `${m}분 전` : m < 1440 ? `${Math.round(m / 60)}시간 전` : `${Math.round(m / 1440)}일 전`; }
+function resetIn(iso) { const m = Math.round((Date.parse(iso) - Date.now()) / 60000); if (isNaN(m)) return ''; if (m <= 0) return '초기화됨'; return m < 60 ? `${m}분 뒤` : m < 1440 ? `${Math.floor(m / 60)}시간 ${m % 60}분 뒤` : `${Math.floor(m / 1440)}일 ${Math.round((m % 1440) / 60)}시간 뒤`; }
+function renderUsage() {
+  const box = $('#usage'); if (!box) return;
+  const u = S.usage;
+  if (!u) { box.replaceChildren(h('div', { class: 'u-empty' }, '사용량 정보 없음')); return; }
+  const bar = (label, w) => !w ? null : h('div', { class: 'u-row', title: w.resets_at ? `초기화 ${resetIn(w.resets_at)} (${w.resets_at.slice(5, 16).replace('T', ' ')})` : '' },
+    h('span', { class: 'u-l' }, label), h('span', { class: 'u-bar' }, h('i', { css: { width: Math.min(100, w.pct) + '%', '--c': w.pct >= 90 ? 'var(--late)' : w.pct >= 70 ? 'var(--review)' : 'var(--accent)' } })),
+    h('span', { class: 'u-p' }, `${w.pct}%`));
+  box.replaceChildren(...u.accounts.map(a => h('div', { class: 'u-acc' },
+    h('div', { class: 'u-name' }, h('b', null, a.name), a.plan ? h('span', null, String(a.plan).toUpperCase()) : null),
+    a.error ? h('div', { class: 'u-empty' }, a.error) : null,
+    bar('5시간', a.five_hour), bar('주간', a.seven_day),
+    a.five_hour && !a.seven_day ? null : null)),
+    h('div', { class: 'u-foot', title: `개발컴이 15분마다 올림 · 마지막 ${u.updated_at}` }, `${ago(u.updated_at)} 기준`));
+}
 async function pull() {
   const { sha, env } = await fetchRemote();
   if (sha && sha === S.sha) return false;
@@ -335,6 +365,8 @@ function renderSide() {
       });
       return dropTarget(b, ids => bulkPatch(ids, { area: a === '분류 없음' ? '' : a }, `분류 ${a}`));
     }),
+    h('div', { class: 'sec' }, '사용량 · 개발컴'),
+    h('div', { class: 'usage', id: 'usage' }),
     h('div', { class: 'sec' }, '이번 주'),
     h('div', { class: 'mini' }, weekRange().map(d => {
       const k = ymd(d), due = S.tasks.filter(t => t.due === k && t.status !== 'done');
@@ -571,7 +603,7 @@ function renderBulk() {
     del,
     h('button', { class: 'btn', type: 'button', onclick: () => { S.sel.clear(); renderRows(); renderBulk(); } }, '선택 해제'));
 }
-function render() { if (!$('#rows')) return; renderSide(); renderRows(); renderBulk(); renderPane(false); }
+function render() { if (!$('#rows')) return; renderSide(); renderUsage(); renderRows(); renderBulk(); renderPane(false); }
 
 // ---------- 토큰 안내 (저장하려면 Contents 쓰기 권한 토큰 필요)
 function showTokenBox(reason) {
@@ -628,6 +660,8 @@ async function enter() {
   shell();
   try { await pull(); S.syncText = S.token ? '최신 상태' : '읽기 전용'; } catch (e) { S.syncText = '불러오기 실패: ' + e.message; S.syncKind = 'err'; }
   render();
+  pullUsage();
+  setInterval(pullUsage, 300000);
   setInterval(async () => {  // 다른 기기 변경 확인
     if (S.saving || S.queue.length || document.hidden) return;
     try { if (await pull()) render(); } catch { /* 다음에 다시 */ }

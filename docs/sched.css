@@ -262,3 +262,15 @@ textarea.f-detail:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var
 .resizer:hover::after, body.resizing .resizer::after { background: var(--accent); }
 body.resizing { cursor: col-resize; user-select: none; }
 body.resizing * { cursor: col-resize !important; }
+
+/* 사용량 */
+.usage { display: flex; flex-direction: column; gap: 8px; padding: 2px 6px 4px; }
+.u-acc { display: flex; flex-direction: column; gap: 4px; }
+.u-name { display: flex; align-items: baseline; gap: 6px; font-size: 12.5px; }
+.u-name b { color: var(--ink-2); font-weight: 600; }
+.u-name span { font: 10px var(--mono); color: var(--ink-4); border: 1px solid var(--line-2); border-radius: 4px; padding: 0 4px; }
+.u-row { display: grid; grid-template-columns: 34px 1fr 34px; align-items: center; gap: 6px; font-size: 11px; color: var(--ink-3); }
+.u-bar { height: 6px; border-radius: 3px; background: var(--raise-2); overflow: hidden; }
+.u-bar i { display: block; height: 100%; background: var(--c); border-radius: 3px; }
+.u-p { font: 11px var(--mono); color: var(--ink-2); text-align: right; }
+.u-empty, .u-foot { font-size: 11px; color: var(--ink-4); }
