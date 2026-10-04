@@ -6,7 +6,7 @@ const API = `https://api.github.com/repos/${REPO}/contents/${PATH}`;
 const STATUS = [
   { k: 'todo', name: '대기', c: 'var(--todo)', ring: '' },
   { k: 'doing', name: '진행 중', c: 'var(--doing)', ring: 'half' },
-  { k: 'review', name: '확인 대기', c: 'var(--review)', ring: 'half' },
+  { k: 'review', name: '검토', c: 'var(--review)', ring: 'half' },
   { k: 'hold', name: '보류', c: 'var(--hold)', ring: 'pause' },
   { k: 'done', name: '완료', c: 'var(--done)', ring: 'full' },
 ];
@@ -317,7 +317,7 @@ function weekRange() {
 function inView(t) {
   const today = todayStr();
   if (S.day) return t.due === S.day || t.start === S.day;
-  if (S.view === 'pubdoing') return !!t.public && t.status === 'doing';
+  if (S.view === 'pubdoing') return t.public === true && !!SMAP[t.status];
   if (S.view === 'pub') return !!t.public;
   if (S.view === 'today') return t.status !== 'done' && (t.due === today || (t.status === 'doing') || isLate(t));
   if (S.view === 'week') { const w = weekRange().map(ymd); return t.status !== 'done' && t.due && t.due >= w[0] && t.due <= w[6]; }
@@ -392,8 +392,8 @@ function renderSide() {
       });
       return dropTarget(b, ids => bulkPatch(ids, { area: a === '분류 없음' ? '' : a }, `분류 ${a}`));
     }),
-    h('div', { class: 'sec sec-row' }, h('span', null, '디스코드'), h('button', { class: 'pub-btn', type: 'button', title: '진행 중 + 공개 작업을 개발 현황 채널에 발행', onclick: openPublishModal }, '발행')),
-    navBtn('발행 대상', S.tasks.filter(t => t.public && t.status === 'doing').length, S.view === 'pubdoing', pick({ view: 'pubdoing', status: null, area: null }), h('span', { class: 'ico disc' }, '●')),
+    h('div', { class: 'sec sec-row' }, h('span', null, '디스코드'), h('button', { class: 'pub-btn', type: 'button', title: '공개 작업을 상태별로 개발 현황 채널에 발행', onclick: openPublishModal }, '발행')),
+    navBtn('발행 대상', S.tasks.filter(t => t.public === true && SMAP[t.status]).length, S.view === 'pubdoing', pick({ view: 'pubdoing', status: null, area: null }), h('span', { class: 'ico disc' }, '●')),
     navBtn('공개 체크 전체', S.tasks.filter(t => t.public).length, S.view === 'pub', pick({ view: 'pub', status: null, area: null }), h('span', { class: 'ico disc' }, '○')),
     h('div', { class: 'sec' }, '사용량 · 개발컴'),
     h('div', { class: 'usage', id: 'usage' }),
@@ -562,7 +562,7 @@ function renderEdit(fresh) {
           h('label', { for: 'f-pub' }, '디스코드'), (() => {
             const cb = h('input', { type: 'checkbox', id: 'f-pub', class: 'pub-cb' }); cb.checked = !!t.public;
             cb.addEventListener('change', () => patchTask(t.id, { public: cb.checked }, `"${t.title}" 디스코드 ${cb.checked ? '공개' : '비공개'}`));
-            return h('label', { class: 'pub-row', for: 'f-pub' }, cb, h('span', null, '진행 중일 때 개발 현황 채널에 공개'));
+            return h('label', { class: 'pub-row', for: 'f-pub' }, cb, h('span', null, '상태와 관계없이 개발 현황 채널에 공개'));
           })(),
           h('label', { for: 'f-pubtitle' }, '공개 제목'), (() => { const el = inp('f-pubtitle', 'text', t.pubTitle, 'pubTitle', '공개 제목', v => v.trim()); el.placeholder = '비우면 제목 그대로'; return el; })(),
           ),
@@ -656,17 +656,26 @@ function renderBulk() {
     h('button', { class: 'btn', type: 'button', onclick: () => { S.sel.clear(); renderRows(); renderBulk(); } }, '선택 해제'));
 }
 function discordText() {
-  const now = new Date(), rows = S.tasks.filter(t => t.public && t.status === 'doing');
-  const head = `REAL 개발 현황 (${now.getMonth() + 1}월 ${now.getDate()}일 ${pad(now.getHours())}:${pad(now.getMinutes())} 갱신)\n`;
+  const rows = S.tasks.filter(t => t.public === true && SMAP[t.status]);
+  const stamp = new Intl.DateTimeFormat('ko-KR', { timeZone: 'Asia/Seoul', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date());
+  const head = `REAL 개발 현황 (${stamp} 갱신)\n`;
   if (!rows.length) return { text: head + '\n지금 공개 중인 개발 항목이 없습니다.', count: 0 };
-  const g = new Map(); for (const t of rows) { const a = t.area || '기타'; if (!g.has(a)) g.set(a, []); g.get(a).push((t.pubTitle || t.title || '').trim()); }
-  const body = []; let shown = 0;
-  for (const [a, items] of [...g.entries()].sort((x, y) => y[1].length - x[1].length)) {
-    const block = `\n[${a}]\n` + items.sort((x, y) => x.localeCompare(y, 'ko')).map(x => `- ${x}`).join('\n');
-    if ((head + body.join('\n') + block).length > 1900) break;
-    body.push(block); shown += items.length;
-  }
-  return { text: head + body.join('\n') + (rows.length > shown ? `\n\n외 ${rows.length - shown}건 진행 중` : ''), count: rows.length };
+  const groups = ['doing', 'review', 'todo', 'hold', 'done'].map(k => ({ name: SMAP[k].name, items: rows.filter(t => t.status === k) })).filter(g => g.items.length);
+  const summary = groups.map(g => `${g.name} ${g.items.length}건`).join(' · ');
+  // Reserve space for every status so a long group cannot hide the others.
+  const budget = Math.floor((1900 - head.length - summary.length - 2) / groups.length);
+  const blocks = groups.map(g => {
+    let block = `[${g.name}] ${g.items.length}건`, shown = 0;
+    const titles = g.items.map(t => (t.pubTitle || t.title || '').trim().replace(/[\r\n]+/g, ' ') || '(제목 없음)').sort((a, b) => a.localeCompare(b, 'ko'));
+    for (const title of titles) {
+      const line = '\n- ' + title;
+      if (block.length + line.length + 40 > budget) break;
+      block += line; shown++;
+    }
+    if (shown < titles.length) block += `\n외 ${titles.length - shown}건 (길이 제한으로 생략)`;
+    return block;
+  });
+  return { text: head + summary + '\n\n' + blocks.join('\n\n'), count: rows.length };
 }
 async function requestPublish(text, count) {
   if (!S.token) { showTokenBox('발행하려면 저장 토큰이 필요합니다'); return false; }
@@ -687,7 +696,7 @@ function openPublishModal() {
   go.onclick = async () => { go.disabled = true; go.textContent = '보내는 중…'; if (await requestPublish(text, count)) { closeNewModal(); toast(`발행 요청을 보냈습니다 (${count}건) · 서버컴 봇이 디스코드에 반영합니다`); } else { go.disabled = false; go.textContent = '발행'; } };
   const card = h('div', { class: 'm-card', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'p-h' },
     h('div', { class: 'm-head' }, h('h2', { id: 'p-h' }, '디스코드 발행'), h('span', { class: 'grow' }), h('button', { class: 'ibtn', type: 'button', 'aria-label': '닫기', onclick: closeNewModal }, icon('close', 16))),
-    h('div', { class: 'm-body' }, h('div', { class: 'm-l' }, `개발 현황 채널의 메시지 하나를 이 글로 바꿉니다 · 진행 중 + 공개 ${count}건`), pre),
+    h('div', { class: 'm-body' }, h('div', { class: 'm-l' }, `개발 현황 채널의 메시지 하나를 이 글로 바꿉니다 · 전체 상태 · 공개 ${count}건`), pre),
     h('div', { class: 'm-foot' }, h('span', { class: 'grow' }), h('button', { class: 'btn', type: 'button', onclick: closeNewModal }, '취소'), go));
   modalEl = h('div', { class: 'm-scrim', onmousedown: e => { if (e.target === modalEl) closeNewModal(); } }, card);
   modalEl.addEventListener('keydown', e => { e.stopPropagation(); if (e.key === 'Escape') closeNewModal(); });
@@ -737,7 +746,7 @@ function openNewModal() {
         h('div', null, h('label', { class: 'm-l', for: 'm-start' }, '시작일'), start)),
       h('div', { class: 'm-l' }, '중요도'), seg([['high', '높음', h('span', { class: 'flag' }, '▲')], ['normal', '보통'], ['low', '낮음']], 'priority'),
       h('div', { class: 'm-l' }, '상태'), seg(STATUS.map(s => [s.k, s.name, ring(s.k, '12px')]), 'status'),
-      h('label', { class: 'm-pub', for: 'm-pub' }, pub, '디스코드 공개(진행 중일 때 개발 현황 채널에 보임)'), pubTitle),
+      h('label', { class: 'm-pub', for: 'm-pub' }, pub, '디스코드 공개(모든 상태가 개발 현황 채널에 보임)'), pubTitle),
     h('div', { class: 'm-foot' }, h('label', { class: 'm-cont', for: 'm-cont' }, cont, '계속 추가'), h('span', { class: 'grow' }),
       h('span', { class: 'kbd' }, 'Ctrl+Enter'), h('button', { class: 'btn', type: 'button', onclick: closeNewModal }, '취소'), h('button', { class: 'btn primary', type: 'button', onclick: submit }, '추가')));
   modalEl = h('div', { class: 'm-scrim', onmousedown: e => { if (e.target === modalEl) closeNewModal(); } }, card);
