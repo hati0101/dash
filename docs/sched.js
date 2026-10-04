@@ -765,7 +765,7 @@ document.addEventListener('keydown', e => {
   else if (e.key === 'ArrowDown' || e.key === 'j') { e.preventDefault(); moveFocus(1); }
   else if (e.key === 'ArrowUp' || e.key === 'k') { e.preventDefault(); moveFocus(-1); }
   else if (e.key === 'Enter' && S.focus) { e.preventDefault(); openTask(S.focus); }
-  else if (/^[1-5]$/.test(e.key) && (S.open || S.focus)) { e.preventDefault(); setStatus(S.open || S.focus, STATUS[+e.key - 1].k); }
+  else if (/^[1-5]$/.test(e.key) && (S.open || S.sel.size || S.focus)) { e.preventDefault(); const k = STATUS[+e.key - 1].k; if (S.open) setStatus(S.open, k); else if (S.sel.size) bulkStatus(k); else setStatus(S.focus, k); }
 });
 window.addEventListener('beforeunload', e => { if (S.queue.length || S.saving) { e.preventDefault(); e.returnValue = ''; } });
 boot();
