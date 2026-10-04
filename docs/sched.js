@@ -151,7 +151,7 @@ function setSync(t, err = false) { S.syncText = t; S.syncErr = err; const el = $
 const find = (list, id) => list.find(x => x.id === id);
 function createTask(f) {
   const now = new Date().toISOString(), id = newId();
-  const t = { id, title: f.title || '', detail: f.detail || '', status: f.status || 'todo', due: f.due || '', priority: f.priority || 'normal', area: f.area || '', log: [], created: now, updated: now };
+  const t = { id, title: f.title || '', detail: f.detail || '', status: f.status || 'todo', start: f.start || todayStr(), due: f.due || '', priority: f.priority || 'normal', area: f.area || '', log: [], created: now, updated: now };
   mutate(list => { if (!find(list, id)) list.push(clone(t)); }, `추가 "${t.title || '새 작업'}"`);
   return id;
 }
@@ -249,7 +249,8 @@ function card(t) {
     h('span', { class: 't' }, t.priority === 'high' ? h('span', { class: 'pri', title: '중요도 높음' }, '●') : null, t.title || '(제목 없음)'),
     (t.area || due || t.priority === 'low') ? h('span', { class: 'meta' }, t.area ? h('span', { class: 'tag' }, t.area) : null,
       due ? h('span', { class: `due ${t.status === 'done' ? '' : due.cls}` }, due.txt) : null, t.priority === 'low' ? h('span', null, '낮음') : null) : null,
-    last ? h('span', { class: 'last' }, last.by === 'claude' ? h('span', { class: 'by' }, 'AI') : null, last.text) : null);
+    null);
+  if (last) el.title = (last.by === 'claude' ? '[AI] ' : '') + last.text;
   el.addEventListener('dragstart', e => { e.dataTransfer.setData('text/plain', t.id); e.dataTransfer.effectAllowed = 'move'; el.classList.add('dragging'); });
   el.addEventListener('dragend', () => el.classList.remove('dragging'));
   return el;
@@ -297,7 +298,7 @@ function renderDrawer(fresh) {
   scrimEl = h('div', { class: 'scrim', onclick: closeDrawer });
   const bind = (field, el, tf = v => v) => {
     let timer;
-    const go = () => { clearTimeout(timer); const v = tf(el.value), cur = find(S.tasks, t.id); if (cur && (cur[field] ?? '') !== v) patchTask(t.id, { [field]: v }, `"${cur.title}" ${field === 'title' ? '제목' : field === 'detail' ? '내용' : field === 'due' ? '마감일' : field === 'priority' ? '중요도' : '분류'} 수정`); };
+    const go = () => { clearTimeout(timer); const v = tf(el.value), cur = find(S.tasks, t.id); if (cur && (cur[field] ?? '') !== v) patchTask(t.id, { [field]: v }, `"${cur.title}" ${field === 'title' ? '제목' : field === 'detail' ? '내용' : field === 'due' ? '마감일' : field === 'start' ? '시작일' : field === 'priority' ? '중요도' : '분류'} 수정`); };
     el.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(go, 900); });
     el.addEventListener('change', go); el.addEventListener('blur', go);
   };
@@ -305,6 +306,7 @@ function renderDrawer(fresh) {
   const fit = () => { title.style.height = 'auto'; title.style.height = title.scrollHeight + 'px'; };
   title.addEventListener('input', fit); title.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); title.blur(); } });
   bind('title', title, v => v.trim());
+  const start = h('input', { type: 'date', id: 'f-start' }); start.value = t.start || ''; bind('start', start);
   const due = h('input', { type: 'date', id: 'f-due' }); due.value = t.due || ''; bind('due', due);
   const pri = h('select', { id: 'f-pri' }, Object.entries(PRI).map(([k, v]) => h('option', { value: k }, v))); pri.value = t.priority || 'normal'; bind('priority', pri);
   const area = h('input', { id: 'f-area', placeholder: '예: 서버, 라운지', list: 'areas', autocomplete: 'off' }); area.value = t.area || ''; bind('area', area, v => v.trim());
@@ -318,6 +320,7 @@ function renderDrawer(fresh) {
       h('button', { class: 'btn icon-btn ghost', type: 'button', 'aria-label': '닫기', onclick: closeDrawer }, '✕')),
     h('div', { class: 'dr-body' }, title, h('div', { class: 'statusrow', id: 'statusrow' }),
       h('div', { class: 'fields' },
+        h('div', { class: 'field' }, h('label', { for: 'f-start' }, '시작일'), start),
         h('div', { class: 'field' }, h('label', { for: 'f-due' }, '마감일'), due),
         h('div', { class: 'field' }, h('label', { for: 'f-pri' }, '중요도'), pri),
         h('div', { class: 'field' }, h('label', { for: 'f-area' }, '분류'), area, areas)),
