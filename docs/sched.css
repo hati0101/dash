@@ -5,7 +5,7 @@
   --ink: #eeeeea; --ink-2: #b4b3ad; --ink-3: #807f79; --ink-4: #5d5c57;
   --accent: #6cc3a6; --accent-ink: #8fd8bf; --accent-soft: rgba(108,195,166,.14); --on-accent: #07241a;
   --brand-1: #ff8a4c; --brand-2: #e2531f; --focus: #8fb8ff;
-  --todo: #8d8b85; --doing: #4a95ec; --review: #f2ad22; --hold: #a08cf0; --done: #2fb36b; --late: #ec5d5d;
+  --todo: #8d8b85; --screening: #59c5ce; --doing: #4a95ec; --review: #f2ad22; --hold: #a08cf0; --done: #2fb36b; --late: #ec5d5d;
   --scrim: rgba(0,0,0,.5); --shadow: 0 20px 50px rgba(0,0,0,.45); --wash: rgba(12,13,15,.88);
   --font: "Pretendard Variable", Pretendard, "Malgun Gothic", "Apple SD Gothic Neo", "Segoe UI", system-ui, sans-serif;
   --mono: "JetBrains Mono", "D2Coding", "Cascadia Mono", Consolas, ui-monospace, monospace;
@@ -17,7 +17,7 @@
   --line: rgba(20,20,20,.08); --line-2: rgba(20,20,20,.15);
   --ink: #161614; --ink-2: #4c4b47; --ink-3: #75746e; --ink-4: #a09f98;
   --accent: #1e9a74; --accent-ink: #137556; --accent-soft: rgba(30,154,116,.12); --on-accent: #ffffff;
-  --focus: #2a78d6; --todo: #7a7872; --doing: #2a78d6; --review: #c98500; --hold: #6a55c9; --done: #1d8f4f; --late: #d03b3b;
+  --focus: #2a78d6; --todo: #7a7872; --screening: #13757d; --doing: #2a78d6; --review: #c98500; --hold: #6a55c9; --done: #1d8f4f; --late: #d03b3b;
   --scrim: rgba(20,20,20,.25); --shadow: 0 16px 40px rgba(20,25,35,.12); --wash: rgba(239,238,233,.9);
   color-scheme: light;
 }
@@ -141,7 +141,7 @@ button { cursor: pointer; background: none; border: 0; padding: 0; }
 .f-title { width: 100%; font-size: 19px; font-weight: 700; letter-spacing: -.01em; background: none; border: 1px solid transparent; border-radius: 9px; padding: 6px 8px; margin: -6px -8px 0; resize: none; overflow: hidden; line-height: 1.4; outline: none; }
 .f-title:hover { background: var(--hover); }
 .f-title:focus { border-color: var(--line-2); background: var(--raise); }
-.stseg { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; background: var(--raise); border: 1px solid var(--line); border-radius: 11px; padding: 3px; }
+.stseg { display: grid; grid-template-columns: repeat(auto-fit, minmax(70px, 1fr)); gap: 4px; background: var(--raise); border: 1px solid var(--line); border-radius: 11px; padding: 3px; }
 .stseg button { display: flex; align-items: center; justify-content: center; gap: 5px; height: 30px; border-radius: 8px; font-size: 11.5px; white-space: nowrap; color: var(--ink-3); transition: background .12s, color .12s; min-width: 0; }
 .stseg button:hover { color: var(--ink); }
 .stseg button[aria-pressed="true"] { background: var(--raise-2); color: var(--ink); font-weight: 600; box-shadow: inset 0 0 0 1px var(--c); }
@@ -360,3 +360,21 @@ body.resizing * { cursor: col-resize !important; }
 /* 넓은 화면에서 목록 2열(왼쪽 칸 위→아래, 다음 오른쪽 칸) */
 .cols { columns: 2 560px; column-gap: 28px; }
 .cols > .row { break-inside: avoid; }
+
+/* 착수 전 안건 선별 */
+.screening-tools { margin: 0 20px 8px; padding: 12px 14px; border: 1px solid var(--line-2); border-radius: 10px; background: var(--raise); display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.screening-tools p { flex: 1 1 260px; margin: 0; font-size: 13px; line-height: 1.6; color: var(--ink-2); }
+.screening-tools .btn, .screen-decisions .btn, .screening-panel > .btn { min-height: 44px; }
+.row .screen-next { min-height: 32px; padding: 0 8px; font: 12px var(--font); color: var(--accent-ink); }
+.screening-panel { padding: 14px; background: var(--raise); border: 1px solid var(--line-2); border-radius: 11px; display: flex; flex-direction: column; gap: 12px; }
+.screening-panel h3 { margin: 0; font-size: 15px; }
+.screening-panel p { margin: 0; font-size: 13px; line-height: 1.6; color: var(--ink-2); }
+.screen-field { display: flex; flex-direction: column; gap: 6px; }
+.screen-field label { font-size: 13px; font-weight: 600; color: var(--ink-2); }
+.screen-field textarea, .screen-field select { width: 100%; min-width: 0; border: 1px solid var(--line-2); border-radius: 8px; background: var(--bg); padding: 9px 10px; color: var(--ink); font: 14px/1.6 var(--font); }
+.screen-field textarea { resize: vertical; min-height: 70px; }
+.screen-field textarea:focus, .screen-field select:focus { outline: 2px solid var(--focus); outline-offset: 2px; }
+.screen-decisions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.screen-decisions > span { width: 100%; font-size: 13px; color: var(--ink-2); }
+@media (max-width: 860px) { .e-cols { display: block; } .e-left { overflow: visible; } }
+@media (max-width: 760px) { .screening-tools { margin-inline: 16px; } .row .row-area { display: none; } .row .screen-next { min-height: 44px; } .stseg button { min-height: 44px; } }
