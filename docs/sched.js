@@ -842,29 +842,47 @@ function showTokenBox(reason) {
   box.hidden = false;
 }
 
-// ---------- 운영 관리: 연결 비밀은 작업실 키로 복호화하고 URL/저장소에 남기지 않는다.
+// ---------- 운영 관리: 현재 작업실 안에서 기존 관리 화면을 연다.
+let operations = null;
+function backToWorkspace() {
+  if (!operations) return;
+  operations.panel.hidden = true;
+  $('#app > .list').hidden = false;
+}
 async function openOperations() {
-  const popup = window.open('about:blank', '_blank');
-  if (!popup) { toast('운영 관리 창을 열 수 없습니다. 팝업을 허용해 주세요.'); return; }
-  popup.document.title = 'REAL 운영 관리';
-  popup.document.body.textContent = '작업실 관리 연결을 준비하고 있습니다.';
-  let listener, timer;
-  const cleanup = () => { if (listener) window.removeEventListener('message', listener); clearTimeout(timer); };
+  if (operations) { operations.panel.hidden = false; $('#app > .list').hidden = true; return; }
+  closeTask();
+  const frame = h('iframe', { title: '운영 관리 — 공지 · 출석 · 주간 한정 의상', class: 'ops-frame', referrerpolicy: 'no-referrer' });
+  const message = h('p', { class: 'ops-message', role: 'status' }, '운영 관리에 연결하고 있습니다.');
+  const panel = h('section', { class: 'ops-panel' },
+    h('div', { class: 'ops-heading' }, h('h1', null, '운영 관리'), h('span', null, '공지 · 출석 이벤트 · 주간 한정 의상'), h('button', { class: 'btn', onclick: () => { if (confirm('저장하지 않은 내용은 사라집니다. 운영 관리에 다시 연결할까요?')) { cleanup(); panel.remove(); operations = null; openOperations(); } } }, '다시 연결'), h('button', { class: 'btn', onclick: backToWorkspace }, '작업실로 돌아가기')),
+    message, frame);
+  $('#app').append(panel); $('#app > .list').hidden = true;
+  let listener, timer, observer, cfg;
+  const theme = () => { if (cfg) frame.contentWindow?.postMessage({ type: 'real-ops-theme', theme: document.documentElement.dataset.theme || 'dark' }, cfg.origin); };
+  const cleanup = () => { if (listener) window.removeEventListener('message', listener); clearTimeout(timer); observer?.disconnect(); };
+  operations = { panel, frame };
   try {
     const response = await fetch('./ops.enc.json', { cache: 'no-store' });
     if (!response.ok) throw Error('운영 관리 연결이 아직 설치되지 않았습니다.');
-    const cfg = await openEnv(await response.json(), S.key);
+    cfg = await openEnv(await response.json(), S.key);
     const endpoint = new URL(cfg.origin);
     if (endpoint.protocol !== 'https:' || endpoint.origin !== cfg.origin || !/^[a-f0-9]{64}$/.test(cfg.token)) throw Error('운영 관리 연결 정보가 올바르지 않습니다.');
     listener = e => {
-      if (e.source !== popup || e.origin !== endpoint.origin || e.data?.type !== 'real-ops-ready') return;
-      cleanup(); popup.postMessage({ type: 'real-ops-connect', token: cfg.token }, endpoint.origin);
+      if (e.source !== frame.contentWindow || e.origin !== cfg.origin) return;
+      if (e.data?.type === 'real-ops-ready') frame.contentWindow.postMessage({ type: 'real-ops-connect', token: cfg.token }, cfg.origin);
+      if (e.data?.type === 'real-ops-theme-request') { clearTimeout(timer); message.hidden = true; theme(); }
+      if (e.data?.type === 'real-ops-back') backToWorkspace();
+      if (e.data?.type === 'real-ops-closed') { backToWorkspace(); cleanup(); panel.remove(); operations = null; }
     };
     window.addEventListener('message', listener);
-    timer = setTimeout(() => { cleanup(); toast('운영 관리 연결 시간이 지났습니다. 다시 열어 주세요.'); }, 30000);
-    popup.location.replace(endpoint.origin + '/ops/launch');
-  } catch (e) { cleanup(); popup.close(); toast(e.message || '운영 관리 연결에 실패했습니다.'); }
+    frame.addEventListener('load', theme);
+    observer = new MutationObserver(theme); observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+    timer = setTimeout(() => { message.textContent = '연결하지 못했습니다. 브라우저의 사이트 차단 설정을 확인한 뒤 작업실을 새로고침해 주세요.'; }, 30000);
+    frame.src = cfg.origin + '/ops/launch';
+  } catch (e) { cleanup(); message.textContent = e.message || '운영 관리 연결에 실패했습니다.'; }
 }
+document.addEventListener('click', e => { if (e.target.closest?.('#side .nav, #side .new-btn')) backToWorkspace(); });
 
 // ---------- 잠금
 async function boot() {

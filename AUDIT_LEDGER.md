@@ -54,3 +54,5 @@ F-1~F-8 수정 및 ui-r3 통합. 보존·관문·알림·대행·경로·반복 
 
 ## 2026-10-05 — 작업실 운영 관리 연결
 현재 선별 기능을 보존하고 운영 관리 버튼, 분류 접기/스크롤, 고정 하단 메뉴를 추가했습니다. 연결 봉투만 AES-GCM 암호문으로 게시하며 비밀번호·연결 토큰·서버 설정은 평문으로 게시하지 않습니다. 기존 관리 화면을 별도 인증 세션으로 연결합니다. 병합본 19항목 격리 검사, 기존 선별 UI 및 공개 요약 회귀 PASS. 운영 HTTPS 신뢰 체인 확인. 실제 공지·출석·의상 쓰기 시험은 실행하지 않았습니다. Pages 반영은 게시 후 별도 확인합니다.
+
+2026-10-05 WORKSPACE_ADMIN_EMBEDDED. User requested administration inside the workspace and matching theme. Replaced popup with retained iframe, exact-origin handshake and frame restriction, dark/light theme sync, responsive forms and reconnect with unsaved-change confirmation. Isolated Edge test PASS22 including all three editors, partitioned session, CSRF, expiry/reconnect and logout. Existing screening and Discord summary regressions PASS. Independent security review resolved reconnect finding. Backend remains private; no operating content or database writes in tests.
