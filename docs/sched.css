@@ -378,3 +378,22 @@ body.resizing * { cursor: col-resize !important; }
 .screen-decisions > span { width: 100%; font-size: 13px; color: var(--ink-2); }
 @media (max-width: 860px) { .e-cols { display: block; } .e-left { overflow: visible; } }
 @media (max-width: 760px) { .screening-tools { margin-inline: 16px; } .row .row-area { display: none; } .row .screen-next { min-height: 44px; } .stseg button { min-height: 44px; } }
+
+/* 운영 관리는 고정하고 긴 메뉴만 스크롤한다. */
+.side { overflow: hidden; min-height: 0; }
+.side-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+.side-scroll > * { flex-shrink: 0; }
+.side .side-scroll { flex-shrink: 1; }
+.area-fold summary { cursor: pointer; padding: 12px 8px; min-height: 44px; color: var(--ink-2); }
+.area-list { max-height: 240px; overflow-y: auto; }
+.ops-btn { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 12px; border: 1px solid var(--line-2); border-radius: 10px; background: var(--raise); color: var(--ink); font: inherit; font-weight: 650; text-align: left; cursor: pointer; margin-top: 8px; min-height: 44px; }
+.ops-btn small { flex-basis: 100%; font-weight: 400; font-size: 12px; color: var(--ink-2); }
+.ops-btn:focus-visible, .area-fold summary:focus-visible { outline: 2px solid var(--accent, #85dac2); outline-offset: 2px; }
+.side-foot { flex-shrink: 0; margin-top: 8px; }
+@media (max-width: 760px) {
+  .side { overflow: visible; }
+  .side-scroll { flex-basis: 100%; max-height: 240px; }
+  .side-scroll .sec { display: block; }
+  .ops-btn { flex: 1; margin-top: 4px; }
+  .side .side-foot { display: flex; flex-basis: 100%; }
+}

@@ -383,11 +383,14 @@ function renderSide() {
   $('#side').replaceChildren(
     h('div', { class: 'brand' }, h('img', { class: 'mark-img', src: 'brand-mark.png?v=s7', alt: '', width: 34, height: 34 }), h('div', null, h('b', null, 'REAL 작업실'), h('small', null, (() => { const d = new Date(); return `${d.getMonth() + 1}월 ${d.getDate()}일 ${DAYS[d.getDay()]}요일`; })()))),
     h('button', { class: 'new-btn', type: 'button', onclick: () => openNewModal() }, icon('plus', 16), '새 작업', h('span', { class: 'kbd' }, 'N')),
+    h('div', { class: 'side-scroll' },
     h('div', { class: 'sec' }, '상태'),
     ...STATUS.map(s => dropTarget(navBtn(s.name, cnt(s.k), S.view === 'all' && !S.day && S.status === s.k && !S.area, pick({ view: 'all', status: s.k, area: null }), ring(s.k)), ids => bulkPatch(ids, { status: s.k }, s.name))),
     navBtn('전체', S.tasks.length, S.view === 'all' && !S.day && !S.status && !S.area, pick({ view: 'all', status: null, area: null }), h('span', { class: 'ico' }, icon('all', 15))),
     navBtn('휴지통', S.trash.length, S.view === 'trash', pick({ view: 'trash', status: null, area: null }), h('span', { class: 'ico' }, icon('trash', 15))),
-    h('div', { class: 'sec' }, '분류'),
+    h('details', { class: 'area-fold', open: S.area || store.get('sched.areasOpen', false), ontoggle: e => store.set('sched.areasOpen', e.target.open) },
+    h('summary', null, `분류 · ${areas.size}`),
+    h('div', { class: 'area-list' },
     ...[...areas.entries()].sort((a, b) => b[1] - a[1]).map(([a, n]) => {
       const b = navBtn(a, n, S.view === 'all' && !S.day && S.area === a, pick({ view: 'all', status: null, area: a }), h('span', { class: 'ico' }, icon('tag', 14)));
       b.title = '더블클릭: 이름 바꾸기 · 작업을 끌어 놓으면 이 분류로';
@@ -400,12 +403,13 @@ function renderSide() {
         b.replaceWith(inp); inp.focus(); inp.select();
       });
       return dropTarget(b, ids => bulkPatch(ids, { area: a === '분류 없음' ? '' : a }, `분류 ${a}`));
-    }),
+    }))),
     h('div', { class: 'sec sec-row' }, h('span', null, '디스코드'), h('button', { class: 'pub-btn', type: 'button', title: '공개 작업을 상태별로 개발 현황 채널에 발행', onclick: openPublishModal }, '발행')),
     navBtn('발행 대상', S.tasks.filter(t => t.public === true && SMAP[t.status]).length, S.view === 'pubdoing', pick({ view: 'pubdoing', status: null, area: null }), h('span', { class: 'ico disc' }, '●')),
     navBtn('공개 체크 전체', S.tasks.filter(t => t.public).length, S.view === 'pub', pick({ view: 'pub', status: null, area: null }), h('span', { class: 'ico disc' }, '○')),
     h('div', { class: 'sec' }, '사용량 · 개발컴'),
-    h('div', { class: 'usage', id: 'usage' }),
+    h('div', { class: 'usage', id: 'usage' })),
+    h('button', { class: 'ops-btn', type: 'button', onclick: openOperations }, icon('settings', 18), '운영 관리', h('small', null, '공지 · 출석 · 주간 의상')),
     h('div', { class: 'side-foot' }, h('div', { class: `sync ${S.syncKind || ''}`, id: 'sync', title: S.syncText || '' }, h('span', null, S.syncText || '')), h('span', { class: 'grow' }),
       h('button', { class: 'ibtn', type: 'button', title: '저장 설정(GitHub 토큰)', 'aria-label': '저장 설정', onclick: () => { const b = $('#tokenbox'); if (b.hidden) showTokenBox(); else b.hidden = true; } }, icon('settings', 16)),
       h('button', { class: 'ibtn', type: 'button', title: '밝기 전환', 'aria-label': '밝기 전환', onclick: () => { const r = document.documentElement, n = r.dataset.theme === 'light' ? 'dark' : 'light'; r.dataset.theme = n; store.set('theme', n); } }, icon('theme', 16)),
@@ -836,6 +840,30 @@ function showTokenBox(reason) {
   };
   box.replaceChildren(h('span', null, (reason ? reason + ' — ' : '') + '변경을 저장하려면 hati0101/dash 저장소에 Contents: Read and write 권한이 있는 GitHub 토큰이 필요합니다.'), inp, save);
   box.hidden = false;
+}
+
+// ---------- 운영 관리: 연결 비밀은 작업실 키로 복호화하고 URL/저장소에 남기지 않는다.
+async function openOperations() {
+  const popup = window.open('about:blank', '_blank');
+  if (!popup) { toast('운영 관리 창을 열 수 없습니다. 팝업을 허용해 주세요.'); return; }
+  popup.document.title = 'REAL 운영 관리';
+  popup.document.body.textContent = '작업실 관리 연결을 준비하고 있습니다.';
+  let listener, timer;
+  const cleanup = () => { if (listener) window.removeEventListener('message', listener); clearTimeout(timer); };
+  try {
+    const response = await fetch('./ops.enc.json', { cache: 'no-store' });
+    if (!response.ok) throw Error('운영 관리 연결이 아직 설치되지 않았습니다.');
+    const cfg = await openEnv(await response.json(), S.key);
+    const endpoint = new URL(cfg.origin);
+    if (endpoint.protocol !== 'https:' || endpoint.origin !== cfg.origin || !/^[a-f0-9]{64}$/.test(cfg.token)) throw Error('운영 관리 연결 정보가 올바르지 않습니다.');
+    listener = e => {
+      if (e.source !== popup || e.origin !== endpoint.origin || e.data?.type !== 'real-ops-ready') return;
+      cleanup(); popup.postMessage({ type: 'real-ops-connect', token: cfg.token }, endpoint.origin);
+    };
+    window.addEventListener('message', listener);
+    timer = setTimeout(() => { cleanup(); toast('운영 관리 연결 시간이 지났습니다. 다시 열어 주세요.'); }, 30000);
+    popup.location.replace(endpoint.origin + '/ops/launch');
+  } catch (e) { cleanup(); popup.close(); toast(e.message || '운영 관리 연결에 실패했습니다.'); }
 }
 
 // ---------- 잠금
