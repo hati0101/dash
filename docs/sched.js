@@ -206,7 +206,7 @@ function createTask(f) {
   mutate(list => { if (!find(list, id)) list.push(clone(t)); }, `추가 "${t.title || '새 작업'}"`);
   return id;
 }
-const FIELD = { title: '제목', detail: '내용', start: '시작일', due: '마감일', priority: '중요도', area: '분류', status: '상태', public: '디스코드 공개', pubTitle: '공개 제목' };
+const FIELD = { title: '제목', detail: '내용', start: '시작일', due: '마감일', priority: '중요도', area: '분류', status: '상태', public: '홈페이지 공개', pubTitle: '공개 제목' };
 Object.assign(FIELD, Object.fromEntries(SCREEN_FIELDS.map(([k, label]) => [k, '선별 ' + label])), { screenRecommend: '선별 추천' });
 function fmtVal(f, v) {
   if (f === 'screenRecommend') return SCREEN_RECOMMEND[v] || '미정';
@@ -404,7 +404,7 @@ function renderSide() {
       });
       return dropTarget(b, ids => bulkPatch(ids, { area: a === '분류 없음' ? '' : a }, `분류 ${a}`));
     }))),
-    h('div', { class: 'sec sec-row' }, h('span', null, '디스코드'), h('button', { class: 'pub-btn', type: 'button', title: '공개 작업을 상태별로 개발 현황 채널에 발행', onclick: openPublishModal }, '발행')),
+    h('div', { class: 'sec sec-row' }, h('span', null, '홈페이지'), h('button', { class: 'pub-btn', type: 'button', title: '공개 작업을 상태별로 홈페이지 개발현황에 발행', onclick: openPublishModal }, '발행')),
     navBtn('발행 대상', S.tasks.filter(t => t.public === true && SMAP[t.status]).length, S.view === 'pubdoing', pick({ view: 'pubdoing', status: null, area: null }), h('span', { class: 'ico disc' }, '●')),
     navBtn('공개 체크 전체', S.tasks.filter(t => t.public).length, S.view === 'pub', pick({ view: 'pub', status: null, area: null }), h('span', { class: 'ico disc' }, '○')),
     h('div', { class: 'sec' }, '사용량 · 개발컴'),
@@ -418,8 +418,8 @@ function renderSide() {
 function viewTitle() {
   if (S.day) { const d = new Date(S.day + 'T00:00'); return `${d.getMonth() + 1}월 ${d.getDate()}일 (${DAYS[d.getDay()]})`; }
   if (S.view === 'trash') return '휴지통';
-  if (S.view === 'pubdoing') return '디스코드 발행 대상';
-  if (S.view === 'pub') return '디스코드 공개 체크';
+  if (S.view === 'pubdoing') return '홈페이지 발행 대상';
+  if (S.view === 'pub') return '홈페이지 공개 체크';
   if (S.view === 'today') return '오늘';
   if (S.view === 'week') return '이번 주 마감';
   if (S.area) return S.area;
@@ -445,7 +445,7 @@ function rowEl(t) {
     } },
     pick, st,
     h('span', { class: `flag${t.priority === 'low' ? ' low' : ''}`, title: t.priority ? PRI[t.priority] : '' }, t.priority === 'high' ? '▲' : t.priority === 'low' ? '▽' : ''),
-    h('span', { class: 'title' }, t.title || '(제목 없음)', t.public ? h('span', { class: 'pub-badge', title: '디스코드 공개' + (t.pubTitle ? ' · ' + t.pubTitle : '') }, '공개') : null),
+    h('span', { class: 'title' }, t.title || '(제목 없음)', t.public ? h('span', { class: 'pub-badge', title: '홈페이지 공개' + (t.pubTitle ? ' · ' + t.pubTitle : '') }, '공개') : null),
     S.group !== 'area' && t.area ? h('span', { class: 'tag row-area' }, t.area) : h('span', { class: 'row-area' }),
     h('span', { class: `note${last && last.by === 'claude' ? ' ai' : ''}`, title: last ? last.text : '' }, last ? '●' : ''),
     h('span', { class: 'dt' }, (t.status || 'todo') === 'todo' ? h('button', { class: 'btn screen-next', type: 'button', 'aria-label': `${t.title || '안건'} 선별로 이동`, onclick: e => { e.stopPropagation(); setStatus(t.id, 'screening'); } }, '선별로') : t.status === 'screening' ? h('button', { class: 'btn screen-next', type: 'button', 'aria-label': `${t.title || '안건'} 선별 판단`, onclick: e => { e.stopPropagation(); openTask(t.id); } }, '판단하기') : null),
@@ -624,10 +624,10 @@ function renderEdit(fresh) {
           h('label', { for: 'f-start' }, '시작일'), inp('f-start', 'date', t.start, 'start', '시작일'),
           h('label', { for: 'f-pri' }, '중요도'), pri,
           h('label', { for: 'f-area' }, '분류'), h('div', { class: 'area-cell' }, area, newArea),
-          h('label', { for: 'f-pub' }, '디스코드'), (() => {
+          h('label', { for: 'f-pub' }, '홈페이지'), (() => {
             const cb = h('input', { type: 'checkbox', id: 'f-pub', class: 'pub-cb' }); cb.checked = !!t.public;
-            cb.addEventListener('change', () => patchTask(t.id, { public: cb.checked }, `"${t.title}" 디스코드 ${cb.checked ? '공개' : '비공개'}`));
-            return h('label', { class: 'pub-row', for: 'f-pub' }, cb, h('span', null, '상태와 관계없이 개발 현황 채널에 공개'));
+            cb.addEventListener('change', () => patchTask(t.id, { public: cb.checked }, `"${t.title}" 홈페이지 ${cb.checked ? '공개' : '비공개'}`));
+            return h('label', { class: 'pub-row', for: 'f-pub' }, cb, h('span', null, '상태와 관계없이 홈페이지 개발현황에 공개'));
           })(),
           h('label', { for: 'f-pubtitle' }, '공개 제목'), (() => { const el = inp('f-pubtitle', 'text', t.pubTitle, 'pubTitle', '공개 제목', v => v.trim()); el.placeholder = '비우면 제목 그대로'; return el; })(),
           ),
@@ -712,8 +712,8 @@ function renderBulk() {
     h('span', { class: 'bulk-l' }, '진행도'),
     ...STATUS.map(s => h('button', { class: 'bulk-st', type: 'button', title: `${n}건을 ${s.name}(으)로`, onclick: () => bulkStatus(s.k) }, ring(s.k, '12px'), s.name)),
     h('span', { class: 'bulk-sep' }),
-    h('button', { class: 'bulk-st', type: 'button', onclick: () => bulkPatch([...S.sel], { public: true }, '디스코드 공개') }, '공개'),
-    h('button', { class: 'bulk-st', type: 'button', onclick: () => bulkPatch([...S.sel], { public: false }, '디스코드 비공개') }, '비공개'),
+    h('button', { class: 'bulk-st', type: 'button', onclick: () => bulkPatch([...S.sel], { public: true }, '홈페이지 공개') }, '공개'),
+    h('button', { class: 'bulk-st', type: 'button', onclick: () => bulkPatch([...S.sel], { public: false }, '홈페이지 비공개') }, '비공개'),
     h('span', { class: 'bulk-sep' }),
     areaPicker(),
     h('span', { class: 'bulk-sep' }),
@@ -742,26 +742,30 @@ function discordText() {
   });
   return { text: head + summary + '\n\n' + blocks.join('\n\n'), count: rows.length };
 }
-async function requestPublish(text, count) {
+function publicDevelopmentItems() {
+  return S.tasks.filter(t => t.public === true && SMAP[t.status]).map(t => ({ title: (t.pubTitle || t.title || '').trim().replace(/[\r\n]+/g, ' ').slice(0,500) || '(제목 없음)' }));
+}
+async function requestPublish(count, items) {
   if (!S.token) { showTokenBox('발행하려면 저장 토큰이 필요합니다'); return false; }
-  const url = `https://api.github.com/repos/${REPO}/contents/docs/discord-publish.json`, H = { Authorization: `Bearer ${S.token}`, Accept: 'application/vnd.github+json' };
+  const url = `https://api.github.com/repos/${REPO}/contents/docs/portal-development.json`, H = { Authorization: `Bearer ${S.token}`, Accept: 'application/vnd.github+json' };
   let sha;
   try { const r = await fetch(url + `?ref=${BRANCH}&t=${Date.now()}`, { headers: H, cache: 'no-store' }); if (r.ok) sha = (await r.json()).sha; } catch { /* 처음이면 없음 */ }
-  const req = { v: 1, id: newId().replace('W-', 'P-'), requested_at: new Date().toISOString(), count, content: text };
+  const req = { v: 1, id: newId().replace('W-', 'P-'), requested_at: new Date().toISOString(), count, items };
   const bytes = new TextEncoder().encode(JSON.stringify(req, null, 2) + '\n');
-  const r = await fetch(url, { method: 'PUT', headers: { ...H, 'Content-Type': 'application/json' }, body: JSON.stringify({ message: `디스코드 발행 요청 (${count}건)`, content: b64.enc(bytes), sha, branch: BRANCH }) });
+  const r = await fetch(url, { method: 'PUT', headers: { ...H, 'Content-Type': 'application/json' }, body: JSON.stringify({ message: `홈페이지 발행 요청 (${count}건)`, content: b64.enc(bytes), sha, branch: BRANCH }) });
   if (!r.ok) { toast(`발행 요청 실패 (GitHub ${r.status})`); return false; }
   return true;
 }
 function openPublishModal() {
   if (modalEl) return;
-  const { text, count } = discordText();
+  const items = publicDevelopmentItems(), count = items.length;
+  const text = items.map(item => '- ' + item.title).join('\n') || '지금 공개 중인 개발 항목이 없습니다.';
   const pre = h('pre', { class: 'pub-pre' }, text);
   const go = h('button', { class: 'btn primary', type: 'button' }, '발행');
-  go.onclick = async () => { go.disabled = true; go.textContent = '보내는 중…'; if (await requestPublish(text, count)) { closeNewModal(); toast(`발행 요청을 보냈습니다 (${count}건) · 서버컴 봇이 디스코드에 반영합니다`); } else { go.disabled = false; go.textContent = '발행'; } };
+  go.onclick = async () => { go.disabled = true; go.textContent = '보내는 중…'; if (await requestPublish(count, items)) { closeNewModal(); toast(`발행 요청을 보냈습니다 (${count}건) · 홈페이지 개발현황에 반영합니다`); } else { go.disabled = false; go.textContent = '발행'; } };
   const card = h('div', { class: 'm-card', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'p-h' },
-    h('div', { class: 'm-head' }, h('h2', { id: 'p-h' }, '디스코드 발행'), h('span', { class: 'grow' }), h('button', { class: 'ibtn', type: 'button', 'aria-label': '닫기', onclick: closeNewModal }, icon('close', 16))),
-    h('div', { class: 'm-body' }, h('div', { class: 'm-l' }, `개발 현황 채널의 메시지 하나를 이 글로 바꿉니다 · 전체 상태 · 공개 ${count}건`), pre),
+    h('div', { class: 'm-head' }, h('h2', { id: 'p-h' }, '홈페이지 발행'), h('span', { class: 'grow' }), h('button', { class: 'ibtn', type: 'button', 'aria-label': '닫기', onclick: closeNewModal }, icon('close', 16))),
+    h('div', { class: 'm-body' }, h('div', { class: 'm-l' }, `홈페이지 개발현황의 항목 이름 목록을 갱신합니다 · 전체 상태 · 공개 ${count}건`), pre),
     h('div', { class: 'm-foot' }, h('span', { class: 'grow' }), h('button', { class: 'btn', type: 'button', onclick: closeNewModal }, '취소'), go));
   modalEl = h('div', { class: 'm-scrim', onmousedown: e => { if (e.target === modalEl) closeNewModal(); } }, card);
   modalEl.addEventListener('keydown', e => { e.stopPropagation(); if (e.key === 'Escape') closeNewModal(); });
@@ -785,7 +789,7 @@ function openNewModal() {
     draw(); return box; };
   const start = h('input', { id: 'm-start', type: 'date' }); start.value = todayStr();
   const pub = h('input', { id: 'm-pub', type: 'checkbox', class: 'pub-cb' });
-  const pubTitle = h('input', { id: 'm-pubtitle', placeholder: '디스코드에 보일 제목(비우면 제목 그대로)', autocomplete: 'off', hidden: true });
+  const pubTitle = h('input', { id: 'm-pubtitle', placeholder: '홈페이지에 보일 제목(비우면 제목 그대로)', autocomplete: 'off', hidden: true });
   pub.onchange = () => { pubTitle.hidden = !pub.checked; };
   const cont = h('input', { id: 'm-cont', type: 'checkbox' }); cont.checked = !!keep.cont;
   const err = h('div', { class: 'm-err', role: 'alert' });
@@ -811,7 +815,7 @@ function openNewModal() {
         h('div', null, h('label', { class: 'm-l', for: 'm-start' }, '시작일'), start)),
       h('div', { class: 'm-l' }, '중요도'), seg([['high', '높음', h('span', { class: 'flag' }, '▲')], ['normal', '보통'], ['low', '낮음']], 'priority'),
       h('div', { class: 'm-l' }, '상태'), seg(STATUS.map(s => [s.k, s.name, ring(s.k, '12px')]), 'status'),
-      h('label', { class: 'm-pub', for: 'm-pub' }, pub, '디스코드 공개(모든 상태가 개발 현황 채널에 보임)'), pubTitle),
+      h('label', { class: 'm-pub', for: 'm-pub' }, pub, '홈페이지 공개(모든 상태가 홈페이지 개발현황에 보임)'), pubTitle),
     h('div', { class: 'm-foot' }, h('label', { class: 'm-cont', for: 'm-cont' }, cont, '계속 추가'), h('span', { class: 'grow' }),
       h('span', { class: 'kbd' }, 'Ctrl+Enter'), h('button', { class: 'btn', type: 'button', onclick: closeNewModal }, '취소'), h('button', { class: 'btn primary', type: 'button', onclick: submit }, '추가')));
   modalEl = h('div', { class: 'm-scrim', onmousedown: e => { if (e.target === modalEl) closeNewModal(); } }, card);

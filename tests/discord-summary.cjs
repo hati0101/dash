@@ -13,3 +13,5 @@ assert.equal(render([]).count,0);
 r=render(keys.flatMap(status=>Array.from({length:150},(_,i)=>({status,public:true,title:'가'.repeat(100)+i}))));assert.equal(r.count,1050);assert(r.text.length<=2000);for(const label of labels)assert(r.text.includes('['+label+'] 150건'));assert(r.text.includes('생략'));
 console.log('PASS: seven status groups, private screening fields excluded, public title, empty state, 1050-item length limit');
 console.log(render(tasks).text);
+
+const publicItems=vm.runInNewContext(status+'\nconst S={tasks: '+JSON.stringify(tasks)+'};\n'+fn+'\npublicDevelopmentItems()');assert.equal(publicItems.length,7);assert(!JSON.stringify(publicItems).includes('PRIVATE'));assert(!JSON.stringify(publicItems).includes('INVALID'));assert.equal(Object.keys(publicItems[0]).join(),'title');assert.equal(publicItems[0].title,'공개용 제목');console.log('PASS: website publication exports only explicit public titles, no private detail/log/status fields');
